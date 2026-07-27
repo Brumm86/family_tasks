@@ -1,0 +1,17 @@
+complete_task:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+    member_id:
+      required: false
+      selector:
+        text:
+
+skip_task:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:

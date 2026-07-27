@@ -1,0 +1,80 @@
+{
+  "title": "Family Tasks",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Family Tasks",
+        "description": "Family Tasks manages tasks and family members itself via Settings; this just sets a display name once.",
+        "data": {
+          "name": "Name"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Family Tasks can only be set up once."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "overdue_after_minutes": "Grace period before overdue (minutes)",
+          "default_rotation_strategy": "Default rotation strategy"
+        }
+      }
+    }
+  },
+  "selector": {
+    "rotation_strategy": {
+      "options": {
+        "round_robin": "Round robin",
+        "random": "Random",
+        "fixed": "Fixed assignment"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "task_status": {
+        "name": "Status"
+      },
+      "member_points": {
+        "name": "Points"
+      },
+      "member_open_tasks": {
+        "name": "Open tasks"
+      }
+    },
+    "button": {
+      "complete_task": {
+        "name": "Done"
+      }
+    }
+  },
+  "services": {
+    "complete_task": {
+      "name": "Complete task",
+      "description": "Marks the current period of a task as done and awards points to the responsible family member.",
+      "fields": {
+        "task_id": {
+          "name": "Task ID",
+          "description": "The task's ID (see the status sensor's attributes)."
+        },
+        "member_id": {
+          "name": "Member ID",
+          "description": "Optional: complete the task on behalf of a member other than the one currently assigned by rotation."
+        }
+      }
+    },
+    "skip_task": {
+      "name": "Skip task",
+      "description": "Skips the current period of a task without awarding points and without advancing the rotation.",
+      "fields": {
+        "task_id": {
+          "name": "Task ID",
+          "description": "The task's ID (see the status sensor's attributes)."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "domain": "family_tasks",
+  "name": "Family Tasks",
+  "codeowners": ["@brumm"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend"],
+  "documentation": "https://github.com/brumm/family_tasks",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/brumm/family_tasks/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

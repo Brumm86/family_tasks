@@ -1,0 +1,80 @@
+{
+  "title": "Family Tasks",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Family Tasks einrichten",
+        "description": "Family Tasks verwaltet Aufgaben und Familienmitglieder selbst über die Einstellungen; hier wird nur einmalig ein Anzeigename festgelegt.",
+        "data": {
+          "name": "Name"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Family Tasks kann nur einmal eingerichtet werden."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "overdue_after_minutes": "Karenzzeit bis überfällig (Minuten)",
+          "default_rotation_strategy": "Standard-Rotationsstrategie"
+        }
+      }
+    }
+  },
+  "selector": {
+    "rotation_strategy": {
+      "options": {
+        "round_robin": "Reihum",
+        "random": "Zufällig",
+        "fixed": "Fest zugewiesen"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "task_status": {
+        "name": "Status"
+      },
+      "member_points": {
+        "name": "Punkte"
+      },
+      "member_open_tasks": {
+        "name": "Offene Aufgaben"
+      }
+    },
+    "button": {
+      "complete_task": {
+        "name": "Erledigt"
+      }
+    }
+  },
+  "services": {
+    "complete_task": {
+      "name": "Aufgabe abschließen",
+      "description": "Markiert die aktuelle Periode einer Aufgabe als erledigt und vergibt Punkte an das zuständige Familienmitglied.",
+      "fields": {
+        "task_id": {
+          "name": "Aufgaben-ID",
+          "description": "Die ID der Aufgabe (siehe Attribute des Status-Sensors)."
+        },
+        "member_id": {
+          "name": "Mitglieds-ID",
+          "description": "Optional: erledigt die Aufgabe im Namen eines anderen Mitglieds als des turnusmäßig zugewiesenen."
+        }
+      }
+    },
+    "skip_task": {
+      "name": "Aufgabe überspringen",
+      "description": "Überspringt die aktuelle Periode einer Aufgabe ohne Punktevergabe und ohne die Rotation zu verschieben.",
+      "fields": {
+        "task_id": {
+          "name": "Aufgaben-ID",
+          "description": "Die ID der Aufgabe (siehe Attribute des Status-Sensors)."
+        }
+      }
+    }
+  }
+}
