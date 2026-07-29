@@ -54,7 +54,7 @@
   "services": {
     "complete_task": {
       "name": "Complete task",
-      "description": "Marks the current period of a task as done and awards points to the responsible family member.",
+      "description": "Marks the current period of a task as done and awards points to the responsible family member. If that member is a child, the task is only marked 'awaiting confirmation' and a confirmation task is raised for the parents instead.",
       "fields": {
         "task_id": {
           "name": "Task ID",

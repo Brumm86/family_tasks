@@ -145,6 +145,29 @@ async def test_numeric_state_trigger_task_stores_threshold(hass) -> None:
     assert task["recurrence"]["trigger"]["above"] == 80.0
 
 
+async def test_numeric_state_trigger_rejects_a_range(hass) -> None:
+    """Setting both 'above' and 'below' must be rejected - a single crossing
+    direction is required, not a from-x-to-y range."""
+    tasks = await async_create_tasks_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await tasks.async_create_item(
+            {
+                "name": "Pflanzen gießen",
+                "recurrence": {
+                    "type": "trigger",
+                    "trigger": {
+                        "kind": "numeric_state",
+                        "entity_id": "sensor.soil_moisture",
+                        "above": 10,
+                        "below": 20,
+                    },
+                },
+                "rotation": {"member_ids": ["anna"]},
+            }
+        )
+
+
 async def test_member_create_applies_defaults(hass) -> None:
     """Creating a member without person_entity_id/active still succeeds."""
     members = await async_create_members_collection(hass)
@@ -153,4 +176,22 @@ async def test_member_create_applies_defaults(hass) -> None:
 
     assert member["id"]
     assert member["active"] is True
+    assert member["role"] == "parent"
     assert "person_entity_id" not in member or member["person_entity_id"] is None
+
+
+async def test_member_create_with_child_role(hass) -> None:
+    """A member can be created with role 'child'."""
+    members = await async_create_members_collection(hass)
+
+    member = await members.async_create_item({"name": "Timmy", "role": "child"})
+
+    assert member["role"] == "child"
+
+
+async def test_member_create_rejects_unknown_role(hass) -> None:
+    """An invalid role value must be rejected."""
+    members = await async_create_members_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await members.async_create_item({"name": "Timmy", "role": "grandparent"})

@@ -54,7 +54,7 @@
   "services": {
     "complete_task": {
       "name": "Aufgabe abschließen",
-      "description": "Markiert die aktuelle Periode einer Aufgabe als erledigt und vergibt Punkte an das zuständige Familienmitglied.",
+      "description": "Markiert die aktuelle Periode einer Aufgabe als erledigt und vergibt Punkte an das zuständige Familienmitglied. Ist das zuständige Mitglied ein Kind, wird die Aufgabe zunächst nur als 'Wartet auf Bestätigung' markiert und eine Bestätigungsaufgabe für die Eltern erzeugt.",
       "fields": {
         "task_id": {
           "name": "Aufgaben-ID",

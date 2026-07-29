@@ -24,10 +24,14 @@ from .const import (
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DOMAIN,
+    MEMBER_ROLE_CHILD,
+    MEMBER_ROLE_PARENT,
+    RECURRENCE_CONFIRMATION,
     RECURRENCE_TRIGGER,
     ROTATION_STRATEGY_FIXED,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
+    TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_DONE,
     TASK_STATUS_IDLE,
     TASK_STATUS_OVERDUE,
@@ -51,7 +55,7 @@ class TaskStatusData:
     name: str
     icon: str | None
     points: int
-    status: str  # pending / overdue / done
+    status: str  # idle / pending / overdue / awaiting_confirmation / done
     period_key: str
     due_at: datetime | None
     assigned_member_id: str | None
@@ -149,6 +153,20 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
 
+        # Original (task_id, period_key) occurrences that currently have an
+        # open, not-yet-resolved parent confirmation task raised against them
+        # (see RECURRENCE_CONFIRMATION in const.py / async_complete_task
+        # below). Precomputed so the main loop below can flag those
+        # occurrences as "awaiting_confirmation" regardless of which order
+        # tasks happen to be iterated in.
+        pending_confirmations: dict[tuple[str, str], str] = {}
+        for confirmation_task_id, confirmation_task in self.tasks.data.items():
+            confirms = confirmation_task.get("confirms")
+            if confirms and self.trigger_state.get(confirmation_task_id) is not None:
+                pending_confirmations[(confirms["task_id"], confirms["period_key"])] = (
+                    confirmation_task_id
+                )
+
         for task_id, task in self.tasks.data.items():
             if not task.get("enabled", True):
                 continue
@@ -165,7 +183,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 index = rotation.get("current_index", 0) % len(member_ids)
                 assigned_member_id = member_ids[index]
 
-            if recurrence["type"] == RECURRENCE_TRIGGER:
+            if recurrence["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
                 open_occurrence = self.trigger_state.get(task_id)
                 if open_occurrence is None:
                     # Never triggered yet (or resolved and waiting for the
@@ -191,6 +209,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             last_entry = self.completions.get_last_entry(task_id, period_key)
             if last_entry is not None:
                 status = TASK_STATUS_DONE
+            elif (task_id, period_key) in pending_confirmations:
+                status = TASK_STATUS_AWAITING_CONFIRMATION
             elif now > due_at + overdue_after:
                 status = TASK_STATUS_OVERDUE
             else:
@@ -242,11 +262,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     def _current_period_key(self, task_id: str, task: dict) -> str | None:
         """Return the id of the occurrence currently due, if any.
 
-        For trigger-based tasks this is ``None`` while idle (no sensor event
-        has opened an occurrence yet); for calendar-based tasks there is
-        always a current period.
+        For trigger-based (and confirmation) tasks this is ``None`` while
+        idle (no sensor event / confirmation request has opened an occurrence
+        yet); for calendar-based tasks there is always a current period.
         """
-        if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+        if task["recurrence"]["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
             open_occurrence = self.trigger_state.get(task_id)
             return open_occurrence["period_key"] if open_occurrence else None
         return _current_period_date(task["recurrence"], dt_util.now().date()).isoformat()
@@ -254,11 +274,27 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     async def async_complete_task(
         self, task_id: str, member_id: str | None = None
     ) -> None:
-        """Mark the current occurrence of a task as done and advance rotation."""
+        """Mark the current occurrence of a task as done and advance rotation.
+
+        Two special cases:
+        - If ``task_id`` is itself an auto-generated parent confirmation task
+          (``task["confirms"]`` is set), completing it finalizes the child's
+          original claim instead of logging a completion for itself.
+        - If the member who would act on a normal task has role "child", the
+          completion is not logged yet; instead a confirmation task is raised
+          for the household's parents (see ``_async_request_confirmation``).
+        """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
 
         task = self.tasks.data[task_id]
+
+        confirms = task.get("confirms")
+        if confirms:
+            await self._async_finalize_confirmation(task_id, confirms)
+            await self.async_request_refresh()
+            return
+
         period_key = self._current_period_key(task_id, task)
         if period_key is None:
             _LOGGER.debug("Task %s has no open occurrence to complete", task_id)
@@ -268,10 +304,25 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             _LOGGER.debug("Task %s already completed for period %s", task_id, period_key)
             return
 
+        if self._has_open_confirmation(task_id, period_key):
+            _LOGGER.debug(
+                "Task %s already has an open parent confirmation for period %s",
+                task_id,
+                period_key,
+            )
+            return
+
         rotation = task["rotation"]
         member_ids = rotation.get("member_ids") or []
         index = rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
         acting_member_id = member_id or (member_ids[index] if member_ids else None)
+
+        if acting_member_id and self._member_role(acting_member_id) == MEMBER_ROLE_CHILD:
+            await self._async_request_confirmation(
+                task, task_id, period_key, acting_member_id
+            )
+            await self.async_request_refresh()
+            return
 
         await self.completions.async_add_entry(
             task_id=task_id,
@@ -286,11 +337,24 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self.async_request_refresh()
 
     async def async_skip_task(self, task_id: str) -> None:
-        """Skip the current occurrence without awarding points or rotating."""
+        """Skip the current occurrence without awarding points or rotating.
+
+        For an auto-generated parent confirmation task, skipping means the
+        parent *rejects* the child's claim: the confirmation task is dropped
+        without finalizing anything, so the original task falls back to its
+        normal pending/overdue state and the child can complete it again.
+        """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
 
         task = self.tasks.data[task_id]
+
+        if task.get("confirms"):
+            await self.trigger_state.async_clear(task_id)
+            await self.tasks.async_delete_item(task_id)
+            await self.async_request_refresh()
+            return
+
         period_key = self._current_period_key(task_id, task)
         if period_key is None:
             _LOGGER.debug("Task %s has no open occurrence to skip", task_id)
@@ -309,6 +373,96 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
             await self.trigger_state.async_clear(task_id)
         await self.async_request_refresh()
+
+    def _member_role(self, member_id: str) -> str:
+        member = self.members.data.get(member_id)
+        return member.get("role", MEMBER_ROLE_PARENT) if member else MEMBER_ROLE_PARENT
+
+    def _has_open_confirmation(self, task_id: str, period_key: str) -> bool:
+        """Whether an unresolved parent confirmation is already open for this occurrence."""
+        for confirmation_task_id, confirmation_task in self.tasks.data.items():
+            confirms = confirmation_task.get("confirms")
+            if (
+                confirms
+                and confirms["task_id"] == task_id
+                and confirms["period_key"] == period_key
+                and self.trigger_state.get(confirmation_task_id) is not None
+            ):
+                return True
+        return False
+
+    async def _async_request_confirmation(
+        self, task: dict, task_id: str, period_key: str, child_member_id: str
+    ) -> None:
+        """Raise an auto-generated task for the household's parents.
+
+        Completing it finalizes the child's claim (points + rotation);
+        skipping it rejects the claim. See RECURRENCE_CONFIRMATION in
+        const.py for why this reuses the trigger-task idle/open machinery.
+        """
+        child = self.members.data.get(child_member_id)
+        child_name = child["name"] if child else child_member_id
+        parent_ids = [
+            mid
+            for mid, member in self.members.data.items()
+            if self._member_role(mid) == MEMBER_ROLE_PARENT and member.get("active", True)
+        ]
+
+        confirmation_payload: dict = {
+            "name": f"Bestätigen: {task['name']} ({child_name})",
+            "points": 0,
+            "enabled": True,
+            "recurrence": {"type": RECURRENCE_CONFIRMATION},
+            "rotation": {"member_ids": parent_ids, "strategy": ROTATION_STRATEGY_FIXED},
+            "confirms": {
+                "task_id": task_id,
+                "period_key": period_key,
+                "member_id": child_member_id,
+            },
+        }
+        if task.get("icon"):
+            confirmation_payload["icon"] = task["icon"]
+
+        confirmation_task = await self.tasks.async_create_item(confirmation_payload)
+        await self.trigger_state.async_activate(
+            confirmation_task["id"], triggered_at=dt_util.utcnow()
+        )
+        _LOGGER.debug(
+            "Raised parent confirmation task %s for %s's completion of %s",
+            confirmation_task["id"],
+            child_name,
+            task_id,
+        )
+
+    async def _async_finalize_confirmation(self, confirmation_task_id: str, confirms: dict) -> None:
+        """A parent confirmed: log the child's completion, then drop the confirmation task."""
+        original_task_id = confirms["task_id"]
+        period_key = confirms["period_key"]
+        child_member_id = confirms["member_id"]
+
+        original_task = self.tasks.data.get(original_task_id)
+        if original_task is not None and self.completions.get_last_entry(
+            original_task_id, period_key
+        ) is None:
+            await self.completions.async_add_entry(
+                task_id=original_task_id,
+                period_key=period_key,
+                member_id=child_member_id,
+                points_awarded=original_task.get("points", 0),
+            )
+            rotation = original_task["rotation"]
+            member_ids = rotation.get("member_ids") or []
+            index = (
+                rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
+            )
+            await self._async_advance_rotation(
+                original_task_id, original_task, rotation, member_ids, index
+            )
+            if original_task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+                await self.trigger_state.async_clear(original_task_id)
+
+        await self.trigger_state.async_clear(confirmation_task_id)
+        await self.tasks.async_delete_item(confirmation_task_id)
 
     async def async_handle_sensor_trigger(self, task_id: str) -> None:
         """Open a new occurrence for a trigger-based task, unless one is open.

@@ -11,10 +11,20 @@
  * "type: custom:family-tasks-card" or pick "Family Tasks" in the card picker.
  *
  * Card config options (all optional):
- *   hide_add_member: true   - hide the "+ Mitglied hinzufügen" button/form
- *                              (existing members can still be edited/deleted)
- *   hide_done_tasks: true   - start with completed tasks hidden (can still be
- *                              toggled from the card itself)
+ *   hide_add_member: true    - hide the "+ Mitglied hinzufügen" button/form
+ *                               (existing members can still be edited/deleted)
+ *   hide_not_due_tasks: true - start with only currently-due tasks shown
+ *                               (idle/done hidden; can still be toggled from
+ *                               the card itself)
+ *   hide_members_list: true  - start with the family members list collapsed
+ *                               (can still be toggled from the card itself)
+ *
+ * Child tasks: a task assigned to a member with role "child" isn't finished
+ * the moment the child taps "Erledigt" - the task shows "Wartet auf
+ * Bestätigung" and an auto-generated task appears for the household's
+ * parents. A parent completing *that* task finalizes the child's completion
+ * (points + rotation); skipping it rejects the claim. These auto-generated
+ * tasks are read-only (no edit/delete) since the coordinator manages them.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -22,14 +32,19 @@
     idle: "Wartet auf Sensor",
     pending: "Offen",
     overdue: "Überfällig",
+    awaiting_confirmation: "Wartet auf Bestätigung",
     done: "Erledigt",
   };
   const STATUS_COLORS = {
     idle: "var(--disabled-text-color, #9e9e9e)",
     pending: "var(--warning-color, #ff9800)",
     overdue: "var(--error-color, #db4437)",
+    awaiting_confirmation: "var(--info-color, #039be5)",
     done: "var(--success-color, #43a047)",
   };
+  // Statuses considered "currently due" by the hide-not-due toggle: an
+  // occurrence that needs someone to act on it right now.
+  const DUE_STATUSES = ["pending", "overdue", "awaiting_confirmation"];
   const STRATEGY_LABELS = { round_robin: "Reihum", random: "Zufällig", fixed: "Fest zugewiesen" };
   const RECURRENCE_LABELS = {
     daily: "Täglich",
@@ -41,6 +56,14 @@
     state: "Status (z. B. Binärsensor)",
     numeric_state: "Schwellenwert (Zahl)",
   };
+  const THRESHOLD_DIRECTION_LABELS = {
+    above: "Überschreitet",
+    below: "Unterschreitet",
+  };
+  const MEMBER_ROLE_LABELS = {
+    parent: "Elternteil",
+    child: "Kind (Aufgaben brauchen Eltern-Bestätigung)",
+  };
 
   function esc(value) {
     return String(value ?? "").replace(
@@ -50,7 +73,11 @@
   }
 
   function emptyTriggerForm() {
-    return { kind: "state", entity_id: "", to_state: "on", above: "", below: "" };
+    // "direction"/"value" drive the numeric_state UI: a single threshold to
+    // cross (above OR below), not a from-x-to-y range - see storage.py's
+    // _require_single_threshold. Mapped to/from the backend's above/below
+    // fields in taskToForm() / _saveTask().
+    return { kind: "state", entity_id: "", to_state: "on", direction: "above", value: "" };
   }
 
   function emptyTaskForm() {
@@ -73,7 +100,7 @@
   }
 
   function emptyMemberForm() {
-    return { name: "", person_entity_id: "", icon: "", active: true };
+    return { name: "", person_entity_id: "", icon: "", active: true, role: "parent" };
   }
 
   function taskToForm(task) {
@@ -89,13 +116,17 @@
         interval: task.recurrence?.interval ?? 1,
         weekdays: task.recurrence?.weekdays ?? [0],
         anchor_date: task.recurrence?.anchor_date ?? "",
-        trigger: {
-          kind: task.recurrence?.trigger?.kind ?? "state",
-          entity_id: task.recurrence?.trigger?.entity_id ?? "",
-          to_state: task.recurrence?.trigger?.to_state ?? "on",
-          above: task.recurrence?.trigger?.above ?? "",
-          below: task.recurrence?.trigger?.below ?? "",
-        },
+        trigger: (() => {
+          const t = task.recurrence?.trigger;
+          const hasBelow = t?.below !== undefined && t?.below !== null;
+          return {
+            kind: t?.kind ?? "state",
+            entity_id: t?.entity_id ?? "",
+            to_state: t?.to_state ?? "on",
+            direction: hasBelow ? "below" : "above",
+            value: hasBelow ? t.below : t?.above ?? "",
+          };
+        })(),
       },
       rotation: {
         member_ids: [...(task.rotation?.member_ids ?? [])],
@@ -110,6 +141,7 @@
       person_entity_id: member.person_entity_id ?? "",
       icon: member.icon ?? "",
       active: member.active !== false,
+      role: member.role ?? "parent",
     };
   }
 
@@ -129,16 +161,20 @@
       this._editingMemberId = null;
       this._taskForm = emptyTaskForm();
       this._memberForm = emptyMemberForm();
-      this._hideDone = undefined;
+      this._hideNotDue = undefined;
+      this._hideMembers = undefined;
     }
 
     setConfig(config) {
       this._config = config || {};
-      // Only seed from config once; afterwards the in-card toggle button owns it,
-      // so re-applying the same config (e.g. dashboard reload) doesn't undo a
-      // manual toggle.
-      if (this._hideDone === undefined) {
-        this._hideDone = !!this._config.hide_done_tasks;
+      // Only seed from config once; afterwards the in-card toggle buttons own
+      // it, so re-applying the same config (e.g. dashboard reload) doesn't
+      // undo a manual toggle.
+      if (this._hideNotDue === undefined) {
+        this._hideNotDue = !!this._config.hide_not_due_tasks;
+      }
+      if (this._hideMembers === undefined) {
+        this._hideMembers = !!this._config.hide_members_list;
       }
     }
 
@@ -286,15 +322,14 @@
             to_state: (t.to_state || "on").trim(),
           };
         } else {
-          const above = t.above === "" ? undefined : Number(t.above);
-          const below = t.below === "" ? undefined : Number(t.below);
-          if (above === undefined && below === undefined) {
-            alert("Bitte einen Schwellenwert (ab und/oder bis) angeben.");
+          const value = t.value === "" ? undefined : Number(t.value);
+          if (value === undefined || Number.isNaN(value)) {
+            alert("Bitte einen Schwellenwert angeben.");
             return;
           }
           recurrence.trigger = { kind: "numeric_state", entity_id: t.entity_id.trim() };
-          if (above !== undefined) recurrence.trigger.above = above;
-          if (below !== undefined) recurrence.trigger.below = below;
+          // Single-direction crossing, not a range: exactly one of above/below.
+          recurrence.trigger[t.direction === "below" ? "below" : "above"] = value;
         }
       }
 
@@ -332,7 +367,7 @@
       const form = this._memberForm;
       if (!form.name.trim()) return;
 
-      const payload = { name: form.name.trim(), active: form.active };
+      const payload = { name: form.name.trim(), active: form.active, role: form.role || "parent" };
       if (form.person_entity_id) payload.person_entity_id = form.person_entity_id;
       if (form.icon) payload.icon = form.icon.trim();
 
@@ -364,13 +399,16 @@
           <div class="card-content">
             <div class="section-header">
               <h3>Aufgaben</h3>
-              <button class="link" data-action="toggle-hide-done">${this._hideDone ? "Erledigte anzeigen" : "Erledigte ausblenden"}</button>
+              <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
             </div>
             ${this._renderTaskList()}
             ${this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`}
 
-            <h3>Familienmitglieder</h3>
-            ${this._renderMemberList()}
+            <div class="section-header">
+              <h3>Familienmitglieder</h3>
+              <button class="link" data-action="toggle-hide-members">${this._hideMembers ? "Anzeigen" : "Ausblenden"}</button>
+            </div>
+            ${this._hideMembers ? "" : this._renderMemberList()}
             ${hideAddMember ? "" : this._memberFormOpen ? this._renderMemberForm() : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
           </div>
         </ha-card>
@@ -381,11 +419,11 @@
     _renderTaskList() {
       let ids = Object.keys(this._tasks);
       const totalCount = ids.length;
-      if (this._hideDone) {
-        ids = ids.filter((id) => (this._statusStateForTask(id)?.state ?? "pending") !== "done");
+      if (this._hideNotDue) {
+        ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
       }
       if (!ids.length) {
-        return `<p class="muted">${totalCount ? "Keine offenen Aufgaben." : "Noch keine Aufgaben angelegt."}</p>`;
+        return `<p class="muted">${totalCount ? "Keine fälligen Aufgaben." : "Noch keine Aufgaben angelegt."}</p>`;
       }
 
       return `<div class="list">${ids
@@ -397,10 +435,16 @@
           const label = STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
           const isTrigger = task.recurrence?.type === "trigger";
-          const detail = isTrigger
+          // Auto-generated by the coordinator when a child's task needs
+          // parental sign-off (see async_complete_task in coordinator.py) -
+          // read-only row, and "Erledigt"/"Überspringen" mean confirm/reject.
+          const isConfirmation = !!task.confirms;
+          const detail = isConfirmation
+            ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
+            : isTrigger
             ? `Sensor: ${esc(task.recurrence.trigger?.entity_id ?? "–")}`
             : `${assignedId ? esc(this._memberName(assignedId)) : "–"} · ${esc(task.points ?? 0)} Pkt.`;
-          const disableActions = status === "done" || status === "idle";
+          const disableActions = status === "done" || status === "idle" || status === "awaiting_confirmation";
           return `
             <div class="row">
               <div class="row-main">
@@ -409,10 +453,11 @@
                 <span class="muted">${detail}</span>
               </div>
               <div class="row-actions">
-                <button data-action="complete-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>Erledigt</button>
-                <button data-action="skip-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>Überspringen</button>
+                <button data-action="complete-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
+                <button data-action="skip-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>
+                ${isConfirmation ? "" : `
                 <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
-                <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>
+                <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>`}
               </div>
             </div>`;
         })
@@ -426,11 +471,12 @@
       return `<div class="list">${ids
         .map((id) => {
           const member = this._members[id];
+          const roleSuffix = member.role === "child" ? " · Kind" : "";
           return `
             <div class="row">
               <div class="row-main">
                 <span class="name">${esc(member.name)}</span>
-                <span class="muted">${member.person_entity_id ? esc(member.person_entity_id) : "keine Verknüpfung"}${member.active === false ? " · inaktiv" : ""}</span>
+                <span class="muted">${member.person_entity_id ? esc(member.person_entity_id) : "keine Verknüpfung"}${member.active === false ? " · inaktiv" : ""}${roleSuffix}</span>
               </div>
               <div class="row-actions">
                 <button data-action="edit-member" data-member-id="${id}">Bearbeiten</button>
@@ -519,8 +565,12 @@
             <label>Ziel-Zustand<input type="text" data-field="recurrence.trigger.to_state" placeholder="on" value="${esc(t.to_state)}"></label>
           ` : `
             <div class="grid2">
-              <label>Ab Wert (above)<input type="number" step="any" data-field="recurrence.trigger.above" value="${esc(t.above)}"></label>
-              <label>Bis Wert (below)<input type="number" step="any" data-field="recurrence.trigger.below" value="${esc(t.below)}"></label>
+              <label>Richtung
+                <select data-field="recurrence.trigger.direction">
+                  ${Object.entries(THRESHOLD_DIRECTION_LABELS).map(([value, label]) => `<option value="${value}" ${t.direction === value ? "selected" : ""}>${label}</option>`).join("")}
+                </select>
+              </label>
+              <label>Schwellenwert<input type="number" step="any" data-field="recurrence.trigger.value" value="${esc(t.value)}"></label>
             </div>
           `}
           <p class="muted">Die Aufgabe wird fällig, sobald der Sensor die Bedingung erfüllt – statt nach einem festen Zeitplan.</p>
@@ -544,6 +594,11 @@
             </select>
           </label>
           <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:account" value="${esc(f.icon)}"></label>
+          <label>Rolle
+            <select data-field="role">
+              ${Object.entries(MEMBER_ROLE_LABELS).map(([value, label]) => `<option value="${value}" ${f.role === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
           <label class="inline"><input type="checkbox" data-field="active" ${f.active ? "checked" : ""}> Aktiv (nimmt an der Rotation teil)</label>
           <div class="form-actions">
             <button type="submit" data-action="save-member">Speichern</button>
@@ -620,8 +675,11 @@
         else if (action === "cancel-member-form") this._closeMemberForm();
         else if (action === "edit-member") this._openMemberForm(el.dataset.memberId);
         else if (action === "delete-member") this._deleteMember(el.dataset.memberId);
-        else if (action === "toggle-hide-done") {
-          this._hideDone = !this._hideDone;
+        else if (action === "toggle-hide-not-due") {
+          this._hideNotDue = !this._hideNotDue;
+          this._render();
+        } else if (action === "toggle-hide-members") {
+          this._hideMembers = !this._hideMembers;
           this._render();
         }
       });

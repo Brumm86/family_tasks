@@ -32,11 +32,18 @@ RECURRENCE_DAILY: Final = "daily"
 RECURRENCE_WEEKLY: Final = "weekly"
 RECURRENCE_INTERVAL_DAYS: Final = "interval_days"
 RECURRENCE_TRIGGER: Final = "trigger"
+# Internal-only recurrence used for auto-generated parent confirmation tasks
+# (see const "Child tasks / parent confirmation" section below). Behaves like
+# RECURRENCE_TRIGGER (idle until opened, then a single open occurrence) but
+# is opened programmatically by the coordinator instead of by a bound sensor,
+# and is intentionally not offered in the card's recurrence picker.
+RECURRENCE_CONFIRMATION: Final = "confirmation"
 RECURRENCE_TYPES: Final = [
     RECURRENCE_DAILY,
     RECURRENCE_WEEKLY,
     RECURRENCE_INTERVAL_DAYS,
     RECURRENCE_TRIGGER,
+    RECURRENCE_CONFIRMATION,
 ]
 
 # --- Sensor triggers ----------------------------------------------------------
@@ -46,7 +53,10 @@ RECURRENCE_TYPES: Final = [
 # satisfies one of the following conditions (mirroring Home Assistant's own
 # "state" and "numeric_state" automation triggers):
 #   - TASK_TRIGGER_STATE: a binary_sensor (or any entity) reaches a given state.
-#   - TASK_TRIGGER_NUMERIC_STATE: a numeric sensor crosses an above/below threshold.
+#   - TASK_TRIGGER_NUMERIC_STATE: a numeric sensor crosses a single threshold,
+#     either rising above it ("above") or falling below it ("below"). Exactly
+#     one of the two must be set - this is a directional crossing, not a
+#     range/band between two bounds.
 
 TASK_TRIGGER_STATE: Final = "state"
 TASK_TRIGGER_NUMERIC_STATE: Final = "numeric_state"
@@ -57,13 +67,30 @@ TASK_TRIGGER_KINDS: Final = [TASK_TRIGGER_STATE, TASK_TRIGGER_NUMERIC_STATE]
 TASK_STATUS_IDLE: Final = "idle"
 TASK_STATUS_PENDING: Final = "pending"
 TASK_STATUS_OVERDUE: Final = "overdue"
+TASK_STATUS_AWAITING_CONFIRMATION: Final = "awaiting_confirmation"
 TASK_STATUS_DONE: Final = "done"
 TASK_STATUSES: Final = [
     TASK_STATUS_IDLE,
     TASK_STATUS_PENDING,
     TASK_STATUS_OVERDUE,
+    TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_DONE,
 ]
+
+# --- Member roles / child task confirmation ----------------------------------
+#
+# A member's role determines whether their completions need parental sign-off:
+# when a member with role MEMBER_ROLE_CHILD marks their assigned task done,
+# the coordinator does not award points immediately. Instead it opens the
+# task's status as TASK_STATUS_AWAITING_CONFIRMATION and creates a single-use
+# task (recurrence RECURRENCE_CONFIRMATION, see above) assigned to the
+# household's parents. Completing *that* task finalizes the child's
+# completion (points + rotation); skipping it rejects the claim and returns
+# the original task to its normal pending/overdue state.
+
+MEMBER_ROLE_PARENT: Final = "parent"
+MEMBER_ROLE_CHILD: Final = "child"
+MEMBER_ROLES: Final = [MEMBER_ROLE_PARENT, MEMBER_ROLE_CHILD]
 
 # --- Storage ----------------------------------------------------------------
 

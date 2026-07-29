@@ -21,8 +21,9 @@ tests/                      pytest-homeassistant-custom-component Testsuite
 2. Home Assistant neu starten.
 3. Einstellungen → Geräte & Dienste → Integration hinzufügen → „Family Tasks" suchen, Anzeigename bestätigen.
 4. Dashboard bearbeiten → Karte hinzufügen → „Family Tasks" auswählen (oder manuell `type: custom:family-tasks-card`). Die Karte lädt sich automatisch, es ist keine manuelle Lovelace-Resource nötig.
-5. In der Karte zunächst Familienmitglieder anlegen (optional mit `person.*`-Verknüpfung), danach Aufgaben mit Wiederholung, Fälligkeit und Rotation.
-6. „Erledigt" in der Karte oder die Services `family_tasks.complete_task` / `family_tasks.skip_task` in Automatisierungen nutzen.
+5. In der Karte zunächst Familienmitglieder anlegen (optional mit `person.*`-Verknüpfung und Rolle „Kind", wenn die Erledigung von einem Elternteil bestätigt werden soll), danach Aufgaben mit Wiederholung, Fälligkeit und Rotation.
+6. „Erledigt" in der Karte oder die Services `family_tasks.complete_task` / `family_tasks.skip_task` in Automatisierungen nutzen. Ist die zugewiesene Person ein „Kind"-Mitglied, wird die Aufgabe erst als „Wartet auf Bestätigung" markiert und eine Bestätigungsaufgabe für die Eltern angelegt; erst wenn ein Elternteil diese abschließt, gelten Punkte/Rotation als vergeben (Ablehnen über „Überspringen" auf der Bestätigungsaufgabe setzt die Aufgabe zurück).
+7. In der Kopfzeile „Aufgaben" bzw. „Familienmitglieder" lassen sich per Button nicht-fällige Aufgaben bzw. die Mitgliederliste ein-/ausblenden.
 
 ## Tests
 

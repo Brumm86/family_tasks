@@ -27,6 +27,8 @@ from homeassistant.util import dt as dt_util
 from .const import (
     DEFAULT_ROTATION_STRATEGY,
     MAX_COMPLETION_LOG_ENTRIES,
+    MEMBER_ROLE_PARENT,
+    MEMBER_ROLES,
     RECURRENCE_INTERVAL_DAYS,
     RECURRENCE_TRIGGER,
     RECURRENCE_TYPES,
@@ -47,11 +49,20 @@ from .const import (
 # --- Validation schemas ------------------------------------------------------
 
 
-def _require_above_or_below(value: dict) -> dict:
-    """A numeric_state trigger needs at least one of 'above'/'below'."""
-    if "above" not in value and "below" not in value:
+def _require_single_threshold(value: dict) -> dict:
+    """A numeric_state trigger needs exactly one of 'above'/'below'.
+
+    This is a directional crossing ("fires once the sensor rises above X" or
+    "...falls below Y"), not a range - setting both would describe a band
+    the value has to be inside of, which is a different (and confusing)
+    trigger the card no longer offers.
+    """
+    has_above = "above" in value
+    has_below = "below" in value
+    if has_above == has_below:  # neither, or both
         raise vol.Invalid(
-            "A 'numeric_state' trigger needs an 'above' and/or 'below' threshold."
+            "A 'numeric_state' trigger needs exactly one of 'above' or "
+            "'below' - a single threshold direction, not a range."
         )
     return value
 
@@ -73,7 +84,7 @@ TASK_TRIGGER_NUMERIC_STATE_SCHEMA = vol.All(
             vol.Optional("below"): vol.Coerce(float),
         }
     ),
-    _require_above_or_below,
+    _require_single_threshold,
 )
 
 # Dispatches on "kind" so config errors point at the right sub-schema instead
@@ -108,6 +119,18 @@ ROTATION_SCHEMA = vol.Schema(
     }
 )
 
+# Present only on auto-generated parent confirmation tasks (see
+# RECURRENCE_CONFIRMATION in const.py): links the confirmation task back to
+# the child's original task/occurrence it was raised for. Never set by the
+# card - the coordinator is the only writer.
+CONFIRMS_SCHEMA = vol.Schema(
+    {
+        vol.Required("task_id"): str,
+        vol.Required("period_key"): str,
+        vol.Required("member_id"): str,
+    }
+)
+
 TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
@@ -117,6 +140,7 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional("overdue_after_minutes"): vol.All(int, vol.Range(min=0)),
     vol.Required("recurrence"): RECURRENCE_SCHEMA,
     vol.Required("rotation"): ROTATION_SCHEMA,
+    vol.Optional("confirms"): CONFIRMS_SCHEMA,
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -135,6 +159,11 @@ MEMBER_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional("person_entity_id"): str,
     vol.Optional("icon"): str,
     vol.Optional("active", default=True): bool,
+    # "child" members need a parent's confirmation before their completions
+    # count (see RECURRENCE_CONFIRMATION / MEMBER_ROLE_CHILD in const.py).
+    # Defaults to "parent" so existing members keep behaving exactly as
+    # before this field was introduced.
+    vol.Optional("role", default=MEMBER_ROLE_PARENT): vol.In(MEMBER_ROLES),
 }
 
 MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
@@ -142,6 +171,7 @@ MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("person_entity_id"): str,
     vol.Optional("icon"): str,
     vol.Optional("active"): bool,
+    vol.Optional("role"): vol.In(MEMBER_ROLES),
 }
 
 
