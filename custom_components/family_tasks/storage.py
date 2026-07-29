@@ -20,24 +20,72 @@ import voluptuous as vol
 from homeassistant.const import CONF_ID
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import collection
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
     DEFAULT_ROTATION_STRATEGY,
     MAX_COMPLETION_LOG_ENTRIES,
+    RECURRENCE_INTERVAL_DAYS,
+    RECURRENCE_TRIGGER,
     RECURRENCE_TYPES,
     ROTATION_STRATEGIES,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_MEMBERS,
     STORAGE_KEY_TASKS,
+    STORAGE_KEY_TRIGGER_STATE,
     STORAGE_VERSION,
     STORAGE_VERSION_MINOR,
+    TASK_TRIGGER_KINDS,
+    TASK_TRIGGER_NUMERIC_STATE,
+    TASK_TRIGGER_STATE,
     WS_API_PREFIX_MEMBERS,
     WS_API_PREFIX_TASKS,
 )
 
 # --- Validation schemas ------------------------------------------------------
+
+
+def _require_above_or_below(value: dict) -> dict:
+    """A numeric_state trigger needs at least one of 'above'/'below'."""
+    if "above" not in value and "below" not in value:
+        raise vol.Invalid(
+            "A 'numeric_state' trigger needs an 'above' and/or 'below' threshold."
+        )
+    return value
+
+
+TASK_TRIGGER_STATE_SCHEMA = vol.Schema(
+    {
+        vol.Required("kind"): TASK_TRIGGER_STATE,
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Optional("to_state", default="on"): str,
+    }
+)
+
+TASK_TRIGGER_NUMERIC_STATE_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required("kind"): TASK_TRIGGER_NUMERIC_STATE,
+            vol.Required("entity_id"): cv.entity_id,
+            vol.Optional("above"): vol.Coerce(float),
+            vol.Optional("below"): vol.Coerce(float),
+        }
+    ),
+    _require_above_or_below,
+)
+
+# Dispatches on "kind" so config errors point at the right sub-schema instead
+# of vol.Any's generic "no valid value found" message.
+TASK_TRIGGER_SCHEMA = vol.All(
+    vol.Schema({vol.Required("kind"): vol.In(TASK_TRIGGER_KINDS)}, extra=vol.ALLOW_EXTRA),
+    lambda value: (
+        TASK_TRIGGER_STATE_SCHEMA(value)
+        if value["kind"] == TASK_TRIGGER_STATE
+        else TASK_TRIGGER_NUMERIC_STATE_SCHEMA(value)
+    ),
+)
 
 RECURRENCE_SCHEMA = vol.Schema(
     {
@@ -45,6 +93,7 @@ RECURRENCE_SCHEMA = vol.Schema(
         vol.Optional("interval"): vol.All(int, vol.Range(min=1)),
         vol.Optional("weekdays"): [vol.All(int, vol.Range(min=0, max=6))],
         vol.Optional("anchor_date"): str,  # ISO date, required for interval_days
+        vol.Optional("trigger"): TASK_TRIGGER_SCHEMA,  # required for type "trigger"
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -105,10 +154,16 @@ class TaskStorageCollection(collection.DictStorageCollection):
     async def _process_create_data(self, data: dict) -> dict:
         """Validate data for a new task."""
         validated: dict = self.CREATE_SCHEMA(data)
-        if validated["recurrence"]["type"] == "interval_days" and not validated[
-            "recurrence"
-        ].get("anchor_date"):
-            validated["recurrence"]["anchor_date"] = dt_util.now().date().isoformat()
+        recurrence = validated["recurrence"]
+        if recurrence["type"] == RECURRENCE_INTERVAL_DAYS and not recurrence.get(
+            "anchor_date"
+        ):
+            recurrence["anchor_date"] = dt_util.now().date().isoformat()
+        if recurrence["type"] == RECURRENCE_TRIGGER and "trigger" not in recurrence:
+            raise vol.Invalid(
+                "A 'trigger' recurrence needs a 'trigger' definition (state or "
+                "numeric_state)."
+            )
         return validated
 
     @callback
@@ -123,6 +178,13 @@ class TaskStorageCollection(collection.DictStorageCollection):
             updated["recurrence"] = {**item["recurrence"], **validated["recurrence"]}
         if "rotation" in validated:
             updated["rotation"] = {**item["rotation"], **validated["rotation"]}
+        if updated["recurrence"]["type"] == RECURRENCE_TRIGGER and "trigger" not in updated[
+            "recurrence"
+        ]:
+            raise vol.Invalid(
+                "A 'trigger' recurrence needs a 'trigger' definition (state or "
+                "numeric_state)."
+            )
         return updated
 
 
@@ -248,3 +310,48 @@ class CompletionLogStore:
             if dt_util.parse_datetime(entry["completed_at"]) >= since:
                 total += entry["points_awarded"]
         return total
+
+
+class TriggerStateStore:
+    """Tracks the currently open occurrence of sensor-triggered tasks.
+
+    Tasks with recurrence type "trigger" (see :mod:`.trigger`) have no
+    calendar-based period; instead a new occurrence is opened here the moment
+    a bound sensor's state satisfies the task's trigger condition, and it
+    stays open until the task is completed or skipped. Not a
+    StorageCollection: entries are runtime state written by the trigger
+    listener, never edited by the user.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, dict[str, Any]]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_TRIGGER_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        self._state: dict[str, dict[str, Any]] = {}
+
+    async def async_load(self) -> None:
+        """Load open trigger occurrences from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def get(self, task_id: str) -> dict[str, Any] | None:
+        """Return the open occurrence for a task, if any."""
+        return self._state.get(task_id)
+
+    async def async_activate(self, task_id: str, *, triggered_at: datetime) -> dict[str, Any]:
+        """Open a new occurrence for a task, identified by its trigger time."""
+        entry = {"period_key": triggered_at.isoformat(), "triggered_at": triggered_at.isoformat()}
+        self._state[task_id] = entry
+        await self._store.async_save(self._state)
+        return entry
+
+    async def async_clear(self, task_id: str) -> None:
+        """Close a task's open occurrence, e.g. once completed or skipped."""
+        if self._state.pop(task_id, None) is not None:
+            await self._store.async_save(self._state)
+
+
+async def async_create_trigger_state_store(hass: HomeAssistant) -> TriggerStateStore:
+    """Create and load the sensor-trigger state store."""
+    store = TriggerStateStore(hass)
+    await store.async_load()
+    return store

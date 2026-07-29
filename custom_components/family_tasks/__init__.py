@@ -31,10 +31,13 @@ from .storage import (
     CompletionLogStore,
     MemberStorageCollection,
     TaskStorageCollection,
+    TriggerStateStore,
     async_create_members_collection,
     async_create_tasks_collection,
+    async_create_trigger_state_store,
     async_setup_websocket_api,
 )
+from .trigger import TaskTriggerListener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +57,7 @@ class FamilyTasksRuntimeData:
     coordinator: FamilyTasksCoordinator
     tasks: TaskStorageCollection
     members: MemberStorageCollection
+    trigger_state: TriggerStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -72,12 +76,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     completions = CompletionLogStore(hass)
     await completions.async_load()
 
-    coordinator = FamilyTasksCoordinator(hass, entry, tasks, members, completions)
+    trigger_state = await async_create_trigger_state_store(hass)
+
+    coordinator = FamilyTasksCoordinator(
+        hass, entry, tasks, members, completions, trigger_state
+    )
     await coordinator.async_config_entry_first_refresh()
 
     entry.runtime_data = FamilyTasksRuntimeData(
-        coordinator=coordinator, tasks=tasks, members=members
+        coordinator=coordinator, tasks=tasks, members=members, trigger_state=trigger_state
     )
+
+    # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
+    # as soon as their bound sensor's state matches, instead of on a schedule.
+    trigger_listener = TaskTriggerListener(hass, coordinator, tasks)
+    trigger_listener.async_setup()
+    entry.async_on_unload(trigger_listener.async_unload)
 
     # Re-evaluate derived state whenever a task or member definition changes
     # (created/edited/deleted) instead of waiting for the next poll interval.
@@ -86,6 +100,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
 
     entry.async_on_unload(
         tasks.async_add_change_set_listener(_async_collection_changed)
+    )
+    entry.async_on_unload(
+        tasks.async_add_change_set_listener(trigger_listener.async_on_tasks_changed)
     )
     entry.async_on_unload(
         members.async_add_change_set_listener(_async_collection_changed)

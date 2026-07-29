@@ -31,18 +31,39 @@ ROTATION_STRATEGIES: Final = [
 RECURRENCE_DAILY: Final = "daily"
 RECURRENCE_WEEKLY: Final = "weekly"
 RECURRENCE_INTERVAL_DAYS: Final = "interval_days"
+RECURRENCE_TRIGGER: Final = "trigger"
 RECURRENCE_TYPES: Final = [
     RECURRENCE_DAILY,
     RECURRENCE_WEEKLY,
     RECURRENCE_INTERVAL_DAYS,
+    RECURRENCE_TRIGGER,
 ]
+
+# --- Sensor triggers ----------------------------------------------------------
+#
+# A task with recurrence type RECURRENCE_TRIGGER has no calendar schedule of
+# its own; instead a new occurrence becomes due when a sensor it is bound to
+# satisfies one of the following conditions (mirroring Home Assistant's own
+# "state" and "numeric_state" automation triggers):
+#   - TASK_TRIGGER_STATE: a binary_sensor (or any entity) reaches a given state.
+#   - TASK_TRIGGER_NUMERIC_STATE: a numeric sensor crosses an above/below threshold.
+
+TASK_TRIGGER_STATE: Final = "state"
+TASK_TRIGGER_NUMERIC_STATE: Final = "numeric_state"
+TASK_TRIGGER_KINDS: Final = [TASK_TRIGGER_STATE, TASK_TRIGGER_NUMERIC_STATE]
 
 # --- Task status values -----------------------------------------------------
 
+TASK_STATUS_IDLE: Final = "idle"
 TASK_STATUS_PENDING: Final = "pending"
 TASK_STATUS_OVERDUE: Final = "overdue"
 TASK_STATUS_DONE: Final = "done"
-TASK_STATUSES: Final = [TASK_STATUS_PENDING, TASK_STATUS_OVERDUE, TASK_STATUS_DONE]
+TASK_STATUSES: Final = [
+    TASK_STATUS_IDLE,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_OVERDUE,
+    TASK_STATUS_DONE,
+]
 
 # --- Storage ----------------------------------------------------------------
 
@@ -52,6 +73,7 @@ STORAGE_VERSION_MINOR: Final = 1
 STORAGE_KEY_TASKS: Final = f"{DOMAIN}.tasks"
 STORAGE_KEY_MEMBERS: Final = f"{DOMAIN}.members"
 STORAGE_KEY_COMPLETIONS: Final = f"{DOMAIN}.completions"
+STORAGE_KEY_TRIGGER_STATE: Final = f"{DOMAIN}.trigger_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 

@@ -24,14 +24,21 @@ from .const import (
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DOMAIN,
+    RECURRENCE_TRIGGER,
     ROTATION_STRATEGY_FIXED,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
     TASK_STATUS_DONE,
+    TASK_STATUS_IDLE,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_PENDING,
 )
-from .storage import CompletionLogStore, MemberStorageCollection, TaskStorageCollection
+from .storage import (
+    CompletionLogStore,
+    MemberStorageCollection,
+    TaskStorageCollection,
+    TriggerStateStore,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -121,6 +128,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         tasks: TaskStorageCollection,
         members: MemberStorageCollection,
         completions: CompletionLogStore,
+        trigger_state: TriggerStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -132,6 +140,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.tasks = tasks
         self.members = members
         self.completions = completions
+        self.trigger_state = trigger_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -144,9 +153,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             if not task.get("enabled", True):
                 continue
 
-            period_start = _current_period_date(task["recurrence"], today)
-            period_key = period_start.isoformat()
-            due_at = _due_at(period_start, task.get("due_time"))
+            recurrence = task["recurrence"]
             overdue_after = timedelta(
                 minutes=task.get("overdue_after_minutes", DEFAULT_OVERDUE_AFTER_MINUTES)
             )
@@ -157,6 +164,29 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             if member_ids:
                 index = rotation.get("current_index", 0) % len(member_ids)
                 assigned_member_id = member_ids[index]
+
+            if recurrence["type"] == RECURRENCE_TRIGGER:
+                open_occurrence = self.trigger_state.get(task_id)
+                if open_occurrence is None:
+                    # Never triggered yet (or resolved and waiting for the
+                    # next trigger event): nothing due, not counted as open.
+                    task_statuses[task_id] = TaskStatusData(
+                        task_id=task_id,
+                        name=task["name"],
+                        icon=task.get("icon"),
+                        points=task.get("points", 0),
+                        status=TASK_STATUS_IDLE,
+                        period_key="",
+                        due_at=None,
+                        assigned_member_id=assigned_member_id,
+                    )
+                    continue
+                period_key = open_occurrence["period_key"]
+                due_at = dt_util.parse_datetime(open_occurrence["triggered_at"])
+            else:
+                period_start = _current_period_date(recurrence, today)
+                period_key = period_start.isoformat()
+                due_at = _due_at(period_start, task.get("due_time"))
 
             last_entry = self.completions.get_last_entry(task_id, period_key)
             if last_entry is not None:
@@ -209,6 +239,18 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         return FamilyTasksData(tasks=task_statuses, members=member_summaries)
 
+    def _current_period_key(self, task_id: str, task: dict) -> str | None:
+        """Return the id of the occurrence currently due, if any.
+
+        For trigger-based tasks this is ``None`` while idle (no sensor event
+        has opened an occurrence yet); for calendar-based tasks there is
+        always a current period.
+        """
+        if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+            open_occurrence = self.trigger_state.get(task_id)
+            return open_occurrence["period_key"] if open_occurrence else None
+        return _current_period_date(task["recurrence"], dt_util.now().date()).isoformat()
+
     async def async_complete_task(
         self, task_id: str, member_id: str | None = None
     ) -> None:
@@ -217,9 +259,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
 
         task = self.tasks.data[task_id]
-        today = dt_util.now().date()
-        period_start = _current_period_date(task["recurrence"], today)
-        period_key = period_start.isoformat()
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            _LOGGER.debug("Task %s has no open occurrence to complete", task_id)
+            return
 
         if self.completions.get_last_entry(task_id, period_key) is not None:
             _LOGGER.debug("Task %s already completed for period %s", task_id, period_key)
@@ -238,6 +281,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         )
 
         await self._async_advance_rotation(task_id, task, rotation, member_ids, index)
+        if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+            await self.trigger_state.async_clear(task_id)
         await self.async_request_refresh()
 
     async def async_skip_task(self, task_id: str) -> None:
@@ -246,9 +291,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
 
         task = self.tasks.data[task_id]
-        today = dt_util.now().date()
-        period_start = _current_period_date(task["recurrence"], today)
-        period_key = period_start.isoformat()
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            _LOGGER.debug("Task %s has no open occurrence to skip", task_id)
+            return
 
         if self.completions.get_last_entry(task_id, period_key) is not None:
             return
@@ -260,6 +306,25 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             points_awarded=0,
             skipped=True,
         )
+        if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+            await self.trigger_state.async_clear(task_id)
+        await self.async_request_refresh()
+
+    async def async_handle_sensor_trigger(self, task_id: str) -> None:
+        """Open a new occurrence for a trigger-based task, unless one is open.
+
+        Called by :class:`~.trigger.TaskTriggerListener` when a bound
+        sensor's state satisfies the task's trigger condition. If an
+        occurrence is already open (triggered but not yet completed/skipped),
+        this is a no-op so a bouncing/still-matching sensor doesn't keep
+        creating new occurrences.
+        """
+        if task_id not in self.tasks.data:
+            return
+        if self.trigger_state.get(task_id) is not None:
+            _LOGGER.debug("Task %s already has an open trigger occurrence", task_id)
+            return
+        await self.trigger_state.async_activate(task_id, triggered_at=dt_util.utcnow())
         await self.async_request_refresh()
 
     async def _async_advance_rotation(

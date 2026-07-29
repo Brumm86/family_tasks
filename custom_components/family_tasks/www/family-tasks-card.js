@@ -9,22 +9,48 @@
  * Registered automatically by the backend (see __init__.py, add_extra_js_url)
  * - no manual Lovelace resource needs to be added. Add the card via
  * "type: custom:family-tasks-card" or pick "Family Tasks" in the card picker.
+ *
+ * Card config options (all optional):
+ *   hide_add_member: true   - hide the "+ Mitglied hinzufügen" button/form
+ *                              (existing members can still be edited/deleted)
+ *   hide_done_tasks: true   - start with completed tasks hidden (can still be
+ *                              toggled from the card itself)
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
-  const STATUS_LABELS = { pending: "Offen", overdue: "Überfällig", done: "Erledigt" };
+  const STATUS_LABELS = {
+    idle: "Wartet auf Sensor",
+    pending: "Offen",
+    overdue: "Überfällig",
+    done: "Erledigt",
+  };
   const STATUS_COLORS = {
+    idle: "var(--disabled-text-color, #9e9e9e)",
     pending: "var(--warning-color, #ff9800)",
     overdue: "var(--error-color, #db4437)",
     done: "var(--success-color, #43a047)",
   };
   const STRATEGY_LABELS = { round_robin: "Reihum", random: "Zufällig", fixed: "Fest zugewiesen" };
+  const RECURRENCE_LABELS = {
+    daily: "Täglich",
+    weekly: "Wöchentlich (Wochentage)",
+    interval_days: "Alle N Tage",
+    trigger: "Sensor-Ereignis",
+  };
+  const TRIGGER_KIND_LABELS = {
+    state: "Status (z. B. Binärsensor)",
+    numeric_state: "Schwellenwert (Zahl)",
+  };
 
   function esc(value) {
     return String(value ?? "").replace(
       /[&<>"']/g,
       (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
     );
+  }
+
+  function emptyTriggerForm() {
+    return { kind: "state", entity_id: "", to_state: "on", above: "", below: "" };
   }
 
   function emptyTaskForm() {
@@ -35,7 +61,13 @@
       enabled: true,
       due_time: "",
       overdue_after_minutes: 60,
-      recurrence: { type: "daily", interval: 1, weekdays: [0], anchor_date: "" },
+      recurrence: {
+        type: "daily",
+        interval: 1,
+        weekdays: [0],
+        anchor_date: "",
+        trigger: emptyTriggerForm(),
+      },
       rotation: { member_ids: [], strategy: "round_robin" },
     };
   }
@@ -57,6 +89,13 @@
         interval: task.recurrence?.interval ?? 1,
         weekdays: task.recurrence?.weekdays ?? [0],
         anchor_date: task.recurrence?.anchor_date ?? "",
+        trigger: {
+          kind: task.recurrence?.trigger?.kind ?? "state",
+          entity_id: task.recurrence?.trigger?.entity_id ?? "",
+          to_state: task.recurrence?.trigger?.to_state ?? "on",
+          above: task.recurrence?.trigger?.above ?? "",
+          below: task.recurrence?.trigger?.below ?? "",
+        },
       },
       rotation: {
         member_ids: [...(task.rotation?.member_ids ?? [])],
@@ -90,10 +129,17 @@
       this._editingMemberId = null;
       this._taskForm = emptyTaskForm();
       this._memberForm = emptyMemberForm();
+      this._hideDone = undefined;
     }
 
     setConfig(config) {
       this._config = config || {};
+      // Only seed from config once; afterwards the in-card toggle button owns it,
+      // so re-applying the same config (e.g. dashboard reload) doesn't undo a
+      // manual toggle.
+      if (this._hideDone === undefined) {
+        this._hideDone = !!this._config.hide_done_tasks;
+      }
     }
 
     static getStubConfig() {
@@ -178,6 +224,17 @@
         .map((s) => ({ id: s.entity_id, name: s.attributes.friendly_name || s.entity_id }));
     }
 
+    // Suggestions for the trigger entity_id field. Sensors/binary_sensors cover
+    // the documented use cases (thresholds, binary state changes); the field
+    // itself stays a free-text input so any other entity can be typed in too.
+    _entityOptions() {
+      if (!this._hass) return [];
+      return Object.values(this._hass.states)
+        .filter((s) => s.entity_id.startsWith("sensor.") || s.entity_id.startsWith("binary_sensor."))
+        .map((s) => ({ id: s.entity_id, name: s.attributes.friendly_name || s.entity_id }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
     // --- actions -------------------------------------------------------
 
     _openTaskForm(taskId) {
@@ -216,6 +273,29 @@
       } else if (form.recurrence.type === "interval_days") {
         recurrence.interval = Math.max(1, Number(form.recurrence.interval) || 1);
         recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
+      } else if (form.recurrence.type === "trigger") {
+        const t = form.recurrence.trigger;
+        if (!t.entity_id.trim()) {
+          alert("Bitte eine Entity ID für den Sensor-Trigger angeben.");
+          return;
+        }
+        if (t.kind === "state") {
+          recurrence.trigger = {
+            kind: "state",
+            entity_id: t.entity_id.trim(),
+            to_state: (t.to_state || "on").trim(),
+          };
+        } else {
+          const above = t.above === "" ? undefined : Number(t.above);
+          const below = t.below === "" ? undefined : Number(t.below);
+          if (above === undefined && below === undefined) {
+            alert("Bitte einen Schwellenwert (ab und/oder bis) angeben.");
+            return;
+          }
+          recurrence.trigger = { kind: "numeric_state", entity_id: t.entity_id.trim() };
+          if (above !== undefined) recurrence.trigger.above = above;
+          if (below !== undefined) recurrence.trigger.below = below;
+        }
       }
 
       const payload = {
@@ -276,17 +356,22 @@
       if (!this._hass) return;
       const title = esc(this._config.title ?? "Family Tasks");
 
+      const hideAddMember = !!this._config.hide_add_member;
+
       this.shadowRoot.innerHTML = `
         <style>${this._styles()}</style>
         <ha-card header="${title}">
           <div class="card-content">
-            <h3>Aufgaben</h3>
+            <div class="section-header">
+              <h3>Aufgaben</h3>
+              <button class="link" data-action="toggle-hide-done">${this._hideDone ? "Erledigte anzeigen" : "Erledigte ausblenden"}</button>
+            </div>
             ${this._renderTaskList()}
             ${this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`}
 
             <h3>Familienmitglieder</h3>
             ${this._renderMemberList()}
-            ${this._memberFormOpen ? this._renderMemberForm() : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
+            ${hideAddMember ? "" : this._memberFormOpen ? this._renderMemberForm() : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
           </div>
         </ha-card>
       `;
@@ -294,8 +379,14 @@
     }
 
     _renderTaskList() {
-      const ids = Object.keys(this._tasks);
-      if (!ids.length) return `<p class="muted">Noch keine Aufgaben angelegt.</p>`;
+      let ids = Object.keys(this._tasks);
+      const totalCount = ids.length;
+      if (this._hideDone) {
+        ids = ids.filter((id) => (this._statusStateForTask(id)?.state ?? "pending") !== "done");
+      }
+      if (!ids.length) {
+        return `<p class="muted">${totalCount ? "Keine offenen Aufgaben." : "Noch keine Aufgaben angelegt."}</p>`;
+      }
 
       return `<div class="list">${ids
         .map((id) => {
@@ -305,16 +396,21 @@
           const assignedId = statusState?.attributes?.assigned_member_id;
           const label = STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
+          const isTrigger = task.recurrence?.type === "trigger";
+          const detail = isTrigger
+            ? `Sensor: ${esc(task.recurrence.trigger?.entity_id ?? "–")}`
+            : `${assignedId ? esc(this._memberName(assignedId)) : "–"} · ${esc(task.points ?? 0)} Pkt.`;
+          const disableActions = status === "done" || status === "idle";
           return `
             <div class="row">
               <div class="row-main">
                 <span class="badge" style="background:${color}">${esc(label)}</span>
                 <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}</span>
-                <span class="muted">${assignedId ? esc(this._memberName(assignedId)) : "–"} · ${esc(task.points ?? 0)} Pkt.</span>
+                <span class="muted">${detail}</span>
               </div>
               <div class="row-actions">
-                <button data-action="complete-task" data-task-id="${id}" ${status === "done" ? "disabled" : ""}>Erledigt</button>
-                <button data-action="skip-task" data-task-id="${id}" ${status === "done" ? "disabled" : ""}>Überspringen</button>
+                <button data-action="complete-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>Erledigt</button>
+                <button data-action="skip-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>Überspringen</button>
                 <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
                 <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>
               </div>
@@ -369,9 +465,7 @@
 
           <label>Wiederholung
             <select data-field="recurrence.type">
-              <option value="daily" ${f.recurrence.type === "daily" ? "selected" : ""}>Täglich</option>
-              <option value="weekly" ${f.recurrence.type === "weekly" ? "selected" : ""}>Wöchentlich (Wochentage)</option>
-              <option value="interval_days" ${f.recurrence.type === "interval_days" ? "selected" : ""}>Alle N Tage</option>
+              ${Object.entries(RECURRENCE_LABELS).map(([value, label]) => `<option value="${value}" ${f.recurrence.type === value ? "selected" : ""}>${label}</option>`).join("")}
             </select>
           </label>
           ${f.recurrence.type === "weekly" ? `<div class="chips">${weekdayCheckboxes}</div>` : ""}
@@ -380,11 +474,14 @@
               <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
               <label>Ankerdatum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>
             </div>` : ""}
+          ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
 
+          ${f.recurrence.type !== "trigger" ? `
           <div class="grid2">
             <label>Fällig um (optional)<input type="time" data-field="due_time" value="${esc(f.due_time)}"></label>
             <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
-          </div>
+          </div>` : `
+          <label>Karenz bis überfällig, nachdem der Sensor ausgelöst hat (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>`}
 
           <label>Rotation
             <select data-field="rotation.strategy">
@@ -400,6 +497,35 @@
             <button type="button" data-action="cancel-task-form">Abbrechen</button>
           </div>
         </form>`;
+    }
+
+    _renderTriggerFields(t) {
+      const entityList = this._entityOptions()
+        .map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`)
+        .join("");
+
+      return `
+        <div class="trigger-fields">
+          <label>Auslöser-Art
+            <select data-field="recurrence.trigger.kind">
+              ${Object.entries(TRIGGER_KIND_LABELS).map(([value, label]) => `<option value="${value}" ${t.kind === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <label>Sensor (Entity ID)
+            <input type="text" list="family-tasks-entity-list" data-field="recurrence.trigger.entity_id"
+                   placeholder="binary_sensor.muelleimer_voll" value="${esc(t.entity_id)}">
+          </label>
+          ${t.kind === "state" ? `
+            <label>Ziel-Zustand<input type="text" data-field="recurrence.trigger.to_state" placeholder="on" value="${esc(t.to_state)}"></label>
+          ` : `
+            <div class="grid2">
+              <label>Ab Wert (above)<input type="number" step="any" data-field="recurrence.trigger.above" value="${esc(t.above)}"></label>
+              <label>Bis Wert (below)<input type="number" step="any" data-field="recurrence.trigger.below" value="${esc(t.below)}"></label>
+            </div>
+          `}
+          <p class="muted">Die Aufgabe wird fällig, sobald der Sensor die Bedingung erfüllt – statt nach einem festen Zeitplan.</p>
+          <datalist id="family-tasks-entity-list">${entityList}</datalist>
+        </div>`;
     }
 
     _renderMemberForm() {
@@ -430,6 +556,8 @@
       return `
         .card-content { padding: 0 16px 16px; }
         h3 { margin: 16px 0 8px; font-size: 1.05em; }
+        .section-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .section-header h3 { margin: 16px 0 8px; }
         .muted { color: var(--secondary-text-color); font-size: 0.9em; }
         .list { display: flex; flex-direction: column; gap: 4px; }
         .row { display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -444,6 +572,10 @@
         button:disabled { opacity: 0.5; cursor: default; }
         button.danger { background: var(--error-color, #db4437); }
         button.add { background: none; color: var(--primary-color); padding: 8px 0; text-align: left; }
+        button.link { background: none; color: var(--primary-color); padding: 4px 0; font-size: 0.8em; }
+        .trigger-fields { display: flex; flex-direction: column; gap: 10px; padding: 8px 10px;
+                           border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); }
+        .trigger-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
         .form { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 16px;
                 padding: 12px; border-radius: 8px; border: 1px solid var(--divider-color, #e0e0e0); }
         .form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
@@ -488,6 +620,10 @@
         else if (action === "cancel-member-form") this._closeMemberForm();
         else if (action === "edit-member") this._openMemberForm(el.dataset.memberId);
         else if (action === "delete-member") this._deleteMember(el.dataset.memberId);
+        else if (action === "toggle-hide-done") {
+          this._hideDone = !this._hideDone;
+          this._render();
+        }
       });
 
       this.shadowRoot.addEventListener("change", (ev) => {
@@ -509,7 +645,9 @@
 
     _applyFieldChange(target, el) {
       const path = el.dataset.field.split(".");
-      if (path.length === 2 && path[1] === "weekdays") {
+      const leaf = path[path.length - 1];
+
+      if (leaf === "weekdays") {
         const idx = Number(el.value);
         const list = target.recurrence.weekdays;
         const pos = list.indexOf(idx);
@@ -517,7 +655,7 @@
         if (!el.checked && pos !== -1) list.splice(pos, 1);
         return;
       }
-      if (path.length === 2 && path[1] === "member_ids") {
+      if (leaf === "member_ids") {
         const list = target.rotation.member_ids;
         const pos = list.indexOf(el.value);
         if (el.checked && pos === -1) list.push(el.value);
@@ -525,12 +663,12 @@
         return;
       }
 
+      // Generic path assignment, e.g. "name" (len 1), "recurrence.type" (len
+      // 2), or "recurrence.trigger.entity_id" (len 3).
       const value = el.type === "checkbox" ? el.checked : el.value;
-      if (path.length === 1) {
-        target[path[0]] = value;
-      } else {
-        target[path[0]][path[1]] = value;
-      }
+      let obj = target;
+      for (let i = 0; i < path.length - 1; i++) obj = obj[path[i]];
+      obj[leaf] = value;
     }
   }
 
