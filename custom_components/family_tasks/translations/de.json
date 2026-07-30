@@ -19,7 +19,8 @@
       "init": {
         "data": {
           "overdue_after_minutes": "Karenzzeit bis überfällig (Minuten)",
-          "default_rotation_strategy": "Standard-Rotationsstrategie"
+          "default_rotation_strategy": "Standard-Rotationsstrategie",
+          "battery_warning_threshold": "Standard-Batteriewarnschwelle (%)"
         }
       }
     }

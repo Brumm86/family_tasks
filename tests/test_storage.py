@@ -6,6 +6,7 @@ import pytest
 import voluptuous as vol
 
 from custom_components.family_tasks.storage import (
+    async_create_battery_overrides_collection,
     async_create_members_collection,
     async_create_tasks_collection,
 )
@@ -195,3 +196,53 @@ async def test_member_create_rejects_unknown_role(hass) -> None:
 
     with pytest.raises(vol.Invalid):
         await members.async_create_item({"name": "Timmy", "role": "grandparent"})
+
+
+async def test_battery_task_recurrence_needs_no_anchor_date_or_trigger(hass) -> None:
+    """A 'battery' recurrence task is valid with no extra recurrence fields."""
+    tasks = await async_create_tasks_collection(hass)
+
+    task = await tasks.async_create_item(
+        {
+            "name": "Batterien wechseln",
+            "recurrence": {"type": "battery"},
+            "rotation": {"member_ids": []},
+        }
+    )
+
+    assert task["recurrence"] == {"type": "battery"}
+
+
+async def test_battery_override_create_applies_defaults(hass) -> None:
+    """Creating a battery override without extra fields defaults to 'included'."""
+    overrides = await async_create_battery_overrides_collection(hass)
+
+    item = await overrides.async_create_item({"entity_id": "sensor.kitchen_battery"})
+
+    assert item["id"]
+    assert item["entity_id"] == "sensor.kitchen_battery"
+    assert item["excluded"] is False
+    assert "threshold" not in item
+
+
+async def test_battery_override_rejects_out_of_range_threshold(hass) -> None:
+    """A threshold outside 0-100 must be rejected."""
+    overrides = await async_create_battery_overrides_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await overrides.async_create_item(
+            {"entity_id": "sensor.kitchen_battery", "threshold": 150}
+        )
+
+
+async def test_battery_override_update_can_clear_threshold(hass) -> None:
+    """Updating 'threshold' to null clears a previously set override."""
+    overrides = await async_create_battery_overrides_collection(hass)
+    item = await overrides.async_create_item(
+        {"entity_id": "sensor.kitchen_battery", "threshold": 30}
+    )
+    assert item["threshold"] == 30
+
+    updated = await overrides.async_update_item(item["id"], {"threshold": None})
+
+    assert "threshold" not in updated

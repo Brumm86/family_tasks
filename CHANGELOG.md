@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.0] - 2026-07-30
+
+### Added
+- **Automatic battery-warning task** (recurrence type "battery"): a single task that aggregates *every* battery-level entity Home Assistant reports (`sensor`/`binary_sensor` with `device_class: battery`) instead of tracking one sensor. It becomes due the moment any monitored battery is at/below its warning threshold and lists exactly which ones (name + level) on the task; stays idle otherwise. New admin-only "Batterien" card section lets individual batteries be excluded from monitoring or given their own warning threshold, backed by the new `family_tasks/battery_override/*` storage-collection websocket API (`storage.BatteryOverrideStorageCollection`). The household-wide default threshold (20% unless changed) is configurable in the integration's Options.
+
 ## [0.4.0] - 2026-07-30
 
 ### Added

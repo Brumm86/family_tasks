@@ -23,8 +23,10 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_BATTERY_WARNING_THRESHOLD,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_OVERDUE_AFTER_MINUTES,
+    DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DOMAIN,
@@ -100,6 +102,19 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     ),
                 ): SelectSelector(
                     SelectSelectorConfig(options=ROTATION_STRATEGIES, translation_key="rotation_strategy")
+                ),
+                # Default warning level for "battery" recurrence tasks (see
+                # RECURRENCE_BATTERY) - overridable per entity via the card's
+                # battery-monitoring section.
+                vol.Optional(
+                    CONF_BATTERY_WARNING_THRESHOLD,
+                    default=options.get(
+                        CONF_BATTERY_WARNING_THRESHOLD, DEFAULT_BATTERY_WARNING_THRESHOLD
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=100, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
+                    )
                 ),
             }
         )

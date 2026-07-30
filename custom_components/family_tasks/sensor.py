@@ -72,6 +72,11 @@ class FamilyTasksTaskStatusSensor(
             "last_completed_at": task.last_completed_at.isoformat()
             if task.last_completed_at
             else None,
+            # Only non-empty for recurrence type "battery" (see
+            # RECURRENCE_BATTERY in const.py): every currently monitored
+            # battery at/below its warning threshold, so the card can list
+            # exactly which ones need charging/swapping.
+            "battery_entities": task.battery_entities,
         }
 
 

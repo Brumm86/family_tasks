@@ -28,12 +28,15 @@ from .const import (
     SERVICE_COMPLETE_TASK,
     SERVICE_SKIP_TASK,
 )
+from .battery import BatteryStateListener
 from .coordinator import FamilyTasksCoordinator
 from .storage import (
+    BatteryOverrideStorageCollection,
     CompletionLogStore,
     MemberStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
+    async_create_battery_overrides_collection,
     async_create_members_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
@@ -60,6 +63,7 @@ class FamilyTasksRuntimeData:
     tasks: TaskStorageCollection
     members: MemberStorageCollection
     trigger_state: TriggerStateStore
+    battery_overrides: BatteryOverrideStorageCollection
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -69,11 +73,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     """Set up Family Tasks from a config entry."""
     tasks = await async_create_tasks_collection(hass)
     members = await async_create_members_collection(hass)
+    battery_overrides = await async_create_battery_overrides_collection(hass)
 
     # The websocket CRUD API is a hass-global registration; only needed once,
     # but harmless/no-ops for a second entry since single_config_entry=True
     # in the manifest already prevents that from happening in practice.
-    async_setup_websocket_api(hass, tasks, members)
+    async_setup_websocket_api(hass, tasks, members, battery_overrides)
 
     completions = CompletionLogStore(hass)
     await completions.async_load()
@@ -81,12 +86,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     trigger_state = await async_create_trigger_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
-        hass, entry, tasks, members, completions, trigger_state
+        hass, entry, tasks, members, completions, trigger_state, battery_overrides
     )
     await coordinator.async_config_entry_first_refresh()
 
     entry.runtime_data = FamilyTasksRuntimeData(
-        coordinator=coordinator, tasks=tasks, members=members, trigger_state=trigger_state
+        coordinator=coordinator,
+        tasks=tasks,
+        members=members,
+        trigger_state=trigger_state,
+        battery_overrides=battery_overrides,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -95,8 +104,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     trigger_listener.async_setup()
     entry.async_on_unload(trigger_listener.async_unload)
 
-    # Re-evaluate derived state whenever a task or member definition changes
-    # (created/edited/deleted) instead of waiting for the next poll interval.
+    # Battery tasks (recurrence type "battery") aggregate every battery-level
+    # entity HA knows about; this requests a refresh as soon as one of them
+    # changes state instead of waiting for the next poll interval.
+    battery_listener = BatteryStateListener(hass, coordinator)
+    battery_listener.async_setup()
+    entry.async_on_unload(battery_listener.async_unload)
+    entry.async_on_unload(coordinator.async_add_listener(battery_listener.async_resubscribe))
+
+    # Re-evaluate derived state whenever a task, member, or battery-override
+    # definition changes (created/edited/deleted) instead of waiting for the
+    # next poll interval.
     async def _async_collection_changed(_change_set: object) -> None:
         await coordinator.async_request_refresh()
 
@@ -108,6 +126,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     )
     entry.async_on_unload(
         members.async_add_change_set_listener(_async_collection_changed)
+    )
+    entry.async_on_unload(
+        battery_overrides.async_add_change_set_listener(_async_collection_changed)
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

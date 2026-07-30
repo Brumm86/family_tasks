@@ -19,7 +19,8 @@
       "init": {
         "data": {
           "overdue_after_minutes": "Grace period before overdue (minutes)",
-          "default_rotation_strategy": "Default rotation strategy"
+          "default_rotation_strategy": "Default rotation strategy",
+          "battery_warning_threshold": "Default battery warning level (%)"
         }
       }
     }

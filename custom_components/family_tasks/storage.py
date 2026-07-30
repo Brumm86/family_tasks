@@ -40,6 +40,7 @@ from .const import (
     ROTATION_ONLY_CHILDREN,
     ROTATION_STRATEGIES,
     ROTATION_STRATEGY_FIXED,
+    STORAGE_KEY_BATTERY_OVERRIDES,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_MEMBERS,
     STORAGE_KEY_TASKS,
@@ -49,6 +50,7 @@ from .const import (
     TASK_TRIGGER_KINDS,
     TASK_TRIGGER_NUMERIC_STATE,
     TASK_TRIGGER_STATE,
+    WS_API_PREFIX_BATTERY_OVERRIDES,
     WS_API_PREFIX_MEMBERS,
     WS_API_PREFIX_TASKS,
     WS_API_TASK_CREATE_OWN,
@@ -257,6 +259,54 @@ class MemberStorageCollection(collection.DictStorageCollection):
         return {**item, **validated}
 
 
+# Per-entity overrides for the automatic battery-warning task (recurrence
+# type "battery", see RECURRENCE_BATTERY in const.py). Items are created
+# lazily, only for batteries the household wants to customize; every other
+# battery entity Home Assistant reports (see
+# battery.async_discover_battery_entity_ids) is monitored using the
+# integration-wide default threshold (CONF_BATTERY_WARNING_THRESHOLD) without
+# needing an item here at all.
+BATTERY_OVERRIDE_CREATE_SCHEMA: collection.VolDictType = {
+    vol.Required("entity_id"): cv.entity_id,
+    vol.Optional("excluded", default=False): bool,
+    # Percent. Absent/None means "use the integration-wide default".
+    vol.Optional("threshold"): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+}
+
+BATTERY_OVERRIDE_UPDATE_SCHEMA: collection.VolDictType = {
+    vol.Optional("excluded"): bool,
+    # Explicitly setting "threshold" to null clears a previously set
+    # override and falls back to the default again.
+    vol.Optional("threshold"): vol.Any(
+        None, vol.All(vol.Coerce(float), vol.Range(min=0, max=100))
+    ),
+}
+
+
+class BatteryOverrideStorageCollection(collection.DictStorageCollection):
+    """Storage collection for per-entity battery-monitoring overrides."""
+
+    CREATE_SCHEMA = vol.Schema(BATTERY_OVERRIDE_CREATE_SCHEMA)
+    UPDATE_SCHEMA = vol.Schema(BATTERY_OVERRIDE_UPDATE_SCHEMA)
+
+    async def _process_create_data(self, data: dict) -> dict:
+        return self.CREATE_SCHEMA(data)
+
+    @callback
+    def _get_suggested_id(self, info: dict) -> str:
+        return info["entity_id"]
+
+    async def _update_data(self, item: dict, update_data: dict) -> dict:
+        validated = self.UPDATE_SCHEMA(update_data)
+        updated = {**item, **validated}
+        if "threshold" in validated and validated["threshold"] is None:
+            # Explicit clear, rather than persisting a literal None - keeps
+            # battery.async_compute_low_batteries' "threshold" in override
+            # check symmetric with an override that never set one.
+            updated.pop("threshold", None)
+        return updated
+
+
 def _member_id_for_user(
     hass: HomeAssistant, members: MemberStorageCollection, user: Any
 ) -> str | None:
@@ -376,6 +426,7 @@ def async_setup_websocket_api(
     hass: HomeAssistant,
     tasks: TaskStorageCollection,
     members: MemberStorageCollection,
+    battery_overrides: BatteryOverrideStorageCollection,
 ) -> None:
     """Expose the storage collections over the websocket API for the frontend."""
     collection.DictStorageCollectionWebsocket(
@@ -387,6 +438,16 @@ def async_setup_websocket_api(
         "member",
         MEMBER_CREATE_SCHEMA,
         MEMBER_UPDATE_SCHEMA,
+    ).async_setup(hass)
+    # Plain CRUD, same as tasks - no extra role guard needed, unlike members:
+    # battery overrides are an admin-only monitoring setting, not something a
+    # "child" member's account would ever touch.
+    collection.DictStorageCollectionWebsocket(
+        battery_overrides,
+        WS_API_PREFIX_BATTERY_OVERRIDES,
+        "battery_override",
+        BATTERY_OVERRIDE_CREATE_SCHEMA,
+        BATTERY_OVERRIDE_UPDATE_SCHEMA,
     ).async_setup(hass)
 
     @websocket_api.async_response
@@ -456,6 +517,22 @@ async def async_create_members_collection(
     members = MemberStorageCollection(store, id_manager)
     await members.async_load()
     return members
+
+
+async def async_create_battery_overrides_collection(
+    hass: HomeAssistant,
+) -> BatteryOverrideStorageCollection:
+    """Create and load the battery-override storage collection."""
+    store: Store = Store(
+        hass,
+        STORAGE_VERSION,
+        STORAGE_KEY_BATTERY_OVERRIDES,
+        minor_version=STORAGE_VERSION_MINOR,
+    )
+    id_manager = collection.IDManager()
+    battery_overrides = BatteryOverrideStorageCollection(store, id_manager)
+    await battery_overrides.async_load()
+    return battery_overrides
 
 
 class CompletionLogStore:

@@ -69,6 +69,16 @@
  * themselves: no points and no assignee choice - both are forced server-side
  * (family_tasks/task/create_own) - but they choose whether that task
  * requires parental confirmation.
+ *
+ * Battery monitoring: a task with recurrence "Batteriewarnung" (backend type
+ * "battery") isn't tied to a single sensor - it aggregates every
+ * battery-level entity Home Assistant reports (sensor/binary_sensor with
+ * device_class "battery") into one task that becomes due, listing exactly
+ * which batteries are low, the moment any of them is at/below its warning
+ * threshold. The admin-only "Batterien" section lets individual batteries be
+ * excluded from monitoring entirely or given their own warning threshold
+ * (overriding the household-wide default set in the integration's Options);
+ * this goes through the family_tasks/battery_override/* websocket API.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -101,6 +111,7 @@
     interval_days: "Alle N Tage",
     once: "Einmalig",
     trigger: "Sensor-Ereignis",
+    battery: "Batteriewarnung (automatisch)",
   };
   // Recurrence types offered to a child creating a task for themselves - no
   // sensor triggers there, that's an admin-only concept tied to entities.
@@ -227,6 +238,7 @@
       this.attachShadow({ mode: "open" });
       this._tasks = {};
       this._members = {};
+      this._batteryOverrides = {};
       this._hass = null;
       this._subscribed = false;
       this._listenersAttached = false;
@@ -360,6 +372,7 @@
     disconnectedCallback() {
       if (this._unsubTasks) this._unsubTasks();
       if (this._unsubMembers) this._unsubMembers();
+      if (this._unsubBatteryOverrides) this._unsubBatteryOverrides();
     }
 
     // Only entities belonging to this integration should trigger a re-render;
@@ -397,6 +410,10 @@
         handle(this._members, "member_id"),
         { type: "family_tasks/member/subscribe" }
       );
+      this._unsubBatteryOverrides = await this._hass.connection.subscribeMessage(
+        handle(this._batteryOverrides, "battery_override_id"),
+        { type: "family_tasks/battery_override/subscribe" }
+      );
     }
 
     _statusStateForTask(taskId) {
@@ -426,6 +443,31 @@
         .filter((s) => s.entity_id.startsWith("sensor.") || s.entity_id.startsWith("binary_sensor."))
         .map((s) => ({ id: s.entity_id, name: s.attributes.friendly_name || s.entity_id }))
         .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    // Every battery-level entity HA currently reports: sensor/binary_sensor
+    // with device_class "battery" (mirrors battery.async_discover_battery_entity_ids
+    // on the backend, just read straight off hass.states client-side instead
+    // of the entity registry - close enough for display purposes here).
+    _batteryEntityOptions() {
+      if (!this._hass) return [];
+      return Object.values(this._hass.states)
+        .filter(
+          (s) =>
+            (s.entity_id.startsWith("sensor.") || s.entity_id.startsWith("binary_sensor.")) &&
+            s.attributes.device_class === "battery"
+        )
+        .map((s) => ({
+          entityId: s.entity_id,
+          name: s.attributes.friendly_name || s.entity_id,
+          isBinary: s.entity_id.startsWith("binary_sensor."),
+          state: s.state,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    _batteryOverrideFor(entityId) {
+      return Object.values(this._batteryOverrides).find((o) => o.entity_id === entityId) ?? null;
     }
 
     // --- actions -------------------------------------------------------
@@ -590,6 +632,46 @@
       await this._hass.callWS({ type: "family_tasks/member/delete", member_id: memberId });
     }
 
+    // Per-battery override editing ("Batterien" section): items are created
+    // lazily and deleted again once they'd be a no-op, matching how
+    // storage.BatteryOverrideStorageCollection is documented to work - only
+    // entities the household actually customized get an item at all.
+    async _saveBatteryOverrideField(el) {
+      const entityId = el.dataset.batteryEntity;
+      const field = el.dataset.batteryField;
+      const existing = this._batteryOverrideFor(entityId);
+
+      let excluded = existing?.excluded ?? false;
+      let threshold = existing?.threshold ?? null;
+      if (field === "excluded") {
+        excluded = el.checked;
+      } else if (field === "threshold") {
+        threshold = el.value === "" ? null : Number(el.value);
+      }
+
+      const isDefault = !excluded && (threshold === null || threshold === undefined);
+
+      if (existing) {
+        if (isDefault) {
+          await this._hass.callWS({
+            type: "family_tasks/battery_override/delete",
+            battery_override_id: existing.id,
+          });
+        } else {
+          await this._hass.callWS({
+            type: "family_tasks/battery_override/update",
+            battery_override_id: existing.id,
+            excluded,
+            threshold,
+          });
+        }
+      } else if (!isDefault) {
+        const payload = { entity_id: entityId, excluded };
+        if (threshold !== null) payload.threshold = threshold;
+        await this._hass.callWS({ type: "family_tasks/battery_override/create", ...payload });
+      }
+    }
+
     // --- rendering -------------------------------------------------------
 
     _render() {
@@ -647,6 +729,8 @@
             ${isAdmin ? (this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`) : ""}
             ${isChildUser && !isAdmin ? (this._ownTaskFormOpen ? this._renderOwnTaskForm() : `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>`) : ""}
 
+            ${isAdmin ? this._renderBatterySection() : ""}
+
             ${membersSection}
           </div>
         </ha-card>
@@ -680,14 +764,22 @@
           const label = STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
           const isTrigger = task.recurrence?.type === "trigger";
+          const isBattery = task.recurrence?.type === "battery";
           // Auto-generated by the coordinator when a child's task needs
           // parental sign-off (see async_complete_task in coordinator.py) -
           // read-only row, and "Erledigt"/"Überspringen" mean confirm/reject.
           const isConfirmation = !!task.confirms;
+          const batteryEntities = statusState?.attributes?.battery_entities ?? [];
           const detail = isConfirmation
             ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
             : isTrigger
             ? `Sensor: ${esc(task.recurrence.trigger?.entity_id ?? "–")}`
+            : isBattery
+            ? batteryEntities.length
+              ? batteryEntities
+                  .map((b) => esc(`${b.name}${b.level !== null && b.level !== undefined ? ` (${b.level}%)` : " (niedrig)"}`))
+                  .join(", ")
+              : "Keine Batterie niedrig"
             : `${assignedId ? esc(this._memberName(assignedId)) : "–"} · ${esc(task.points ?? 0)} Pkt.`;
           const disableActions = status === "done" || status === "idle" || status === "awaiting_confirmation";
           return `
@@ -733,6 +825,49 @@
         .join("")}</div>`;
     }
 
+    // Admin-only settings section for the automatic battery task: every
+    // battery-level entity HA reports, with per-entity "exclude" / "custom
+    // threshold" controls backed by family_tasks/battery_override/*. Doesn't
+    // need a task of recurrence "battery" to exist yet - monitoring is
+    // entity-driven, the task just surfaces the result.
+    _renderBatterySection() {
+      const batteries = this._batteryEntityOptions();
+      return `
+        <div class="section-header">
+          <h3>Batterien</h3>
+        </div>
+        <p class="muted">Legt fest, welche Batterien die Aufgabe "Batteriewarnung" berücksichtigt und ab welchem Stand sie warnt. Der Standard-Schwellenwert wird in den Integrations-Optionen festgelegt (Einstellungen → Geräte &amp; Dienste → Family Tasks → Konfigurieren).</p>
+        ${batteries.length ? `<div class="list">${batteries
+          .map((b) => {
+            const override = this._batteryOverrideFor(b.entityId);
+            const excluded = override?.excluded ?? false;
+            const threshold = override?.threshold;
+            const levelLabel = b.isBinary ? (b.state === "on" ? "Niedrig" : "OK") : `${esc(b.state)}%`;
+            return `
+              <div class="row">
+                <div class="row-main">
+                  <span class="name">${esc(b.name)}</span>
+                  <span class="muted">${esc(b.entityId)} · ${levelLabel}</span>
+                </div>
+                <div class="row-actions battery-controls">
+                  ${b.isBinary ? "" : `
+                  <label class="inline">Schwelle (%)
+                    <input type="number" min="0" max="100" placeholder="Standard"
+                           data-battery-entity="${esc(b.entityId)}" data-battery-field="threshold"
+                           value="${threshold === undefined || threshold === null ? "" : esc(threshold)}"
+                           ${excluded ? "disabled" : ""}>
+                  </label>`}
+                  <label class="inline">
+                    <input type="checkbox" data-battery-entity="${esc(b.entityId)}" data-battery-field="excluded" ${excluded ? "checked" : ""}>
+                    Ausschließen
+                  </label>
+                </div>
+              </div>`;
+          })
+          .join("")}</div>` : `<p class="muted">Keine Batterie-Entities gefunden (Sensoren/Binärsensoren mit device_class "battery").</p>`}
+      `;
+    }
+
     _renderTaskForm() {
       const f = this._taskForm;
       const memberCheckboxes = Object.keys(this._members)
@@ -769,6 +904,8 @@
           ${f.recurrence.type === "once" ? `
             <label>Datum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>` : ""}
           ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
+          ${f.recurrence.type === "battery" ? `
+            <p class="muted">Automatische Sammel-Aufgabe: wird fällig, sobald mindestens eine überwachte Batterie ihren Warn-Schwellenwert erreicht oder unterschreitet, und listet alle betroffenen Batterien auf. Welche Batterien überwacht werden und ab welchem Stand, wird im Abschnitt "Batterien" weiter unten festgelegt.</p>` : ""}
 
           ${f.recurrence.type !== "trigger" ? `
           <div class="grid2">
@@ -924,6 +1061,11 @@
                padding: 8px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); }
         .row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
         .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+        .battery-controls { align-items: center; gap: 12px; }
+        .battery-controls label.inline { flex-direction: row !important; align-items: center; gap: 4px; font-size: 0.85em; }
+        .battery-controls input[type="number"] { width: 70px; padding: 4px; border-radius: 4px;
+                                                   border: 1px solid var(--divider-color, #ccc);
+                                                   background: var(--card-background-color, #fff); color: inherit; }
         .name { font-weight: 500; display: flex; align-items: center; gap: 4px; }
         .badge { display: inline-block; color: #fff; border-radius: 10px; padding: 1px 8px;
                  font-size: 0.75em; width: fit-content; }
@@ -1011,6 +1153,16 @@
       });
 
       this.shadowRoot.addEventListener("change", (ev) => {
+        // Battery-override controls live in the "Batterien" section, not in
+        // one of the [data-form] forms - each field change saves directly
+        // via the family_tasks/battery_override/* websocket API instead of
+        // going through the form-draft/save flow the other forms use.
+        const batteryEl = ev.target.closest("[data-battery-entity]");
+        if (batteryEl) {
+          this._saveBatteryOverrideField(batteryEl);
+          return;
+        }
+
         const el = ev.target.closest("[data-field]");
         if (!el) return;
         const form = ev.target.closest("[data-form]");

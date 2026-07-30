@@ -20,13 +20,17 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .battery import async_compute_low_batteries
 from .const import (
+    CONF_BATTERY_WARNING_THRESHOLD,
     CONF_TASK_REQUIRES_CONFIRMATION,
     COORDINATOR_UPDATE_INTERVAL,
+    DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DOMAIN,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
+    RECURRENCE_BATTERY,
     RECURRENCE_CONFIRMATION,
     RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
@@ -42,6 +46,7 @@ from .const import (
     TASK_STATUS_PENDING,
 )
 from .storage import (
+    BatteryOverrideStorageCollection,
     CompletionLogStore,
     MemberStorageCollection,
     TaskStorageCollection,
@@ -65,6 +70,10 @@ class TaskStatusData:
     assigned_member_id: str | None
     last_completed_by: str | None = None
     last_completed_at: datetime | None = None
+    # Only populated for recurrence type "battery" (see RECURRENCE_BATTERY):
+    # every currently monitored battery at/below its warning threshold, as
+    # dicts {entity_id, name, level, threshold} - see battery.LowBattery.
+    battery_entities: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -93,7 +102,10 @@ def _current_period_date(recurrence: dict, today: date) -> date:
     """Return the date identifying the current occurrence's period."""
     rtype = recurrence["type"]
 
-    if rtype == "daily":
+    if rtype == "daily" or rtype == RECURRENCE_BATTERY:
+        # A battery task's period is daily, same as "daily" - but see
+        # _async_update_data, which downgrades a due occurrence back to
+        # TASK_STATUS_IDLE unless a monitored battery is currently low.
         return today
 
     if rtype == "weekly":
@@ -145,6 +157,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         members: MemberStorageCollection,
         completions: CompletionLogStore,
         trigger_state: TriggerStateStore,
+        battery_overrides: BatteryOverrideStorageCollection,
     ) -> None:
         super().__init__(
             hass,
@@ -157,10 +170,23 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.members = members
         self.completions = completions
         self.trigger_state = trigger_state
+        self.battery_overrides = battery_overrides
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
         today = dt_util.now().date()
+
+        # Computed once per refresh and shared by every recurrence-"battery"
+        # task below (see RECURRENCE_BATTERY in const.py) - which batteries
+        # currently count as "low" doesn't depend on any single task.
+        default_battery_threshold = DEFAULT_BATTERY_WARNING_THRESHOLD
+        if self.config_entry:
+            default_battery_threshold = self.config_entry.options.get(
+                CONF_BATTERY_WARNING_THRESHOLD, DEFAULT_BATTERY_WARNING_THRESHOLD
+            )
+        low_batteries = async_compute_low_batteries(
+            self.hass, self.battery_overrides, default_battery_threshold
+        )
 
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
@@ -225,7 +251,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             else:
                 status = TASK_STATUS_PENDING
 
-            if status != TASK_STATUS_DONE and assigned_member_id:
+            battery_entities: list[dict] = []
+            if recurrence["type"] == RECURRENCE_BATTERY:
+                battery_entities = [low_battery.as_dict() for low_battery in low_batteries]
+                if status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE) and not battery_entities:
+                    # Nothing to charge/swap right now - the task isn't
+                    # "due", it's idle until a monitored battery drops to or
+                    # below its warning threshold.
+                    status = TASK_STATUS_IDLE
+
+            if status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE) and assigned_member_id:
                 open_tasks_by_member[assigned_member_id] = (
                     open_tasks_by_member.get(assigned_member_id, 0) + 1
                 )
@@ -245,6 +280,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 last_completed_at=dt_util.parse_datetime(last_entry["completed_at"])
                 if last_entry
                 else None,
+                battery_entities=battery_entities,
             )
 
         local_now = dt_util.now()

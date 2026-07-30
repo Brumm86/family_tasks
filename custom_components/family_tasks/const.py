@@ -15,9 +15,15 @@ PLATFORMS: Final = [Platform.SENSOR, Platform.BUTTON]
 
 CONF_OVERDUE_AFTER_MINUTES: Final = "overdue_after_minutes"
 CONF_DEFAULT_ROTATION_STRATEGY: Final = "default_rotation_strategy"
+# Household-wide default battery warning level (percent). A "battery"
+# recurrence task treats any monitored sensor at/below this as needing a
+# charge/swap, unless the entity has its own override - see
+# storage.BatteryOverrideStorageCollection / battery.py.
+CONF_BATTERY_WARNING_THRESHOLD: Final = "battery_warning_threshold"
 
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
+DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
 ROTATION_STRATEGY_RANDOM: Final = "random"
@@ -55,6 +61,19 @@ RECURRENCE_TRIGGER: Final = "trigger"
 # is opened programmatically by the coordinator instead of by a bound sensor,
 # and is intentionally not offered in the card's recurrence picker.
 RECURRENCE_CONFIRMATION: Final = "confirmation"
+# A task that aggregates *every* battery-level entity Home Assistant knows
+# about (see battery.py) instead of tracking one sensor like "trigger" does.
+# Its period is daily (see _current_period_date in coordinator.py, same as
+# RECURRENCE_DAILY) but the coordinator downgrades a due occurrence to
+# TASK_STATUS_IDLE whenever no monitored battery is currently at/below its
+# warning threshold - so the task only shows up as due when there is
+# something to actually charge/swap, and lists exactly which batteries via
+# the "battery_entities" attribute (see TaskStatusData). Which entities count
+# (all discovered battery sensors, minus per-entity exclusions/threshold
+# overrides in storage.BatteryOverrideStorageCollection) is independent of
+# any single task, so more than one battery task can exist if a household
+# wants to split them up (e.g. by area or by assignee).
+RECURRENCE_BATTERY: Final = "battery"
 RECURRENCE_TYPES: Final = [
     RECURRENCE_DAILY,
     RECURRENCE_WEEKLY,
@@ -62,6 +81,7 @@ RECURRENCE_TYPES: Final = [
     RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
     RECURRENCE_CONFIRMATION,
+    RECURRENCE_BATTERY,
 ]
 
 # --- Sensor triggers ----------------------------------------------------------
@@ -126,6 +146,7 @@ STORAGE_KEY_TASKS: Final = f"{DOMAIN}.tasks"
 STORAGE_KEY_MEMBERS: Final = f"{DOMAIN}.members"
 STORAGE_KEY_COMPLETIONS: Final = f"{DOMAIN}.completions"
 STORAGE_KEY_TRIGGER_STATE: Final = f"{DOMAIN}.trigger_state"
+STORAGE_KEY_BATTERY_OVERRIDES: Final = f"{DOMAIN}.battery_overrides"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -133,6 +154,7 @@ MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
 WS_API_PREFIX_TASKS: Final = f"{DOMAIN}/task"
 WS_API_PREFIX_MEMBERS: Final = f"{DOMAIN}/member"
+WS_API_PREFIX_BATTERY_OVERRIDES: Final = f"{DOMAIN}/battery_override"
 # Non-admin command: lets a member with role "child" create a task assigned
 # to themselves only (points forced to 0), without needing an administrator
 # account. See ws_create_own_task in storage.py.
