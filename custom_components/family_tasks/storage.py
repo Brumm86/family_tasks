@@ -144,6 +144,15 @@ CONFIRMS_SCHEMA = vol.Schema(
     }
 )
 
+# Present only on auto-generated battery-warning tasks (see
+# FamilyTasksCoordinator._async_raise_battery_alerts in coordinator.py):
+# identifies which monitored battery entity the (recurrence "once") task was
+# raised for, so the coordinator can tell whether that battery's current
+# low-battery episode already has an unresolved task instead of creating a
+# new one every refresh. Never set by the card - the coordinator is the only
+# writer.
+BATTERY_ALERT_SCHEMA = vol.Schema({vol.Required("entity_id"): str})
+
 TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
@@ -154,6 +163,7 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("recurrence"): RECURRENCE_SCHEMA,
     vol.Required("rotation"): ROTATION_SCHEMA,
     vol.Optional("confirms"): CONFIRMS_SCHEMA,
+    vol.Optional("battery_alert"): BATTERY_ALERT_SCHEMA,
     # See CONF_TASK_REQUIRES_CONFIRMATION in const.py. Absent/None means "use
     # the role-based default" (always required for a "child" assignee).
     vol.Optional(CONF_TASK_REQUIRES_CONFIRMATION): bool,

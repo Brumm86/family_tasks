@@ -181,13 +181,12 @@
                 ? `<div class="list">${ranked
                     .map((entry, index) => {
                       const pct = Math.round((entry.points / maxPoints) * 100);
-                      const roleSuffix = entry.member.role === "child" ? " · Kind" : "";
                       return `
                 <div class="row">
                   <div class="rank">${index + 1}</div>
                   <div class="row-main">
                     <div class="row-top">
-                      <span class="name">${entry.member.icon ? `<ha-icon icon="${esc(entry.member.icon)}"></ha-icon> ` : ""}${esc(entry.member.name)}${roleSuffix}</span>
+                      <span class="name">${entry.member.icon ? `<ha-icon icon="${esc(entry.member.icon)}"></ha-icon> ` : ""}${esc(entry.member.name)}</span>
                       <span class="points">${esc(entry.points)} Pkt.</span>
                     </div>
                     <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>

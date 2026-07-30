@@ -2,6 +2,16 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0] - 2026-07-30
+
+### Added
+- **Automatic battery-warning tasks**: monitored batteries no longer need a manually created "Batteriewarnung" task. The moment a battery is at/below its warning threshold (or a binary low-battery sensor trips), the coordinator itself raises a single one-time task naming exactly that battery, assigned to every family member linked to a Home Assistant admin account (`FamilyTasksCoordinator._async_raise_battery_alerts` in `coordinator.py`, new `battery_alert` task field). Only one such task is open per battery at a time - a new one is only raised once the previous alert is completed or skipped. The recurrence type "battery" itself still works for households that already set one up, but is no longer offered when creating a new task.
+- **Collapsible "Batterien" card section**: the admin-only per-battery configuration section (exclude / custom threshold) can now be hidden, the same way the "Familienmitglieder" section already could (new `hide_battery_section` card option, persisted per device). The section has always been configuration-only and stays that way - it never lists or creates tasks itself.
+
+### Changed
+- **"Nur eigene Aufgaben" filter**: a task whose rotation is "Fest zugewiesen" (fixed) with more than one member selected is now shown to every one of those members, not just whoever happens to sit at `rotation.current_index` - a fixed multi-assignee task never actually rotates, so it's a shared task rather than "belonging" to one person at a time. Every other rotation option is unchanged: the filter still only shows the task to whoever is currently responsible for it.
+- **Leaderboard card**: member rows no longer show the "· Kind" role suffix after the name.
+
 ## [0.5.0] - 2026-07-30
 
 ### Added

@@ -31,15 +31,27 @@
  *                               Filters the task list down to occurrences
  *                               assigned to whichever family member is
  *                               linked (via the "person" integration) to the
- *                               logged-in HA user.
+ *                               logged-in HA user - plus, for a task whose
+ *                               rotation is "fest zugewiesen" (fixed) with
+ *                               more than one member selected, every one of
+ *                               those members (a fixed multi-assignee task
+ *                               never rotates, so it's shared rather than
+ *                               "currently belonging" to just one of them).
+ *                               Any other rotation option only ever shows
+ *                               the task to whoever is currently responsible.
+ *   hide_battery_section: true - initial value for the "Batterien"
+ *                               visibility toggle (same first-run-only rule
+ *                               as above). That section is configuration-only
+ *                               (see "Battery monitoring" below) so hiding it
+ *                               has no effect on monitoring itself.
  *
  * Persisted UI state: the "nicht fällige ausblenden" / "Familienmitglieder
- * ausblenden" / "Nur eigene Aufgaben" toggles and the compact-mode button
- * (top-right of the card, hides the toggle buttons to keep the card small
- * during normal use) are saved to localStorage per browser/device, keyed by
- * the card's title, so they survive dashboard reloads. This is per-device
- * state, not synced between devices - each phone/tablet remembers its own
- * preference.
+ * ausblenden" / "Nur eigene Aufgaben" / "Batterien ausblenden" toggles and
+ * the compact-mode button (top-right of the card, hides the toggle buttons
+ * to keep the card small during normal use) are saved to localStorage per
+ * browser/device, keyed by the card's title, so they survive dashboard
+ * reloads. This is per-device state, not synced between devices - each
+ * phone/tablet remembers its own preference.
  *
  * Editing restricted to admins: creating/editing/deleting tasks is only
  * offered to Home Assistant users with an administrator account - Home
@@ -70,15 +82,23 @@
  * (family_tasks/task/create_own) - but they choose whether that task
  * requires parental confirmation.
  *
- * Battery monitoring: a task with recurrence "Batteriewarnung" (backend type
- * "battery") isn't tied to a single sensor - it aggregates every
- * battery-level entity Home Assistant reports (sensor/binary_sensor with
- * device_class "battery") into one task that becomes due, listing exactly
- * which batteries are low, the moment any of them is at/below its warning
- * threshold. The admin-only "Batterien" section lets individual batteries be
- * excluded from monitoring entirely or given their own warning threshold
- * (overriding the household-wide default set in the integration's Options);
- * this goes through the family_tasks/battery_override/* websocket API.
+ * Battery monitoring: Home Assistant's battery-level entities
+ * (sensor/binary_sensor with device_class "battery") are watched
+ * automatically - no task has to be created for it. The moment one is
+ * at/below its warning threshold (or, for a binary_sensor, reports low), the
+ * backend raises a single one-time task by itself, naming exactly that
+ * battery and assigned to every family member linked to a Home Assistant
+ * admin account; it shows up in the normal task list like any other task and
+ * is dismissed the same way (complete/skip). The admin-only "Batterien"
+ * section further down is configuration-only: it lets individual batteries
+ * be excluded from monitoring entirely or given their own warning threshold
+ * (overriding the household-wide default set in the integration's Options),
+ * through the family_tasks/battery_override/* websocket API, and can be
+ * collapsed via hide_battery_section above since it's rarely touched day to
+ * day. (The older recurrence type "battery" - one aggregate task an admin
+ * assigns and that becomes due/idle by itself - still works for any
+ * household that already set one up, but is no longer offered when creating
+ * a new task.)
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -111,7 +131,12 @@
     interval_days: "Alle N Tage",
     once: "Einmalig",
     trigger: "Sensor-Ereignis",
-    battery: "Batteriewarnung (automatisch)",
+    // Legacy recurrence type: battery monitoring now raises its own one-time
+    // tasks automatically (see the "Battery monitoring" note at the top of
+    // this file) - not offered when creating a new task (see
+    // _recurrenceOptionsFor below), kept here only so a household that
+    // already has one of these can still see/edit it correctly.
+    battery: "Batteriewarnung (automatisch, veraltet)",
   };
   // Recurrence types offered to a child creating a task for themselves - no
   // sensor triggers there, that's an admin-only concept tied to entities.
@@ -253,6 +278,7 @@
       this._ownTaskForm = emptyOwnTaskForm();
       this._hideNotDue = undefined;
       this._hideMembers = undefined;
+      this._hideBattery = undefined;
       this._controlsHidden = undefined;
       this._onlyOwnTasks = undefined;
     }
@@ -269,6 +295,7 @@
         const saved = this._loadUiState();
         this._hideNotDue = saved?.hideNotDue ?? !!this._config.hide_not_due_tasks;
         this._hideMembers = saved?.hideMembers ?? !!this._config.hide_members_list;
+        this._hideBattery = saved?.hideBattery ?? !!this._config.hide_battery_section;
         this._controlsHidden = saved?.controlsHidden ?? false;
         this._onlyOwnTasks = saved?.onlyOwnTasks ?? !!this._config.only_own_tasks;
       }
@@ -300,6 +327,7 @@
           JSON.stringify({
             hideNotDue: this._hideNotDue,
             hideMembers: this._hideMembers,
+            hideBattery: this._hideBattery,
             controlsHidden: this._controlsHidden,
             onlyOwnTasks: this._onlyOwnTasks,
           })
@@ -729,7 +757,7 @@
             ${isAdmin ? (this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`) : ""}
             ${isChildUser && !isAdmin ? (this._ownTaskFormOpen ? this._renderOwnTaskForm() : `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>`) : ""}
 
-            ${isAdmin ? this._renderBatterySection() : ""}
+            ${isAdmin ? this._renderBatterySection(controlsHidden) : ""}
 
             ${membersSection}
           </div>
@@ -747,8 +775,21 @@
       if (this._onlyOwnTasks) {
         const currentMemberId = this._currentMemberId();
         ids = ids.filter((id) => {
+          if (!currentMemberId) return false;
+          const rotation = this._tasks[id]?.rotation ?? {};
+          const memberIds = rotation.member_ids ?? [];
+          if (rotation.strategy === "fixed" && memberIds.length > 1) {
+            // Fixed rotation with several assignees never actually rotates -
+            // it's a task the household shares between exactly those people,
+            // so show it to every one of them, not just whichever one
+            // happens to sit at rotation.current_index.
+            return memberIds.includes(currentMemberId);
+          }
+          // Every other rotation option (round robin, random, least points,
+          // or fixed with a single assignee) has exactly one person
+          // currently responsible - only show it to that person.
           const assignedId = this._statusStateForTask(id)?.attributes?.assigned_member_id;
-          return !!currentMemberId && assignedId === currentMemberId;
+          return assignedId === currentMemberId;
         });
       }
       if (!ids.length) {
@@ -825,18 +866,28 @@
         .join("")}</div>`;
     }
 
-    // Admin-only settings section for the automatic battery task: every
-    // battery-level entity HA reports, with per-entity "exclude" / "custom
-    // threshold" controls backed by family_tasks/battery_override/*. Doesn't
-    // need a task of recurrence "battery" to exist yet - monitoring is
-    // entity-driven, the task just surfaces the result.
-    _renderBatterySection() {
+    // Admin-only, configuration-only section: which battery-level entities
+    // HA reports, with per-entity "exclude" / "custom threshold" controls
+    // backed by family_tasks/battery_override/*. Purely a monitoring setting
+    // - the actual low-battery task(s) are raised automatically by the
+    // backend (see the "Battery monitoring" note at the top of this file),
+    // this section never lists or creates one itself. Collapsible like the
+    // "Familienmitglieder" section, since it's set-and-forget for most
+    // households; controlsHidden additionally hides the toggle button itself
+    // (compact mode), same as elsewhere.
+    _renderBatterySection(controlsHidden) {
+      if (this._hideBattery) {
+        return controlsHidden
+          ? ""
+          : `<button class="link" data-action="toggle-hide-battery">Batterien anzeigen</button>`;
+      }
       const batteries = this._batteryEntityOptions();
       return `
         <div class="section-header">
           <h3>Batterien</h3>
+          ${controlsHidden ? "" : `<button class="link" data-action="toggle-hide-battery">Ausblenden</button>`}
         </div>
-        <p class="muted">Legt fest, welche Batterien die Aufgabe "Batteriewarnung" berücksichtigt und ab welchem Stand sie warnt. Der Standard-Schwellenwert wird in den Integrations-Optionen festgelegt (Einstellungen → Geräte &amp; Dienste → Family Tasks → Konfigurieren).</p>
+        <p class="muted">Legt fest, welche Batterien überwacht werden und ab welchem Stand gewarnt wird. Sobald eine überwachte Batterie ihren Schwellenwert erreicht oder unterschreitet, legt die Integration automatisch eine einmalige Aufgabe für diese Batterie an, zugewiesen an alle Familienmitglieder mit Admin-Rechten - dieser Abschnitt dient nur der Konfiguration, nicht der Aufgabenverwaltung. Der Standard-Schwellenwert wird in den Integrations-Optionen festgelegt (Einstellungen → Geräte &amp; Dienste → Family Tasks → Konfigurieren).</p>
         ${batteries.length ? `<div class="list">${batteries
           .map((b) => {
             const override = this._batteryOverrideFor(b.entityId);
@@ -868,6 +919,17 @@
       `;
     }
 
+    // Recurrence options offered in the picker: everything in
+    // RECURRENCE_LABELS except the legacy "battery" type, which is only kept
+    // selectable while it's already the task being edited (see the "Battery
+    // monitoring" note at the top of this file for why it's no longer
+    // offered for new tasks).
+    _recurrenceOptionsFor(currentType) {
+      return Object.entries(RECURRENCE_LABELS).filter(
+        ([value]) => value !== "battery" || currentType === "battery"
+      );
+    }
+
     _renderTaskForm() {
       const f = this._taskForm;
       const memberCheckboxes = Object.keys(this._members)
@@ -892,7 +954,7 @@
 
           <label>Wiederholung
             <select data-field="recurrence.type">
-              ${Object.entries(RECURRENCE_LABELS).map(([value, label]) => `<option value="${value}" ${f.recurrence.type === value ? "selected" : ""}>${label}</option>`).join("")}
+              ${this._recurrenceOptionsFor(f.recurrence.type).map(([value, label]) => `<option value="${value}" ${f.recurrence.type === value ? "selected" : ""}>${label}</option>`).join("")}
             </select>
           </label>
           ${f.recurrence.type === "weekly" ? `<div class="chips">${weekdayCheckboxes}</div>` : ""}
@@ -1139,6 +1201,10 @@
           this._render();
         } else if (action === "toggle-hide-members") {
           this._hideMembers = !this._hideMembers;
+          this._saveUiState();
+          this._render();
+        } else if (action === "toggle-hide-battery") {
+          this._hideBattery = !this._hideBattery;
           this._saveUiState();
           this._render();
         } else if (action === "toggle-only-own-tasks") {

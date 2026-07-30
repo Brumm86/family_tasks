@@ -73,6 +73,16 @@ RECURRENCE_CONFIRMATION: Final = "confirmation"
 # overrides in storage.BatteryOverrideStorageCollection) is independent of
 # any single task, so more than one battery task can exist if a household
 # wants to split them up (e.g. by area or by assignee).
+#
+# As of the household-driven default flow (see
+# FamilyTasksCoordinator._async_raise_battery_alerts in coordinator.py), an
+# admin no longer has to set one of these up: the coordinator itself raises a
+# one-time (RECURRENCE_ONCE) task naming exactly the affected battery the
+# moment it crosses at/below its threshold, assigned to every family member
+# linked to a Home Assistant admin account. The "Batterien" card section is
+# now configuration-only (per-entity exclude/threshold, same as before) and
+# no longer offers creating a new "battery"-recurrence task - this type is
+# kept only so households that already have one keep working unchanged.
 RECURRENCE_BATTERY: Final = "battery"
 RECURRENCE_TYPES: Final = [
     RECURRENCE_DAILY,

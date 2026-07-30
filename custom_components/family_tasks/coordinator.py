@@ -20,7 +20,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .battery import async_compute_low_batteries
+from .battery import LowBattery, async_compute_low_batteries
 from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_TASK_REQUIRES_CONFIRMATION,
@@ -187,6 +187,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         low_batteries = async_compute_low_batteries(
             self.hass, self.battery_overrides, default_battery_threshold
         )
+        # Raised *before* the main loop below so a newly-created alert task
+        # is already reflected in this same refresh's task_statuses, instead
+        # of only appearing after the change-set listener triggers a second
+        # one (see _async_raise_battery_alerts).
+        await self._async_raise_battery_alerts(low_batteries)
 
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
@@ -558,6 +563,85 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         await self.trigger_state.async_clear(confirmation_task_id)
         await self.tasks.async_delete_item(confirmation_task_id)
+
+    async def _async_raise_battery_alerts(self, low_batteries: list[LowBattery]) -> None:
+        """Auto-create a one-time task for every battery that just went low.
+
+        Mirrors the parent-confirmation auto-task pattern above
+        (_async_request_confirmation): rather than requiring an admin to set
+        up and assign a dedicated "battery"-recurrence task (still supported,
+        see RECURRENCE_BATTERY), every monitored battery currently at/below
+        its warning threshold - or, for a binary_sensor, currently reporting
+        low - raises its own RECURRENCE_ONCE task naming exactly that
+        battery, assigned to every family member linked to a Home Assistant
+        admin account.
+
+        Tagged with "battery_alert" (mirrors "confirms" on parent-
+        confirmation tasks) so a battery that stays low doesn't get a fresh
+        task every refresh: only once a battery's previous alert task has
+        been resolved (completed or skipped) does the next refresh raise a
+        new one for it.
+        """
+        if not low_batteries:
+            return
+
+        open_alert_entities: set[str] = set()
+        for task_id, task in self.tasks.data.items():
+            alert = task.get("battery_alert")
+            if not alert:
+                continue
+            anchor_date = task.get("recurrence", {}).get("anchor_date")
+            if anchor_date and self.completions.get_last_entry(task_id, anchor_date) is None:
+                open_alert_entities.add(alert["entity_id"])
+
+        newly_low = [b for b in low_batteries if b.entity_id not in open_alert_entities]
+        if not newly_low:
+            return
+
+        member_ids = await self._async_admin_member_ids()
+        today = dt_util.now().date().isoformat()
+
+        for battery in newly_low:
+            if battery.level is not None:
+                name = f"Batterie wechseln: {battery.name} ({battery.level:g}%)"
+            else:
+                name = f"Batterie prüfen: {battery.name}"
+            payload: dict = {
+                "name": name,
+                "points": 0,
+                "icon": "mdi:battery-alert",
+                "enabled": True,
+                "recurrence": {"type": RECURRENCE_ONCE, "anchor_date": today},
+                "rotation": {"member_ids": member_ids, "strategy": ROTATION_STRATEGY_FIXED},
+                "battery_alert": {"entity_id": battery.entity_id},
+            }
+            await self.tasks.async_create_item(payload)
+            _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
+
+    async def _async_admin_member_ids(self) -> list[str]:
+        """Family members linked (via person_entity_id) to a HA admin account.
+
+        Mirrors storage._member_id_for_user's person-entity lookup, just
+        checked against every admin user instead of one specific caller -
+        there is no notion of "admin" at the family-member level otherwise,
+        only the underlying Home Assistant account.
+        """
+        try:
+            users = await self.hass.auth.async_get_users()
+        except AttributeError:
+            return []
+        admin_user_ids = {user.id for user in users if user.is_admin}
+        if not admin_user_ids:
+            return []
+        member_ids: list[str] = []
+        for member_id, member in self.members.data.items():
+            person_entity_id = member.get("person_entity_id")
+            if not person_entity_id:
+                continue
+            state = self.hass.states.get(person_entity_id)
+            if state is not None and state.attributes.get("user_id") in admin_user_ids:
+                member_ids.append(member_id)
+        return member_ids
 
     async def async_handle_sensor_trigger(self, task_id: str) -> None:
         """Open a new occurrence for a trigger-based task, unless one is open.
