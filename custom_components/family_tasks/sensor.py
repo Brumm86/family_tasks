@@ -116,6 +116,7 @@ class FamilyTasksMemberPointsSensor(
             "member_id": member.member_id,
             "points_today": member.points_today,
             "points_week": member.points_week,
+            "points_month": member.points_month,
             "person_entity_id": member.person_entity_id,
         }
 

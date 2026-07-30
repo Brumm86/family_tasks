@@ -22,6 +22,8 @@ from .const import (
     CARD_FILENAME,
     CARD_URL_PATH,
     DOMAIN,
+    LEADERBOARD_CARD_FILENAME,
+    LEADERBOARD_CARD_URL_PATH,
     PLATFORMS,
     SERVICE_COMPLETE_TASK,
     SERVICE_SKIP_TASK,
@@ -130,20 +132,28 @@ def _get_coordinator(hass: HomeAssistant) -> FamilyTasksCoordinator:
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
-    """Serve the bundled Lovelace card and auto-inject it on every dashboard.
+    """Serve the bundled Lovelace cards and auto-inject them on every dashboard.
 
-    Uses add_extra_js_url so the card is available without the user having
+    Uses add_extra_js_url so the cards are available without the user having
     to add a Lovelace resource manually.
     """
     if hass.data.get(f"{DOMAIN}_frontend_registered"):
         return
     hass.data[f"{DOMAIN}_frontend_registered"] = True
 
-    card_path = Path(__file__).parent / "www" / CARD_FILENAME
+    www_dir = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths(
-        [StaticPathConfig(CARD_URL_PATH, str(card_path), cache_headers=False)]
+        [
+            StaticPathConfig(CARD_URL_PATH, str(www_dir / CARD_FILENAME), cache_headers=False),
+            StaticPathConfig(
+                LEADERBOARD_CARD_URL_PATH,
+                str(www_dir / LEADERBOARD_CARD_FILENAME),
+                cache_headers=False,
+            ),
+        ]
     )
     add_extra_js_url(hass, CARD_URL_PATH)
+    add_extra_js_url(hass, LEADERBOARD_CARD_URL_PATH)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:

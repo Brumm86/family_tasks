@@ -29,7 +29,8 @@
       "options": {
         "round_robin": "Round robin",
         "random": "Random",
-        "fixed": "Fixed assignment"
+        "fixed": "Fixed assignment",
+        "least_points": "Fewest points"
       }
     }
   },

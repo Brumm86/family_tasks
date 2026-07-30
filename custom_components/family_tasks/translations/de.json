@@ -29,7 +29,8 @@
       "options": {
         "round_robin": "Reihum",
         "random": "Zufällig",
-        "fixed": "Fest zugewiesen"
+        "fixed": "Fest zugewiesen",
+        "least_points": "Wenigste Punkte"
       }
     }
   },

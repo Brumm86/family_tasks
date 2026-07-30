@@ -12,19 +12,63 @@
  *
  * Card config options (all optional):
  *   hide_add_member: true    - hide the "+ Mitglied hinzufügen" button/form
- *                               (existing members can still be edited/deleted)
- *   hide_not_due_tasks: true - start with only currently-due tasks shown
- *                               (idle/done hidden; can still be toggled from
- *                               the card itself)
- *   hide_members_list: true  - start with the family members list collapsed
- *                               (can still be toggled from the card itself)
+ *                               (existing members can still be edited/deleted,
+ *                               subject to the admin restriction below)
+ *   hide_not_due_tasks: true - initial value for the "nicht fällige
+ *                               ausblenden" toggle (only used the very first
+ *                               time the card runs on a device - after that
+ *                               the card's own persisted state, see below,
+ *                               wins so a dashboard reload doesn't undo a
+ *                               manual toggle)
+ *   hide_members_list: true  - initial value for the "Familienmitglieder"
+ *                               visibility toggle (same first-run-only rule
+ *                               as above). When active, the entire members
+ *                               section - heading, list, and the "+
+ *                               Mitglied hinzufügen" button - is hidden, not
+ *                               just the list.
+ *   only_own_tasks: true     - initial value for the "Nur eigene Aufgaben"
+ *                               toggle (same first-run-only rule as above).
+ *                               Filters the task list down to occurrences
+ *                               assigned to whichever family member is
+ *                               linked (via the "person" integration) to the
+ *                               logged-in HA user.
+ *
+ * Persisted UI state: the "nicht fällige ausblenden" / "Familienmitglieder
+ * ausblenden" / "Nur eigene Aufgaben" toggles and the compact-mode button
+ * (top-right of the card, hides the toggle buttons to keep the card small
+ * during normal use) are saved to localStorage per browser/device, keyed by
+ * the card's title, so they survive dashboard reloads. This is per-device
+ * state, not synced between devices - each phone/tablet remembers its own
+ * preference.
+ *
+ * Editing restricted to admins: creating/editing/deleting tasks is only
+ * offered to Home Assistant users with an administrator account - Home
+ * Assistant's storage-collection websocket API already rejects these actions
+ * server-side for non-admin users, so the card simply hides the
+ * corresponding buttons/forms for them. Non-admin users can still mark their
+ * own tasks done/skipped - that goes through the complete_task/skip_task
+ * services, not the storage API.
+ *
+ * Family members are additionally locked down for children: a user linked
+ * (via a member's person_entity_id -> the person's user_id) to a member with
+ * role "child" never gets member management UI, regardless of their HA admin
+ * flag - and the backend enforces this too (see
+ * MemberStorageCollectionWebsocket in storage.py), so this holds even
+ * without giving every child their own non-admin HA account.
  *
  * Child tasks: a task assigned to a member with role "child" isn't finished
  * the moment the child taps "Erledigt" - the task shows "Wartet auf
  * Bestätigung" and an auto-generated task appears for the household's
- * parents. A parent completing *that* task finalizes the child's completion
+ * parents, unless the task's "requires_confirmation" field is explicitly
+ * false. A parent completing *that* task finalizes the child's completion
  * (points + rotation); skipping it rejects the claim. These auto-generated
  * tasks are read-only (no edit/delete) since the coordinator manages them.
+ *
+ * A user linked to a "child" member also gets a restricted "+ Eigene Aufgabe
+ * hinzufügen" form (no admin account needed) to create a task for
+ * themselves: no points and no assignee choice - both are forced server-side
+ * (family_tasks/task/create_own) - but they choose whether that task
+ * requires parental confirmation.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -45,12 +89,26 @@
   // Statuses considered "currently due" by the hide-not-due toggle: an
   // occurrence that needs someone to act on it right now.
   const DUE_STATUSES = ["pending", "overdue", "awaiting_confirmation"];
-  const STRATEGY_LABELS = { round_robin: "Reihum", random: "Zufällig", fixed: "Fest zugewiesen" };
+  const STRATEGY_LABELS = {
+    round_robin: "Reihum",
+    random: "Zufällig",
+    fixed: "Fest zugewiesen",
+    least_points: "Wenigste Punkte",
+  };
   const RECURRENCE_LABELS = {
     daily: "Täglich",
     weekly: "Wöchentlich (Wochentage)",
     interval_days: "Alle N Tage",
+    once: "Einmalig",
     trigger: "Sensor-Ereignis",
+  };
+  // Recurrence types offered to a child creating a task for themselves - no
+  // sensor triggers there, that's an admin-only concept tied to entities.
+  const OWN_TASK_RECURRENCE_LABELS = {
+    daily: RECURRENCE_LABELS.daily,
+    weekly: RECURRENCE_LABELS.weekly,
+    interval_days: RECURRENCE_LABELS.interval_days,
+    once: RECURRENCE_LABELS.once,
   };
   const TRIGGER_KIND_LABELS = {
     state: "Status (z. B. Binärsensor)",
@@ -88,6 +146,7 @@
       enabled: true,
       due_time: "",
       overdue_after_minutes: 60,
+      requires_confirmation: true,
       recurrence: {
         type: "daily",
         interval: 1,
@@ -95,7 +154,22 @@
         anchor_date: "",
         trigger: emptyTriggerForm(),
       },
-      rotation: { member_ids: [], strategy: "round_robin" },
+      rotation: { member_ids: [], strategy: "round_robin", only_children: false },
+    };
+  }
+
+  function emptyOwnTaskForm() {
+    // What a "child" member may set when creating a task for themselves (see
+    // family_tasks/task/create_own): no points, no rotation - both are
+    // forced server-side to 0 / [self] - but they do get to choose whether a
+    // parent has to sign off on their completion.
+    return {
+      name: "",
+      icon: "",
+      due_time: "",
+      overdue_after_minutes: 60,
+      requires_confirmation: true,
+      recurrence: { type: "daily", interval: 1, weekdays: [0], anchor_date: "" },
     };
   }
 
@@ -111,6 +185,7 @@
       enabled: task.enabled !== false,
       due_time: task.due_time ?? "",
       overdue_after_minutes: task.overdue_after_minutes ?? 60,
+      requires_confirmation: task.requires_confirmation ?? true,
       recurrence: {
         type: task.recurrence?.type ?? "daily",
         interval: task.recurrence?.interval ?? 1,
@@ -131,6 +206,7 @@
       rotation: {
         member_ids: [...(task.rotation?.member_ids ?? [])],
         strategy: task.rotation?.strategy ?? "round_robin",
+        only_children: task.rotation?.only_children ?? false,
       },
     };
   }
@@ -157,25 +233,106 @@
       this._lastSignature = null;
       this._taskFormOpen = false;
       this._memberFormOpen = false;
+      this._ownTaskFormOpen = false;
       this._editingTaskId = null;
       this._editingMemberId = null;
       this._taskForm = emptyTaskForm();
       this._memberForm = emptyMemberForm();
+      this._ownTaskForm = emptyOwnTaskForm();
       this._hideNotDue = undefined;
       this._hideMembers = undefined;
+      this._controlsHidden = undefined;
+      this._onlyOwnTasks = undefined;
     }
 
     setConfig(config) {
       this._config = config || {};
-      // Only seed from config once; afterwards the in-card toggle buttons own
-      // it, so re-applying the same config (e.g. dashboard reload) doesn't
-      // undo a manual toggle.
+      // Seed the persisted UI toggles once: prefer state saved in
+      // localStorage from a previous session, falling back to the card
+      // config's initial values. Afterwards the in-card buttons own it, so
+      // re-applying the same config (e.g. a dashboard reload) doesn't undo a
+      // manual toggle - and thanks to localStorage the choice now survives
+      // reloads/restarts too, not just re-renders within one session.
       if (this._hideNotDue === undefined) {
-        this._hideNotDue = !!this._config.hide_not_due_tasks;
+        const saved = this._loadUiState();
+        this._hideNotDue = saved?.hideNotDue ?? !!this._config.hide_not_due_tasks;
+        this._hideMembers = saved?.hideMembers ?? !!this._config.hide_members_list;
+        this._controlsHidden = saved?.controlsHidden ?? false;
+        this._onlyOwnTasks = saved?.onlyOwnTasks ?? !!this._config.only_own_tasks;
       }
-      if (this._hideMembers === undefined) {
-        this._hideMembers = !!this._config.hide_members_list;
+    }
+
+    // --- persisted UI state ---------------------------------------------
+
+    // Namespaced per card title so multiple Family Tasks cards on different
+    // dashboards (or with different titles) don't clobber each other's state.
+    _storageKey() {
+      return `family-tasks-card-ui-state:${this._config?.title ?? "default"}`;
+    }
+
+    _loadUiState() {
+      try {
+        const raw = window.localStorage.getItem(this._storageKey());
+        return raw ? JSON.parse(raw) : null;
+      } catch (err) {
+        // Private browsing / disabled storage / corrupt value - the card
+        // still works, it just falls back to the config defaults each time.
+        return null;
       }
+    }
+
+    _saveUiState() {
+      try {
+        window.localStorage.setItem(
+          this._storageKey(),
+          JSON.stringify({
+            hideNotDue: this._hideNotDue,
+            hideMembers: this._hideMembers,
+            controlsHidden: this._controlsHidden,
+            onlyOwnTasks: this._onlyOwnTasks,
+          })
+        );
+      } catch (err) {
+        // Storage unavailable/full - toggle still works for this session,
+        // it just won't be remembered next time.
+      }
+    }
+
+    _isAdmin() {
+      return this._hass?.user ? !!this._hass.user.is_admin : true;
+    }
+
+    // The family member linked to the currently logged-in HA user, resolved
+    // via the "person" integration: a member's person_entity_id points at a
+    // person entity, and that person's "user_id" attribute (set once the
+    // person is linked to a HA user account under Settings -> People)
+    // identifies the HA user. Returns null if the current user isn't linked
+    // to any member.
+    _currentMemberId() {
+      if (!this._hass?.user) return null;
+      const userId = this._hass.user.id;
+      const person = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("person.") && s.attributes.user_id === userId
+      );
+      if (!person) return null;
+      const entry = Object.entries(this._members).find(
+        ([, member]) => member.person_entity_id === person.entity_id
+      );
+      return entry ? entry[0] : null;
+    }
+
+    _currentMember() {
+      const id = this._currentMemberId();
+      return id ? this._members[id] : null;
+    }
+
+    // Whether the logged-in user is linked to a member with role "child".
+    // Drives both the member-management lockout (req: children may not
+    // touch the family member list, regardless of their HA admin flag - the
+    // backend enforces this too, see MemberStorageCollectionWebsocket in
+    // storage.py) and the "+ Eigene Aufgabe" self-service task form.
+    _isChildUser() {
+      return this._currentMember()?.role === "child";
     }
 
     static getStubConfig() {
@@ -299,6 +456,17 @@
       this._render();
     }
 
+    _openOwnTaskForm() {
+      this._ownTaskForm = emptyOwnTaskForm();
+      this._ownTaskFormOpen = true;
+      this._render();
+    }
+
+    _closeOwnTaskForm() {
+      this._ownTaskFormOpen = false;
+      this._render();
+    }
+
     async _saveTask() {
       const form = this._taskForm;
       if (!form.name.trim()) return;
@@ -308,6 +476,8 @@
         recurrence.weekdays = form.recurrence.weekdays.length ? form.recurrence.weekdays : [0];
       } else if (form.recurrence.type === "interval_days") {
         recurrence.interval = Math.max(1, Number(form.recurrence.interval) || 1);
+        recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
+      } else if (form.recurrence.type === "once") {
         recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
       } else if (form.recurrence.type === "trigger") {
         const t = form.recurrence.trigger;
@@ -341,7 +511,9 @@
         rotation: {
           member_ids: form.rotation.member_ids,
           strategy: form.rotation.strategy,
+          only_children: form.rotation.strategy === "least_points" ? !!form.rotation.only_children : false,
         },
+        requires_confirmation: !!form.requires_confirmation,
       };
       if (form.icon) payload.icon = form.icon.trim();
       if (form.due_time) payload.due_time = form.due_time;
@@ -355,6 +527,39 @@
         await this._hass.callWS({ type: "family_tasks/task/create", ...payload });
       }
       this._closeTaskForm();
+    }
+
+    async _saveOwnTask() {
+      // Restricted create path for a "child" member adding a task for
+      // themselves: no admin rights needed, but no points and no choice of
+      // assignee either - the backend forces both (see ws_create_own_task /
+      // family_tasks/task/create_own in storage.py).
+      const form = this._ownTaskForm;
+      if (!form.name.trim()) return;
+
+      const recurrence = { type: form.recurrence.type };
+      if (form.recurrence.type === "weekly") {
+        recurrence.weekdays = form.recurrence.weekdays.length ? form.recurrence.weekdays : [0];
+      } else if (form.recurrence.type === "interval_days") {
+        recurrence.interval = Math.max(1, Number(form.recurrence.interval) || 1);
+        recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
+      } else if (form.recurrence.type === "once") {
+        recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
+      }
+
+      const payload = {
+        name: form.name.trim(),
+        recurrence,
+        requires_confirmation: !!form.requires_confirmation,
+      };
+      if (form.icon) payload.icon = form.icon.trim();
+      if (form.due_time) payload.due_time = form.due_time;
+      if (form.overdue_after_minutes !== "") {
+        payload.overdue_after_minutes = Math.max(0, Number(form.overdue_after_minutes) || 0);
+      }
+
+      await this._hass.callWS({ type: "family_tasks/task/create_own", ...payload });
+      this._closeOwnTaskForm();
     }
 
     async _deleteTask(taskId) {
@@ -392,35 +597,75 @@
       const title = esc(this._config.title ?? "Family Tasks");
 
       const hideAddMember = !!this._config.hide_add_member;
+      const isAdmin = this._isAdmin();
+      const isChildUser = this._isChildUser();
+      // Children may never create/edit/delete family members, independent of
+      // their HA admin flag - the backend enforces this too (see
+      // MemberStorageCollectionWebsocket in storage.py); this just keeps the
+      // buttons from showing up for them in the first place.
+      const canManageMembers = isAdmin && !isChildUser;
+      // Compact mode: hides the section toggle buttons below (not the
+      // section headers themselves) to keep the card small day-to-day. The
+      // button that controls it always stays visible, top-right of the card.
+      const controlsHidden = this._controlsHidden;
+
+      const membersSection = this._hideMembers
+        ? controlsHidden
+          ? ""
+          : `<button class="link" data-action="toggle-hide-members">Familienmitglieder anzeigen</button>`
+        : `
+            <div class="section-header">
+              <h3>Familienmitglieder</h3>
+              ${controlsHidden ? "" : `<button class="link" data-action="toggle-hide-members">Ausblenden</button>`}
+            </div>
+            ${this._renderMemberList(canManageMembers)}
+            ${!canManageMembers || hideAddMember ? "" : this._memberFormOpen ? this._renderMemberForm() : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
+          `;
 
       this.shadowRoot.innerHTML = `
         <style>${this._styles()}</style>
-        <ha-card header="${title}">
+        <ha-card>
+          <div class="card-header">
+            <div class="name">${title}</div>
+            <button
+              class="icon-btn"
+              data-action="toggle-controls"
+              title="${controlsHidden ? "Steuerungen einblenden" : "Steuerungen ausblenden"}"
+              aria-label="${controlsHidden ? "Steuerungen einblenden" : "Steuerungen ausblenden"}"
+            ><ha-icon icon="${controlsHidden ? "mdi:tune-variant" : "mdi:tune"}"></ha-icon></button>
+          </div>
           <div class="card-content">
             <div class="section-header">
               <h3>Aufgaben</h3>
-              <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
+              ${controlsHidden ? "" : `
+                <div class="header-actions">
+                  <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
+                  <button class="link" data-action="toggle-only-own-tasks">${this._onlyOwnTasks ? "Alle Aufgaben anzeigen" : "Nur eigene Aufgaben"}</button>
+                </div>`}
             </div>
-            ${this._renderTaskList()}
-            ${this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`}
+            ${this._renderTaskList(isAdmin)}
+            ${isAdmin ? (this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`) : ""}
+            ${isChildUser && !isAdmin ? (this._ownTaskFormOpen ? this._renderOwnTaskForm() : `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>`) : ""}
 
-            <div class="section-header">
-              <h3>Familienmitglieder</h3>
-              <button class="link" data-action="toggle-hide-members">${this._hideMembers ? "Anzeigen" : "Ausblenden"}</button>
-            </div>
-            ${this._hideMembers ? "" : this._renderMemberList()}
-            ${hideAddMember ? "" : this._memberFormOpen ? this._renderMemberForm() : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
+            ${membersSection}
           </div>
         </ha-card>
       `;
       this._attachListenersOnce();
     }
 
-    _renderTaskList() {
+    _renderTaskList(isAdmin) {
       let ids = Object.keys(this._tasks);
       const totalCount = ids.length;
       if (this._hideNotDue) {
         ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
+      }
+      if (this._onlyOwnTasks) {
+        const currentMemberId = this._currentMemberId();
+        ids = ids.filter((id) => {
+          const assignedId = this._statusStateForTask(id)?.attributes?.assigned_member_id;
+          return !!currentMemberId && assignedId === currentMemberId;
+        });
       }
       if (!ids.length) {
         return `<p class="muted">${totalCount ? "Keine fälligen Aufgaben." : "Noch keine Aufgaben angelegt."}</p>`;
@@ -455,7 +700,7 @@
               <div class="row-actions">
                 <button data-action="complete-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
                 <button data-action="skip-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>
-                ${isConfirmation ? "" : `
+                ${isConfirmation || !isAdmin ? "" : `
                 <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
                 <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>`}
               </div>
@@ -464,7 +709,7 @@
         .join("")}</div>`;
     }
 
-    _renderMemberList() {
+    _renderMemberList(canManageMembers) {
       const ids = Object.keys(this._members);
       if (!ids.length) return `<p class="muted">Noch keine Familienmitglieder angelegt.</p>`;
 
@@ -478,10 +723,11 @@
                 <span class="name">${esc(member.name)}</span>
                 <span class="muted">${member.person_entity_id ? esc(member.person_entity_id) : "keine Verknüpfung"}${member.active === false ? " · inaktiv" : ""}${roleSuffix}</span>
               </div>
+              ${canManageMembers ? `
               <div class="row-actions">
                 <button data-action="edit-member" data-member-id="${id}">Bearbeiten</button>
                 <button data-action="delete-member" data-member-id="${id}" class="danger">Löschen</button>
-              </div>
+              </div>` : ""}
             </div>`;
         })
         .join("")}</div>`;
@@ -520,6 +766,8 @@
               <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
               <label>Ankerdatum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>
             </div>` : ""}
+          ${f.recurrence.type === "once" ? `
+            <label>Datum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>` : ""}
           ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
 
           ${f.recurrence.type !== "trigger" ? `
@@ -535,12 +783,59 @@
             </select>
           </label>
           <div class="chips">${memberCheckboxes}</div>
+          ${f.rotation.strategy === "least_points" ? `
+          <label class="inline"><input type="checkbox" data-field="rotation.only_children" ${f.rotation.only_children ? "checked" : ""}> Nur Punkte von Kindern berücksichtigen</label>` : ""}
 
           <label class="inline"><input type="checkbox" data-field="enabled" ${f.enabled ? "checked" : ""}> Aktiv</label>
+          <label class="inline"><input type="checkbox" data-field="requires_confirmation" ${f.requires_confirmation ? "checked" : ""}> Bestätigung durch Eltern erforderlich (bei Kindern)</label>
 
           <div class="form-actions">
             <button type="submit" data-action="save-task">Speichern</button>
             <button type="button" data-action="cancel-task-form">Abbrechen</button>
+          </div>
+        </form>`;
+    }
+
+    _renderOwnTaskForm() {
+      // Restricted form for a "child" member creating a task for themselves:
+      // no points, no assignee choice, no sensor triggers - just what they
+      // want done, how often, and whether a parent has to sign off.
+      const f = this._ownTaskForm;
+      const weekdayCheckboxes = WEEKDAY_LABELS.map((label, idx) => {
+        const checked = f.recurrence.weekdays.includes(idx) ? "checked" : "";
+        return `<label class="chip"><input type="checkbox" data-field="recurrence.weekdays" value="${idx}" ${checked}> ${label}</label>`;
+      }).join("");
+
+      return `
+        <form class="form" data-form="own-task">
+          <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
+          <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></label>
+
+          <label>Wiederholung
+            <select data-field="recurrence.type">
+              ${Object.entries(OWN_TASK_RECURRENCE_LABELS).map(([value, label]) => `<option value="${value}" ${f.recurrence.type === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          ${f.recurrence.type === "weekly" ? `<div class="chips">${weekdayCheckboxes}</div>` : ""}
+          ${f.recurrence.type === "interval_days" ? `
+            <div class="grid2">
+              <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
+              <label>Ankerdatum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>
+            </div>` : ""}
+          ${f.recurrence.type === "once" ? `
+            <label>Datum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>` : ""}
+
+          <div class="grid2">
+            <label>Fällig um (optional)<input type="time" data-field="due_time" value="${esc(f.due_time)}"></label>
+            <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
+          </div>
+
+          <label class="inline"><input type="checkbox" data-field="requires_confirmation" ${f.requires_confirmation ? "checked" : ""}> Bestätigung durch Eltern anfordern</label>
+          <p class="muted">Eigene Aufgaben werden ohne Punkte angelegt und nur dir zugewiesen.</p>
+
+          <div class="form-actions">
+            <button type="submit" data-action="save-own-task">Speichern</button>
+            <button type="button" data-action="cancel-own-task-form">Abbrechen</button>
           </div>
         </form>`;
     }
@@ -609,10 +904,20 @@
 
     _styles() {
       return `
-        .card-content { padding: 0 16px 16px; }
+        .card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                       padding: 16px 16px 0; }
+        .card-header .name { font-size: 1.2em; font-weight: 400; letter-spacing: -0.012em;
+                              line-height: 1.2; color: var(--ha-card-header-color, var(--primary-text-color)); }
+        .icon-btn { background: none; padding: 4px; border-radius: 50%; width: 32px; height: 32px;
+                    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+                    color: var(--secondary-text-color); }
+        .icon-btn:hover { background: var(--secondary-background-color, #f2f2f2); }
+        .icon-btn ha-icon { --mdc-icon-size: 20px; }
+        .card-content { padding: 8px 16px 16px; }
         h3 { margin: 16px 0 8px; font-size: 1.05em; }
         .section-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .section-header h3 { margin: 16px 0 8px; }
+        .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .muted { color: var(--secondary-text-color); font-size: 0.9em; }
         .list { display: flex; flex-direction: column; gap: 4px; }
         .row { display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -656,30 +961,51 @@
         const form = ev.target.closest("[data-form]");
         if (!form) return;
         if (form.dataset.form === "task") this._saveTask();
-        if (form.dataset.form === "member") this._saveMember();
+        else if (form.dataset.form === "member") this._saveMember();
+        else if (form.dataset.form === "own-task") this._saveOwnTask();
       });
 
       this.shadowRoot.addEventListener("click", (ev) => {
         const el = ev.target.closest("[data-action]");
         if (!el) return;
         const action = el.dataset.action;
-        if (action === "new-task") this._openTaskForm(null);
+        // Edit/delete/create actions are also gated here (in addition to the
+        // buttons simply not being rendered for non-admins/children) as a
+        // defense-in-depth check - the backend enforces both the admin
+        // requirement and the child-may-not-touch-members rule regardless
+        // (see the "editing restricted to admins" note at the top of this
+        // file and MemberStorageCollectionWebsocket in storage.py), but
+        // failing silently client-side avoids a confusing websocket error
+        // reaching a child's screen.
+        if (action === "new-task") { if (this._isAdmin()) this._openTaskForm(null); }
         else if (action === "cancel-task-form") this._closeTaskForm();
-        else if (action === "edit-task") this._openTaskForm(el.dataset.taskId);
-        else if (action === "delete-task") this._deleteTask(el.dataset.taskId);
+        else if (action === "edit-task") { if (this._isAdmin()) this._openTaskForm(el.dataset.taskId); }
+        else if (action === "delete-task") { if (this._isAdmin()) this._deleteTask(el.dataset.taskId); }
         else if (action === "complete-task")
           this._hass.callService("family_tasks", "complete_task", { task_id: el.dataset.taskId });
         else if (action === "skip-task")
           this._hass.callService("family_tasks", "skip_task", { task_id: el.dataset.taskId });
-        else if (action === "new-member") this._openMemberForm(null);
+        else if (action === "new-own-task") { if (this._isChildUser()) this._openOwnTaskForm(); }
+        else if (action === "cancel-own-task-form") this._closeOwnTaskForm();
+        else if (action === "new-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(null); }
         else if (action === "cancel-member-form") this._closeMemberForm();
-        else if (action === "edit-member") this._openMemberForm(el.dataset.memberId);
-        else if (action === "delete-member") this._deleteMember(el.dataset.memberId);
+        else if (action === "edit-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(el.dataset.memberId); }
+        else if (action === "delete-member") { if (this._isAdmin() && !this._isChildUser()) this._deleteMember(el.dataset.memberId); }
         else if (action === "toggle-hide-not-due") {
           this._hideNotDue = !this._hideNotDue;
+          this._saveUiState();
           this._render();
         } else if (action === "toggle-hide-members") {
           this._hideMembers = !this._hideMembers;
+          this._saveUiState();
+          this._render();
+        } else if (action === "toggle-only-own-tasks") {
+          this._onlyOwnTasks = !this._onlyOwnTasks;
+          this._saveUiState();
+          this._render();
+        } else if (action === "toggle-controls") {
+          this._controlsHidden = !this._controlsHidden;
+          this._saveUiState();
           this._render();
         }
       });
@@ -689,14 +1015,21 @@
         if (!el) return;
         const form = ev.target.closest("[data-form]");
         if (!form) return;
-        const target = form.dataset.form === "task" ? this._taskForm : this._memberForm;
+        const target =
+          form.dataset.form === "task"
+            ? this._taskForm
+            : form.dataset.form === "member"
+            ? this._memberForm
+            : this._ownTaskForm;
         this._applyFieldChange(target, el);
         // Re-render only the form itself in place so unrelated typing isn't lost,
         // but recurrence-type / rotation changes need the sub-fields to redraw.
         if (form.dataset.form === "task") {
           form.outerHTML = this._renderTaskForm();
-        } else {
+        } else if (form.dataset.form === "member") {
           form.outerHTML = this._renderMemberForm();
+        } else {
+          form.outerHTML = this._renderOwnTaskForm();
         }
       });
     }

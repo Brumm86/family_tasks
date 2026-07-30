@@ -21,14 +21,18 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_TASK_REQUIRES_CONFIRMATION,
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DOMAIN,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
     RECURRENCE_CONFIRMATION,
+    RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
+    ROTATION_ONLY_CHILDREN,
     ROTATION_STRATEGY_FIXED,
+    ROTATION_STRATEGY_LEAST_POINTS,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
     TASK_STATUS_AWAITING_CONFIRMATION,
@@ -72,6 +76,7 @@ class MemberSummaryData:
     person_entity_id: str | None
     points_today: int
     points_week: int
+    points_month: int
     points_total: int
     open_tasks: int
 
@@ -105,6 +110,13 @@ def _current_period_date(recurrence: dict, today: date) -> date:
         delta_days = (today - anchor).days
         period_index = delta_days // interval if delta_days >= 0 else 0
         return anchor + timedelta(days=period_index * interval)
+
+    if rtype == RECURRENCE_ONCE:
+        # A single, never-repeating occurrence: the period is always the
+        # task's anchor date itself, regardless of "today" - so once it's
+        # completed/skipped for that date, the (task_id, period_key) pair
+        # never comes up again and the task stays "done" for good.
+        return date.fromisoformat(recurrence["anchor_date"])
 
     return today
 
@@ -178,10 +190,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
             rotation = task["rotation"]
             member_ids = rotation.get("member_ids") or []
-            assigned_member_id = None
-            if member_ids:
-                index = rotation.get("current_index", 0) % len(member_ids)
-                assigned_member_id = member_ids[index]
+            assigned_member_id = self._assigned_member_id(rotation, member_ids)
 
             if recurrence["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
                 open_occurrence = self.trigger_state.get(task_id)
@@ -238,10 +247,12 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 else None,
             )
 
-        start_of_today = dt_util.as_utc(
-            dt_util.start_of_local_day(dt_util.now())
-        )
+        local_now = dt_util.now()
+        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
         start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
+        start_of_month = dt_util.as_utc(
+            dt_util.start_of_local_day(local_now.replace(day=1))
+        )
 
         member_summaries: dict[str, MemberSummaryData] = {}
         for member_id, member in self.members.data.items():
@@ -251,6 +262,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 person_entity_id=member.get("person_entity_id"),
                 points_today=self.completions.points_since(member_id, start_of_today),
                 points_week=self.completions.points_since(member_id, start_of_week),
+                points_month=self.completions.points_since(member_id, start_of_month),
                 points_total=self.completions.points_since(
                     member_id, datetime.min.replace(tzinfo=dt_util.UTC)
                 ),
@@ -315,14 +327,22 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         rotation = task["rotation"]
         member_ids = rotation.get("member_ids") or []
         index = rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
-        acting_member_id = member_id or (member_ids[index] if member_ids else None)
+        acting_member_id = member_id or self._assigned_member_id(rotation, member_ids)
 
         if acting_member_id and self._member_role(acting_member_id) == MEMBER_ROLE_CHILD:
-            await self._async_request_confirmation(
-                task, task_id, period_key, acting_member_id
-            )
-            await self.async_request_refresh()
-            return
+            requires_confirmation = task.get(CONF_TASK_REQUIRES_CONFIRMATION)
+            if requires_confirmation is None:
+                # Legacy/default behavior: a task assigned to a child always
+                # needs a parent's sign-off unless the task explicitly says
+                # otherwise (see CONF_TASK_REQUIRES_CONFIRMATION in const.py -
+                # only self-created child tasks currently set this to False).
+                requires_confirmation = True
+            if requires_confirmation:
+                await self._async_request_confirmation(
+                    task, task_id, period_key, acting_member_id
+                )
+                await self.async_request_refresh()
+                return
 
         await self.completions.async_add_entry(
             task_id=task_id,
@@ -377,6 +397,45 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     def _member_role(self, member_id: str) -> str:
         member = self.members.data.get(member_id)
         return member.get("role", MEMBER_ROLE_PARENT) if member else MEMBER_ROLE_PARENT
+
+    def _assigned_member_id(self, rotation: dict, member_ids: list[str]) -> str | None:
+        """Return who a task's next/current occurrence is assigned to.
+
+        For every strategy except "least_points" this is simply
+        ``member_ids[current_index]``. "least_points" instead recomputes the
+        assignee fresh every time from the completion log - see
+        ``_member_with_least_points`` - so it always reflects the current
+        point standings instead of a stored index.
+        """
+        if not member_ids:
+            return None
+        strategy = rotation.get("strategy", ROTATION_STRATEGY_ROUND_ROBIN)
+        if strategy == ROTATION_STRATEGY_LEAST_POINTS:
+            return self._member_with_least_points(
+                member_ids, rotation.get(ROTATION_ONLY_CHILDREN, False)
+            )
+        index = rotation.get("current_index", 0) % len(member_ids)
+        return member_ids[index]
+
+    def _member_with_least_points(
+        self, member_ids: list[str], only_children: bool
+    ) -> str | None:
+        """Pick whoever in member_ids currently has the fewest (all-time) points.
+
+        If only_children is set, the comparison is narrowed to those
+        candidates with role "child" - falling back to the full pool if none
+        of them are children, so the strategy still assigns someone rather
+        than silently picking nobody.
+        """
+        if not member_ids:
+            return None
+        candidates = member_ids
+        if only_children:
+            children = [m for m in member_ids if self._member_role(m) == MEMBER_ROLE_CHILD]
+            if children:
+                candidates = children
+        since = datetime.min.replace(tzinfo=dt_util.UTC)
+        return min(candidates, key=lambda m: self.completions.points_since(m, since))
 
     def _has_open_confirmation(self, task_id: str, period_key: str) -> bool:
         """Whether an unresolved parent confirmation is already open for this occurrence."""

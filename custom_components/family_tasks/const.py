@@ -22,15 +22,32 @@ DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
 ROTATION_STRATEGY_RANDOM: Final = "random"
 ROTATION_STRATEGY_FIXED: Final = "fixed"
+# Picks whichever candidate in rotation.member_ids currently has the fewest
+# points (see ROTATION_ONLY_CHILDREN below to narrow the candidate pool to
+# members with role "child"). Unlike the other strategies this is computed
+# fresh on every coordinator refresh instead of advancing a stored index -
+# see FamilyTasksCoordinator._member_with_least_points.
+ROTATION_STRATEGY_LEAST_POINTS: Final = "least_points"
 ROTATION_STRATEGIES: Final = [
     ROTATION_STRATEGY_ROUND_ROBIN,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_FIXED,
+    ROTATION_STRATEGY_LEAST_POINTS,
 ]
+
+# Rotation option: when the strategy is ROTATION_STRATEGY_LEAST_POINTS, only
+# consider members with role MEMBER_ROLE_CHILD among rotation.member_ids when
+# picking the least-points candidate (falls back to the full pool if none of
+# the candidates are children).
+ROTATION_ONLY_CHILDREN: Final = "only_children"
 
 RECURRENCE_DAILY: Final = "daily"
 RECURRENCE_WEEKLY: Final = "weekly"
 RECURRENCE_INTERVAL_DAYS: Final = "interval_days"
+# A single occurrence that never repeats: due once on "anchor_date" and, once
+# completed/skipped, stays done forever because its period_key (the anchor
+# date) never changes - see _current_period_date in coordinator.py.
+RECURRENCE_ONCE: Final = "once"
 RECURRENCE_TRIGGER: Final = "trigger"
 # Internal-only recurrence used for auto-generated parent confirmation tasks
 # (see const "Child tasks / parent confirmation" section below). Behaves like
@@ -42,6 +59,7 @@ RECURRENCE_TYPES: Final = [
     RECURRENCE_DAILY,
     RECURRENCE_WEEKLY,
     RECURRENCE_INTERVAL_DAYS,
+    RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
     RECURRENCE_CONFIRMATION,
 ]
@@ -92,6 +110,13 @@ MEMBER_ROLE_PARENT: Final = "parent"
 MEMBER_ROLE_CHILD: Final = "child"
 MEMBER_ROLES: Final = [MEMBER_ROLE_PARENT, MEMBER_ROLE_CHILD]
 
+# Per-task override of whether a child's completion needs parental sign-off
+# (see the confirmation flow above). When absent/None, tasks assigned to a
+# "child" member always require confirmation - the historical, still-default
+# behavior. Children creating a task for *themselves* (see
+# WS_API_TASK_CREATE_OWN below) choose this explicitly instead.
+CONF_TASK_REQUIRES_CONFIRMATION: Final = "requires_confirmation"
+
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_VERSION: Final = 1
@@ -108,6 +133,10 @@ MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
 WS_API_PREFIX_TASKS: Final = f"{DOMAIN}/task"
 WS_API_PREFIX_MEMBERS: Final = f"{DOMAIN}/member"
+# Non-admin command: lets a member with role "child" create a task assigned
+# to themselves only (points forced to 0), without needing an administrator
+# account. See ws_create_own_task in storage.py.
+WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
 
 # --- Coordinator --------------------------------------------------------------
 
@@ -125,6 +154,9 @@ ATTR_MEMBER_ID: Final = "member_id"
 
 CARD_FILENAME: Final = "family-tasks-card.js"
 CARD_URL_PATH: Final = f"/family_tasks_static/{CARD_FILENAME}"
+
+LEADERBOARD_CARD_FILENAME: Final = "family-tasks-leaderboard-card.js"
+LEADERBOARD_CARD_URL_PATH: Final = f"/family_tasks_static/{LEADERBOARD_CARD_FILENAME}"
 
 # --- Misc -----------------------------------------------------------------
 
