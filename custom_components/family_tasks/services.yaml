@@ -15,3 +15,14 @@ skip_task:
       required: true
       selector:
         text:
+
+toggle_subtask:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+    subtask_id:
+      required: true
+      selector:
+        text:

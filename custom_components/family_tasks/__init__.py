@@ -15,9 +15,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.loader import async_get_integration
 
 from .const import (
     ATTR_MEMBER_ID,
+    ATTR_SUBTASK_ID,
     ATTR_TASK_ID,
     CARD_FILENAME,
     CARD_URL_PATH,
@@ -27,16 +29,19 @@ from .const import (
     PLATFORMS,
     SERVICE_COMPLETE_TASK,
     SERVICE_SKIP_TASK,
+    SERVICE_TOGGLE_SUBTASK,
 )
 from .battery import BatteryStateListener
 from .coordinator import FamilyTasksCoordinator
 from .storage import (
     BatteryOverrideStorageCollection,
+    ChecklistStateStore,
     CompletionLogStore,
     MemberStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
     async_create_battery_overrides_collection,
+    async_create_checklist_state_store,
     async_create_members_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
@@ -53,6 +58,12 @@ COMPLETE_TASK_SCHEMA = vol.Schema(
     }
 )
 SKIP_TASK_SCHEMA = vol.Schema({vol.Required(ATTR_TASK_ID): cv.string})
+TOGGLE_SUBTASK_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_TASK_ID): cv.string,
+        vol.Required(ATTR_SUBTASK_ID): cv.string,
+    }
+)
 
 
 @dataclass(slots=True)
@@ -64,6 +75,7 @@ class FamilyTasksRuntimeData:
     members: MemberStorageCollection
     trigger_state: TriggerStateStore
     battery_overrides: BatteryOverrideStorageCollection
+    checklist_state: ChecklistStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -84,9 +96,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     await completions.async_load()
 
     trigger_state = await async_create_trigger_state_store(hass)
+    checklist_state = await async_create_checklist_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
-        hass, entry, tasks, members, completions, trigger_state, battery_overrides
+        hass,
+        entry,
+        tasks,
+        members,
+        completions,
+        trigger_state,
+        battery_overrides,
+        checklist_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -96,6 +116,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         members=members,
         trigger_state=trigger_state,
         battery_overrides=battery_overrides,
+        checklist_state=checklist_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -157,10 +178,26 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 
     Uses add_extra_js_url so the cards are available without the user having
     to add a Lovelace resource manually.
+
+    The injected URLs carry a "?v=<integration version>" cache-buster. Static
+    paths are registered with cache_headers=False, but that alone doesn't
+    stop every client from caching the file: browsers may still apply
+    heuristic caching, and Home Assistant's installed-PWA/companion-app
+    service worker in particular caches same-URL requests aggressively
+    regardless of response headers. Without a version-changing URL, a device
+    that already cached an older family-tasks-card.js keeps using it after an
+    update - including one from before some websocket field or attribute it
+    now relies on existed - which is exactly the "cards occasionally don't
+    load correctly" symptom: it isn't a load failure so much as some devices
+    silently running stale, incompatible JS. Bumping the query string on every
+    release forces a fresh fetch instead.
     """
     if hass.data.get(f"{DOMAIN}_frontend_registered"):
         return
     hass.data[f"{DOMAIN}_frontend_registered"] = True
+
+    integration = await async_get_integration(hass, DOMAIN)
+    cache_buster = f"v={integration.version}"
 
     www_dir = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths(
@@ -173,8 +210,8 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
             ),
         ]
     )
-    add_extra_js_url(hass, CARD_URL_PATH)
-    add_extra_js_url(hass, LEADERBOARD_CARD_URL_PATH)
+    add_extra_js_url(hass, f"{CARD_URL_PATH}?{cache_buster}")
+    add_extra_js_url(hass, f"{LEADERBOARD_CARD_URL_PATH}?{cache_buster}")
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
@@ -192,9 +229,21 @@ def _async_register_services(hass: HomeAssistant) -> None:
         coordinator = _get_coordinator(hass)
         await coordinator.async_skip_task(call.data[ATTR_TASK_ID])
 
+    async def _async_toggle_subtask(call: ServiceCall) -> None:
+        coordinator = _get_coordinator(hass)
+        await coordinator.async_toggle_subtask(
+            call.data[ATTR_TASK_ID], call.data[ATTR_SUBTASK_ID]
+        )
+
     hass.services.async_register(
         DOMAIN, SERVICE_COMPLETE_TASK, _async_complete_task, schema=COMPLETE_TASK_SCHEMA
     )
     hass.services.async_register(
         DOMAIN, SERVICE_SKIP_TASK, _async_skip_task, schema=SKIP_TASK_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TOGGLE_SUBTASK,
+        _async_toggle_subtask,
+        schema=TOGGLE_SUBTASK_SCHEMA,
     )

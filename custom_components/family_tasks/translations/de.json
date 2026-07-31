@@ -77,6 +77,20 @@
           "description": "Die ID der Aufgabe (siehe Attribute des Status-Sensors)."
         }
       }
+    },
+    "toggle_subtask": {
+      "name": "Checklistenpunkt umschalten",
+      "description": "Hakt einen Unterpunkt einer Checklisten-Aufgabe ab oder wieder ab. Die Aufgabe selbst gilt erst als erledigt, wenn alle Unterpunkte abgehakt sind.",
+      "fields": {
+        "task_id": {
+          "name": "Aufgaben-ID",
+          "description": "Die ID der Checklisten-Aufgabe (siehe Attribute des Status-Sensors)."
+        },
+        "subtask_id": {
+          "name": "Unterpunkt-ID",
+          "description": "Die ID des Unterpunkts (siehe Attribut 'subtasks' des Status-Sensors)."
+        }
+      }
     }
   }
 }

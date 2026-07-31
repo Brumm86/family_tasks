@@ -42,8 +42,9 @@ async def test_once_task_gets_anchor_date_defaulted(hass, init_integration) -> N
     assert task["recurrence"]["anchor_date"]
 
 
-async def test_once_task_stays_done_across_days(hass, init_integration) -> None:
-    """Completing a 'once' task keeps it done forever - its period never changes."""
+async def test_once_task_is_deleted_after_completion(hass, init_integration) -> None:
+    """Completing a 'once' task removes it entirely instead of leaving it
+    sitting around forever showing 'Erledigt' (v0.7 behavior change)."""
     runtime = init_integration.runtime_data
     anna = await runtime.members.async_create_item({"name": "Anna"})
     today = dt_util.now().date()
@@ -56,17 +57,19 @@ async def test_once_task_stays_done_across_days(hass, init_integration) -> None:
 
     await runtime.coordinator.async_complete_task(task["id"])
 
-    status = runtime.coordinator.data.tasks[task["id"]]
-    assert status.status == TASK_STATUS_DONE
+    assert task["id"] not in runtime.tasks.data
+    assert task["id"] not in runtime.coordinator.data.tasks
+    # The completion itself is still on record - only the task definition is
+    # gone - so the member's points aren't lost along with it.
+    assert runtime.coordinator.data.members[anna["id"]].points_today == 5
 
-    # Fast-forward "today" by a week and refresh: a daily/weekly task would
-    # open a new occurrence, but a 'once' task's period is pinned to its
-    # anchor date, so it must still read as done.
+    # Fast-forward "today" by a week and refresh: it must stay gone, not
+    # somehow reappear once its anchor date is in the past.
     future = dt_util.now() + timedelta(days=7)
     with patch.object(dt_util, "now", return_value=future):
         await runtime.coordinator.async_refresh()
 
-    assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_DONE
+    assert task["id"] not in runtime.coordinator.data.tasks
 
 
 # --- rotation strategy "least_points" ---------------------------------------

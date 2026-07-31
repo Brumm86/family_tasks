@@ -11,7 +11,7 @@ from __future__ import annotations
 from homeassistant.auth.const import GROUP_ID_ADMIN
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.family_tasks.const import RECURRENCE_ONCE, TASK_STATUS_DONE
+from custom_components.family_tasks.const import RECURRENCE_ONCE
 
 
 def _register_battery_sensor(hass, entity_id, *, state, friendly_name=None):
@@ -142,7 +142,15 @@ async def test_repeated_refreshes_while_still_low_do_not_duplicate_the_alert(
 async def test_completing_the_alert_lets_a_still_low_battery_raise_a_new_one(
     hass, init_integration
 ) -> None:
-    """Once resolved, the next refresh can raise a fresh alert for the same battery."""
+    """Once resolved, the next refresh can raise a fresh alert for the same battery.
+
+    Battery alerts are recurrence "once" tasks, so as of v0.7 completing one
+    deletes it outright (see test_once_task_is_deleted_after_completion in
+    test_new_features.py) rather than leaving it around marked "Erledigt" -
+    that deletion is itself what makes the entity fall out of
+    _async_raise_battery_alerts' open_alert_entities set, letting a fresh
+    alert be raised for it.
+    """
     runtime = init_integration.runtime_data
     _register_battery_sensor(hass, "sensor.kitchen_battery", state="10")
     await hass.async_block_till_done()
@@ -150,14 +158,14 @@ async def test_completing_the_alert_lets_a_still_low_battery_raise_a_new_one(
     first_alert_id = _alert_tasks(runtime)[0]["id"]
 
     await runtime.coordinator.async_complete_task(first_alert_id)
-    status = runtime.coordinator.data.tasks[first_alert_id]
-    assert status.status == TASK_STATUS_DONE
+    assert first_alert_id not in runtime.tasks.data
+    assert first_alert_id not in runtime.coordinator.data.tasks
 
     await runtime.coordinator.async_refresh()
 
     alerts = _alert_tasks(runtime)
-    assert len(alerts) == 2
-    assert first_alert_id in [a["id"] for a in alerts]
+    assert len(alerts) == 1
+    assert first_alert_id not in [a["id"] for a in alerts]
 
 
 async def test_excluded_battery_never_raises_an_alert(hass, init_integration) -> None:

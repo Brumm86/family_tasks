@@ -45,6 +45,20 @@
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
  *
+ * Task types: a task defaults to a single "Erledigt" action. Setting
+ * "Aufgabentyp" to "Checkliste" instead gives it an open-ended list of named
+ * sub-items (e.g. "Kofferpacken" with one sub-item per thing to pack) that
+ * get checked off individually - checked items render struck-through - and
+ * the task itself only becomes "Erledigt" once every sub-item is checked for
+ * the current period; the manual "Erledigt" button is disabled for these
+ * (see FamilyTasksCoordinator.async_toggle_subtask in coordinator.py).
+ *
+ * A "trigger" (sensor-based) task shows the bound sensor's current value next
+ * to its trigger definition, and can optionally name a button entity
+ * (family_tasks/task/*'s "completion_button_entity_id") that gets pressed the
+ * moment the task is actually marked done - e.g. a vacuum's "resume cleaning"
+ * button once its "needs emptying" task is completed.
+ *
  * Persisted UI state: the "nicht fällige ausblenden" / "Familienmitglieder
  * ausblenden" / "Nur eigene Aufgaben" / "Batterien ausblenden" toggles and
  * the compact-mode button (top-right of the card, hides the toggle buttons
@@ -174,6 +188,15 @@
     return { kind: "state", entity_id: "", to_state: "on", direction: "above", value: "" };
   }
 
+  // Opaque, client-generated id for a new checklist sub-item (see
+  // TASK_KIND_CHECKLIST in const.py) - only needs to be stable and unique
+  // within the task, since it's what family_tasks.toggle_subtask and
+  // storage.ChecklistStateStore key checked state on.
+  function newSubtaskId() {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+    return `st-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
   function emptyTaskForm() {
     return {
       name: "",
@@ -183,6 +206,9 @@
       due_time: "",
       overdue_after_minutes: 60,
       requires_confirmation: true,
+      kind: "standard",
+      subtasks: [],
+      completion_button_entity_id: "",
       recurrence: {
         type: "daily",
         interval: 1,
@@ -222,6 +248,9 @@
       due_time: task.due_time ?? "",
       overdue_after_minutes: task.overdue_after_minutes ?? 60,
       requires_confirmation: task.requires_confirmation ?? true,
+      kind: task.kind ?? "standard",
+      subtasks: (task.subtasks ?? []).map((s) => ({ ...s })),
+      completion_button_entity_id: task.completion_button_entity_id ?? "",
       recurrence: {
         type: task.recurrence?.type ?? "daily",
         interval: task.recurrence?.interval ?? 1,
@@ -473,6 +502,17 @@
         .sort((a, b) => a.name.localeCompare(b.name));
     }
 
+    // Suggestions for the optional "completion button" field on a trigger
+    // task (family_tasks/task/*'s completion_button_entity_id) - restricted
+    // to the button domain, e.g. a vacuum's "resume cleaning" button.
+    _buttonEntityOptions() {
+      if (!this._hass) return [];
+      return Object.values(this._hass.states)
+        .filter((s) => s.entity_id.startsWith("button."))
+        .map((s) => ({ id: s.entity_id, name: s.attributes.friendly_name || s.entity_id }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
     // Every battery-level entity HA currently reports: sensor/binary_sensor
     // with device_class "battery" (mirrors battery.async_discover_battery_entity_ids
     // on the backend, just read straight off hass.states client-side instead
@@ -541,6 +581,14 @@
       const form = this._taskForm;
       if (!form.name.trim()) return;
 
+      if (form.kind === "checklist") {
+        const names = form.subtasks.map((s) => s.name.trim()).filter(Boolean);
+        if (!names.length) {
+          alert("Bitte mindestens eine Unteraufgabe für die Checkliste angeben.");
+          return;
+        }
+      }
+
       const recurrence = { type: form.recurrence.type };
       if (form.recurrence.type === "weekly") {
         recurrence.weekdays = form.recurrence.weekdays.length ? form.recurrence.weekdays : [0];
@@ -584,11 +632,26 @@
           only_children: form.rotation.strategy === "least_points" ? !!form.rotation.only_children : false,
         },
         requires_confirmation: !!form.requires_confirmation,
+        kind: form.kind === "checklist" ? "checklist" : "standard",
       };
+      if (form.kind === "checklist") {
+        payload.subtasks = form.subtasks
+          .map((s) => ({ id: s.id, name: s.name.trim() }))
+          .filter((s) => s.name);
+      }
       if (form.icon) payload.icon = form.icon.trim();
       if (form.due_time) payload.due_time = form.due_time;
       if (form.overdue_after_minutes !== "") {
         payload.overdue_after_minutes = Math.max(0, Number(form.overdue_after_minutes) || 0);
+      }
+      // Only meaningful for "trigger" tasks; editing an existing task can
+      // explicitly clear it again by sending null (create simply omits it).
+      if (form.recurrence.type === "trigger") {
+        if (this._editingTaskId) {
+          payload.completion_button_entity_id = form.completion_button_entity_id.trim() || null;
+        } else if (form.completion_button_entity_id.trim()) {
+          payload.completion_button_entity_id = form.completion_button_entity_id.trim();
+        }
       }
 
       if (this._editingTaskId) {
@@ -776,20 +839,14 @@
         const currentMemberId = this._currentMemberId();
         ids = ids.filter((id) => {
           if (!currentMemberId) return false;
-          const rotation = this._tasks[id]?.rotation ?? {};
-          const memberIds = rotation.member_ids ?? [];
-          if (rotation.strategy === "fixed" && memberIds.length > 1) {
-            // Fixed rotation with several assignees never actually rotates -
-            // it's a task the household shares between exactly those people,
-            // so show it to every one of them, not just whichever one
-            // happens to sit at rotation.current_index.
-            return memberIds.includes(currentMemberId);
-          }
-          // Every other rotation option (round robin, random, least points,
-          // or fixed with a single assignee) has exactly one person
-          // currently responsible - only show it to that person.
-          const assignedId = this._statusStateForTask(id)?.attributes?.assigned_member_id;
-          return assignedId === currentMemberId;
+          // assigned_member_ids already lists every member currently
+          // responsible - just [assigned_member_id] for most rotation
+          // strategies, but every selected member for a "fixed" rotation
+          // with more than one assignee (see
+          // FamilyTasksCoordinator._assigned_member_ids in coordinator.py) -
+          // so a single membership check covers both cases.
+          const assignedIds = this._statusStateForTask(id)?.attributes?.assigned_member_ids ?? [];
+          return assignedIds.includes(currentMemberId);
         });
       }
       if (!ids.length) {
@@ -801,42 +858,75 @@
           const task = this._tasks[id];
           const statusState = this._statusStateForTask(id);
           const status = statusState?.state ?? "pending";
-          const assignedId = statusState?.attributes?.assigned_member_id;
+          const assignedIds = statusState?.attributes?.assigned_member_ids ?? [];
           const label = STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
           const isTrigger = task.recurrence?.type === "trigger";
           const isBattery = task.recurrence?.type === "battery";
+          const isChecklist = task.kind === "checklist";
           // Auto-generated by the coordinator when a child's task needs
           // parental sign-off (see async_complete_task in coordinator.py) -
           // read-only row, and "Erledigt"/"Überspringen" mean confirm/reject.
           const isConfirmation = !!task.confirms;
           const batteryEntities = statusState?.attributes?.battery_entities ?? [];
+          const subtasks = statusState?.attributes?.subtasks ?? [];
+          const triggerValue = statusState?.attributes?.trigger_sensor_value;
+          const triggerUnit = statusState?.attributes?.trigger_sensor_unit;
+          const triggerValueLabel =
+            triggerValue !== undefined && triggerValue !== null && triggerValue !== ""
+              ? ` · aktuell: ${esc(triggerValue)}${triggerUnit ? ` ${esc(triggerUnit)}` : ""}`
+              : "";
+          const assigneeLabel = assignedIds.length
+            ? assignedIds.map((mid) => esc(this._memberName(mid))).join(", ")
+            : "–";
           const detail = isConfirmation
             ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
+            : isChecklist
+            ? `${subtasks.filter((s) => s.checked).length}/${subtasks.length} erledigt`
             : isTrigger
-            ? `Sensor: ${esc(task.recurrence.trigger?.entity_id ?? "–")}`
+            ? `Sensor: ${esc(task.recurrence.trigger?.entity_id ?? "–")}${triggerValueLabel}`
             : isBattery
             ? batteryEntities.length
               ? batteryEntities
                   .map((b) => esc(`${b.name}${b.level !== null && b.level !== undefined ? ` (${b.level}%)` : " (niedrig)"}`))
                   .join(", ")
               : "Keine Batterie niedrig"
-            : `${assignedId ? esc(this._memberName(assignedId)) : "–"} · ${esc(task.points ?? 0)} Pkt.`;
-          const disableActions = status === "done" || status === "idle" || status === "awaiting_confirmation";
+            : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.`;
+          const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
+          // A checklist task only becomes "done" once every sub-item is
+          // checked (see async_toggle_subtask in coordinator.py) - the
+          // manual "Erledigt" button is disabled for it so completion always
+          // goes through the checklist itself; "Überspringen" still works
+          // like on any other task.
+          const disableComplete = resolved || isChecklist;
+          const subtaskList = isChecklist && subtasks.length
+            ? `<div class="subtask-list">${subtasks
+                .map(
+                  (st) => `
+                  <label class="subtask-item ${st.checked ? "checked" : ""}">
+                    <input type="checkbox" data-subtask-toggle data-task-id="${id}" data-subtask-id="${esc(st.id)}" ${st.checked ? "checked" : ""} ${status === "done" ? "disabled" : ""}>
+                    <span class="subtask-name">${esc(st.name)}</span>
+                  </label>`
+                )
+                .join("")}</div>`
+            : "";
           return `
-            <div class="row">
-              <div class="row-main">
-                <span class="badge" style="background:${color}">${esc(label)}</span>
-                <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}</span>
-                <span class="muted">${detail}</span>
+            <div class="row-wrap">
+              <div class="row">
+                <div class="row-main">
+                  <span class="badge" style="background:${color}">${esc(label)}</span>
+                  <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}</span>
+                  <span class="muted">${detail}</span>
+                </div>
+                <div class="row-actions">
+                  <button data-action="complete-task" data-task-id="${id}" ${disableComplete ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
+                  <button data-action="skip-task" data-task-id="${id}" ${resolved ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>
+                  ${isConfirmation || !isAdmin ? "" : `
+                  <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
+                  <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>`}
+                </div>
               </div>
-              <div class="row-actions">
-                <button data-action="complete-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
-                <button data-action="skip-task" data-task-id="${id}" ${disableActions ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>
-                ${isConfirmation || !isAdmin ? "" : `
-                <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
-                <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>`}
-              </div>
+              ${subtaskList}
             </div>`;
         })
         .join("")}</div>`;
@@ -952,6 +1042,14 @@
             <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></label>
           </div>
 
+          <label>Aufgabentyp
+            <select data-field="kind">
+              <option value="standard" ${f.kind !== "checklist" ? "selected" : ""}>Standard</option>
+              <option value="checklist" ${f.kind === "checklist" ? "selected" : ""}>Checkliste</option>
+            </select>
+          </label>
+          ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
+
           <label>Wiederholung
             <select data-field="recurrence.type">
               ${this._recurrenceOptionsFor(f.recurrence.type).map(([value, label]) => `<option value="${value}" ${f.recurrence.type === value ? "selected" : ""}>${label}</option>`).join("")}
@@ -966,6 +1064,7 @@
           ${f.recurrence.type === "once" ? `
             <label>Datum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>` : ""}
           ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
+          ${f.recurrence.type === "trigger" ? this._renderCompletionButtonField(f.completion_button_entity_id) : ""}
           ${f.recurrence.type === "battery" ? `
             <p class="muted">Automatische Sammel-Aufgabe: wird fällig, sobald mindestens eine überwachte Batterie ihren Warn-Schwellenwert erreicht oder unterschreitet, und listet alle betroffenen Batterien auf. Welche Batterien überwacht werden und ab welchem Stand, wird im Abschnitt "Batterien" weiter unten festgelegt.</p>` : ""}
 
@@ -1037,6 +1136,45 @@
             <button type="button" data-action="cancel-own-task-form">Abbrechen</button>
           </div>
         </form>`;
+    }
+
+    // Editor for a TASK_KIND_CHECKLIST task's sub-items: a free-text name per
+    // row plus a remove button, and an "+ Unteraufgabe hinzufügen" button
+    // that appends a new (client-generated id, empty name) row. Each row's
+    // name is edited through the generic data-field mechanism
+    // (subtasks.<index>.name); add/remove go through explicit actions since
+    // they change the number of rows, not just a value.
+    _renderSubtaskEditor(subtasks) {
+      const rows = subtasks
+        .map(
+          (s, i) => `
+          <div class="subtask-edit-row">
+            <input type="text" data-field="subtasks.${i}.name" placeholder="z. B. Reisepass" value="${esc(s.name)}">
+            <button type="button" class="danger" data-action="remove-subtask" data-subtask-index="${i}">✕</button>
+          </div>`
+        )
+        .join("");
+      return `
+        <div class="subtask-editor">
+          ${rows || `<p class="muted">Noch keine Unteraufgaben.</p>`}
+          <button type="button" class="add" data-action="add-subtask">+ Unteraufgabe hinzufügen</button>
+        </div>`;
+    }
+
+    // Optional button entity pressed once a "trigger" task is actually
+    // marked done (family_tasks/task/*'s completion_button_entity_id) - free
+    // text with suggestions restricted to the button domain, same pattern as
+    // the trigger entity field below.
+    _renderCompletionButtonField(value) {
+      const buttonList = this._buttonEntityOptions()
+        .map((b) => `<option value="${esc(b.id)}">${esc(b.name)}</option>`)
+        .join("");
+      return `
+        <label>Button beim Erledigen drücken (optional)
+          <input type="text" list="family-tasks-button-list" data-field="completion_button_entity_id"
+                 placeholder="button.staubsauger_fortsetzen" value="${esc(value)}">
+        </label>
+        <datalist id="family-tasks-button-list">${buttonList}</datalist>`;
     }
 
     _renderTriggerFields(t) {
@@ -1119,10 +1257,18 @@
         .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .muted { color: var(--secondary-text-color); font-size: 0.9em; }
         .list { display: flex; flex-direction: column; gap: 4px; }
+        .row-wrap { display: flex; flex-direction: column; gap: 4px; }
         .row { display: flex; align-items: center; justify-content: space-between; gap: 8px;
                padding: 8px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); }
         .row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
         .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+        .subtask-list { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 4px 24px; }
+        .subtask-item { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 0.9em; }
+        .subtask-item.checked .subtask-name { text-decoration: line-through; opacity: 0.6; }
+        .subtask-editor { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px;
+                           border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); }
+        .subtask-edit-row { display: flex; gap: 6px; align-items: center; }
+        .subtask-edit-row input { flex: 1; }
         .battery-controls { align-items: center; gap: 12px; }
         .battery-controls label.inline { flex-direction: row !important; align-items: center; gap: 4px; font-size: 0.85em; }
         .battery-controls input[type="number"] { width: 70px; padding: 4px; border-radius: 4px;
@@ -1215,6 +1361,14 @@
           this._controlsHidden = !this._controlsHidden;
           this._saveUiState();
           this._render();
+        } else if (action === "add-subtask") {
+          this._taskForm.subtasks.push({ id: newSubtaskId(), name: "" });
+          const form = el.closest("[data-form]");
+          if (form) form.outerHTML = this._renderTaskForm();
+        } else if (action === "remove-subtask") {
+          this._taskForm.subtasks.splice(Number(el.dataset.subtaskIndex), 1);
+          const form = el.closest("[data-form]");
+          if (form) form.outerHTML = this._renderTaskForm();
         }
       });
 
@@ -1226,6 +1380,19 @@
         const batteryEl = ev.target.closest("[data-battery-entity]");
         if (batteryEl) {
           this._saveBatteryOverrideField(batteryEl);
+          return;
+        }
+
+        // Checklist sub-item checkboxes live in the task list row, not in a
+        // form either - each toggle calls the toggle_subtask service
+        // directly (mirrors how "Erledigt"/"Überspringen" call services
+        // rather than going through a form-draft flow).
+        const subtaskEl = ev.target.closest("[data-subtask-toggle]");
+        if (subtaskEl) {
+          this._hass.callService("family_tasks", "toggle_subtask", {
+            task_id: subtaskEl.dataset.taskId,
+            subtask_id: subtaskEl.dataset.subtaskId,
+          });
           return;
         }
 

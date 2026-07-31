@@ -147,6 +147,30 @@ MEMBER_ROLES: Final = [MEMBER_ROLE_PARENT, MEMBER_ROLE_CHILD]
 # WS_API_TASK_CREATE_OWN below) choose this explicitly instead.
 CONF_TASK_REQUIRES_CONFIRMATION: Final = "requires_confirmation"
 
+# Optional per-task button entity (see CONF_COMPLETION_BUTTON_ENTITY_ID) that
+# gets pressed the moment the task is actually marked done - mainly useful for
+# "trigger" tasks that mirror a device's own state, e.g. a vacuum's "resume
+# cleaning" button once its "needs emptying" sensor task is completed. Not
+# restricted to recurrence type "trigger" server-side, but that is the only
+# case the card currently offers it for. See
+# FamilyTasksCoordinator._async_press_completion_button in coordinator.py.
+CONF_COMPLETION_BUTTON_ENTITY_ID: Final = "completion_button_entity_id"
+
+# --- Task kinds / checklists --------------------------------------------------
+#
+# Every task defaults to TASK_KIND_STANDARD (single "erledigt" action). A
+# TASK_KIND_CHECKLIST task instead carries an open-ended list of named
+# sub-items (task "subtasks": [{"id", "name"}, ...]) that get checked off
+# individually - checked items render struck-through - and the task itself
+# only becomes "done" once every sub-item is checked for the current period
+# (see FamilyTasksCoordinator.async_toggle_subtask). Which sub-items are
+# currently checked is per-occurrence runtime state, tracked the same way
+# open trigger occurrences are (see storage.ChecklistStateStore), and resets
+# whenever a new period starts, same as any other recurring task.
+TASK_KIND_STANDARD: Final = "standard"
+TASK_KIND_CHECKLIST: Final = "checklist"
+TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST]
+
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_VERSION: Final = 1
@@ -157,6 +181,7 @@ STORAGE_KEY_MEMBERS: Final = f"{DOMAIN}.members"
 STORAGE_KEY_COMPLETIONS: Final = f"{DOMAIN}.completions"
 STORAGE_KEY_TRIGGER_STATE: Final = f"{DOMAIN}.trigger_state"
 STORAGE_KEY_BATTERY_OVERRIDES: Final = f"{DOMAIN}.battery_overrides"
+STORAGE_KEY_CHECKLIST_STATE: Final = f"{DOMAIN}.checklist_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -178,9 +203,15 @@ COORDINATOR_UPDATE_INTERVAL: Final = timedelta(minutes=15)
 
 SERVICE_COMPLETE_TASK: Final = "complete_task"
 SERVICE_SKIP_TASK: Final = "skip_task"
+# Checks/unchecks one sub-item of a TASK_KIND_CHECKLIST task. A plain service
+# (like complete_task/skip_task above) rather than an admin-only websocket
+# command, so any family member - not just admins - can tick off their own
+# checklist items.
+SERVICE_TOGGLE_SUBTASK: Final = "toggle_subtask"
 
 ATTR_TASK_ID: Final = "task_id"
 ATTR_MEMBER_ID: Final = "member_id"
+ATTR_SUBTASK_ID: Final = "subtask_id"
 
 # --- Frontend -----------------------------------------------------------------
 

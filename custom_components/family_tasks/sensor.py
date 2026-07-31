@@ -65,6 +65,11 @@ class FamilyTasksTaskStatusSensor(
         return {
             "task_id": task.task_id,
             "assigned_member_id": task.assigned_member_id,
+            # Every member currently responsible for this occurrence - for a
+            # "fixed" rotation with more than one member this lists all of
+            # them (see FamilyTasksCoordinator._assigned_member_ids); for
+            # everything else it's just [assigned_member_id].
+            "assigned_member_ids": task.assigned_member_ids,
             "due_at": task.due_at.isoformat() if task.due_at else None,
             "points": task.points,
             "period_key": task.period_key,
@@ -77,6 +82,14 @@ class FamilyTasksTaskStatusSensor(
             # battery at/below its warning threshold, so the card can list
             # exactly which ones need charging/swapping.
             "battery_entities": task.battery_entities,
+            # Only set for recurrence type "trigger": the bound sensor's
+            # current state/value and unit, so the card can show it
+            # alongside the trigger definition.
+            "trigger_sensor_value": task.trigger_sensor_value,
+            "trigger_sensor_unit": task.trigger_sensor_unit,
+            # Only non-empty for a TASK_KIND_CHECKLIST task: every sub-item
+            # with its current checked state, as {id, name, checked}.
+            "subtasks": task.subtasks,
         }
 
 

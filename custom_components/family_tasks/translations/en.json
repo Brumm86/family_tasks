@@ -77,6 +77,20 @@
           "description": "The task's ID (see the status sensor's attributes)."
         }
       }
+    },
+    "toggle_subtask": {
+      "name": "Toggle checklist item",
+      "description": "Checks or unchecks one sub-item of a checklist task. The task itself is marked done once every sub-item is checked.",
+      "fields": {
+        "task_id": {
+          "name": "Task ID",
+          "description": "The checklist task's ID (see the status sensor's attributes)."
+        },
+        "subtask_id": {
+          "name": "Sub-item ID",
+          "description": "The sub-item's ID (see the status sensor's 'subtasks' attribute)."
+        }
+      }
     }
   }
 }

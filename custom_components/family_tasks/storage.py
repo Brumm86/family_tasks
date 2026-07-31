@@ -27,6 +27,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
     MAX_COMPLETION_LOG_ENTRIES,
@@ -41,12 +42,16 @@ from .const import (
     ROTATION_STRATEGIES,
     ROTATION_STRATEGY_FIXED,
     STORAGE_KEY_BATTERY_OVERRIDES,
+    STORAGE_KEY_CHECKLIST_STATE,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_MEMBERS,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
     STORAGE_VERSION,
     STORAGE_VERSION_MINOR,
+    TASK_KIND_CHECKLIST,
+    TASK_KIND_STANDARD,
+    TASK_KINDS,
     TASK_TRIGGER_KINDS,
     TASK_TRIGGER_NUMERIC_STATE,
     TASK_TRIGGER_STATE,
@@ -153,6 +158,26 @@ CONFIRMS_SCHEMA = vol.Schema(
 # writer.
 BATTERY_ALERT_SCHEMA = vol.Schema({vol.Required("entity_id"): str})
 
+# One named item of a TASK_KIND_CHECKLIST task's checklist (see TASK_KINDS in
+# const.py). "id" is opaque and client-generated (the card assigns one when a
+# sub-item is added to the form) - it only needs to be stable and unique
+# within the task, since it's what family_tasks/task/toggle_subtask and
+# storage.ChecklistStateStore key checked/unchecked state on.
+SUBTASK_SCHEMA = vol.Schema(
+    {
+        vol.Required("id"): str,
+        vol.Required("name"): str,
+    }
+)
+
+
+def _require_unique_subtask_ids(subtasks: list[dict]) -> list[dict]:
+    ids = [s["id"] for s in subtasks]
+    if len(ids) != len(set(ids)):
+        raise vol.Invalid("Subtask ids must be unique within a task.")
+    return subtasks
+
+
 TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
@@ -167,6 +192,12 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     # See CONF_TASK_REQUIRES_CONFIRMATION in const.py. Absent/None means "use
     # the role-based default" (always required for a "child" assignee).
     vol.Optional(CONF_TASK_REQUIRES_CONFIRMATION): bool,
+    # Optional button pressed once the task is actually marked done - see
+    # CONF_COMPLETION_BUTTON_ENTITY_ID in const.py.
+    vol.Optional(CONF_COMPLETION_BUTTON_ENTITY_ID): cv.entity_id,
+    # See TASK_KIND_CHECKLIST in const.py.
+    vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
+    vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -179,6 +210,12 @@ TASK_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("recurrence"): RECURRENCE_SCHEMA,
     vol.Optional("rotation"): ROTATION_SCHEMA,
     vol.Optional(CONF_TASK_REQUIRES_CONFIRMATION): bool,
+    # Explicitly setting this to null clears a previously configured
+    # completion button, mirroring how BATTERY_OVERRIDE_UPDATE_SCHEMA clears
+    # "threshold" below.
+    vol.Optional(CONF_COMPLETION_BUTTON_ENTITY_ID): vol.Any(None, cv.entity_id),
+    vol.Optional("kind"): vol.In(TASK_KINDS),
+    vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
 }
 
 MEMBER_CREATE_SCHEMA: collection.VolDictType = {
@@ -222,6 +259,10 @@ class TaskStorageCollection(collection.DictStorageCollection):
                 "A 'trigger' recurrence needs a 'trigger' definition (state or "
                 "numeric_state)."
             )
+        if validated.get("kind") == TASK_KIND_CHECKLIST and not validated.get("subtasks"):
+            raise vol.Invalid(
+                "A 'checklist' task needs at least one subtask - see TASK_KIND_CHECKLIST."
+            )
         return validated
 
     @callback
@@ -248,6 +289,17 @@ class TaskStorageCollection(collection.DictStorageCollection):
             RECURRENCE_ONCE,
         ) and not updated["recurrence"].get("anchor_date"):
             updated["recurrence"]["anchor_date"] = dt_util.now().date().isoformat()
+        if (
+            CONF_COMPLETION_BUTTON_ENTITY_ID in validated
+            and validated[CONF_COMPLETION_BUTTON_ENTITY_ID] is None
+        ):
+            # Explicit clear, rather than persisting a literal None - mirrors
+            # BatteryOverrideStorageCollection's "threshold" clearing below.
+            updated.pop(CONF_COMPLETION_BUTTON_ENTITY_ID, None)
+        if updated.get("kind") == TASK_KIND_CHECKLIST and not updated.get("subtasks"):
+            raise vol.Invalid(
+                "A 'checklist' task needs at least one subtask - see TASK_KIND_CHECKLIST."
+            )
         return updated
 
 
@@ -651,5 +703,61 @@ class TriggerStateStore:
 async def async_create_trigger_state_store(hass: HomeAssistant) -> TriggerStateStore:
     """Create and load the sensor-trigger state store."""
     store = TriggerStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class ChecklistStateStore:
+    """Tracks which sub-items are currently checked for a checklist task.
+
+    A TASK_KIND_CHECKLIST task's sub-items (see TASK_KINDS in const.py) are
+    checked off one at a time via family_tasks.toggle_subtask; the task only
+    becomes "done" once every sub-item is checked for the *current* period
+    (see FamilyTasksCoordinator.async_toggle_subtask). This is per-occurrence
+    runtime state, not a StorageCollection: a new period always starts with
+    every item unchecked again, so a stored entry whose period_key no longer
+    matches the task's current period is simply treated as empty instead of
+    needing an explicit reset - the next toggle for the new period overwrites
+    it.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, dict[str, Any]]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_CHECKLIST_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        # task_id -> {"period_key": str, "checked_ids": list[str]}
+        self._state: dict[str, dict[str, Any]] = {}
+
+    async def async_load(self) -> None:
+        """Load checked sub-item state from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def checked_ids(self, task_id: str, period_key: str) -> set[str]:
+        """Return which sub-item ids are checked for a task's current period."""
+        entry = self._state.get(task_id)
+        if not entry or entry.get("period_key") != period_key:
+            return set()
+        return set(entry.get("checked_ids", []))
+
+    async def async_toggle(self, task_id: str, period_key: str, subtask_id: str) -> set[str]:
+        """Flip one sub-item's checked state for a task's current period."""
+        checked = self.checked_ids(task_id, period_key)
+        if subtask_id in checked:
+            checked.discard(subtask_id)
+        else:
+            checked.add(subtask_id)
+        self._state[task_id] = {"period_key": period_key, "checked_ids": sorted(checked)}
+        await self._store.async_save(self._state)
+        return checked
+
+    async def async_clear(self, task_id: str) -> None:
+        """Drop all stored checked state for a task, e.g. once it's deleted."""
+        if self._state.pop(task_id, None) is not None:
+            await self._store.async_save(self._state)
+
+
+async def async_create_checklist_state_store(hass: HomeAssistant) -> ChecklistStateStore:
+    """Create and load the checklist sub-item state store."""
+    store = ChecklistStateStore(hass)
     await store.async_load()
     return store

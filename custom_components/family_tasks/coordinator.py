@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -23,6 +24,7 @@ from homeassistant.util import dt as dt_util
 from .battery import LowBattery, async_compute_low_batteries
 from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
+    CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
@@ -39,6 +41,7 @@ from .const import (
     ROTATION_STRATEGY_LEAST_POINTS,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
+    TASK_KIND_CHECKLIST,
     TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_DONE,
     TASK_STATUS_IDLE,
@@ -47,6 +50,7 @@ from .const import (
 )
 from .storage import (
     BatteryOverrideStorageCollection,
+    ChecklistStateStore,
     CompletionLogStore,
     MemberStorageCollection,
     TaskStorageCollection,
@@ -74,6 +78,24 @@ class TaskStatusData:
     # every currently monitored battery at/below its warning threshold, as
     # dicts {entity_id, name, level, threshold} - see battery.LowBattery.
     battery_entities: list[dict] = field(default_factory=list)
+    # Every member currently responsible for this occurrence. For every
+    # rotation strategy except a "fixed" one with more than one member this
+    # is just [assigned_member_id] (or [] if unassigned) - see
+    # FamilyTasksCoordinator._assigned_member_ids. A fixed multi-assignee task
+    # never actually rotates, so it's shared between all of them at once
+    # instead of "belonging" to whichever one happens to sit at
+    # rotation.current_index.
+    assigned_member_ids: list[str] = field(default_factory=list)
+    # Only populated for recurrence type "trigger" (see RECURRENCE_TRIGGER):
+    # the bound sensor's current state/value and unit of measurement, so the
+    # card can show e.g. "aktuell: 18.4 °C" alongside the trigger definition
+    # instead of just the entity_id.
+    trigger_sensor_value: str | None = None
+    trigger_sensor_unit: str | None = None
+    # Only populated for a TASK_KIND_CHECKLIST task: every sub-item with its
+    # current checked state for this period, as dicts {id, name, checked} -
+    # see FamilyTasksCoordinator.async_toggle_subtask.
+    subtasks: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -158,6 +180,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         completions: CompletionLogStore,
         trigger_state: TriggerStateStore,
         battery_overrides: BatteryOverrideStorageCollection,
+        checklist_state: ChecklistStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -171,6 +194,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.completions = completions
         self.trigger_state = trigger_state
         self.battery_overrides = battery_overrides
+        self.checklist_state = checklist_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -222,6 +246,19 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             rotation = task["rotation"]
             member_ids = rotation.get("member_ids") or []
             assigned_member_id = self._assigned_member_id(rotation, member_ids)
+            assigned_member_ids = self._assigned_member_ids(rotation, member_ids)
+
+            trigger_sensor_value: str | None = None
+            trigger_sensor_unit: str | None = None
+            if recurrence["type"] == RECURRENCE_TRIGGER:
+                trigger_entity_id = (recurrence.get("trigger") or {}).get("entity_id")
+                if trigger_entity_id:
+                    trigger_entity_state = self.hass.states.get(trigger_entity_id)
+                    if trigger_entity_state is not None:
+                        trigger_sensor_value = trigger_entity_state.state
+                        trigger_sensor_unit = trigger_entity_state.attributes.get(
+                            "unit_of_measurement"
+                        )
 
             if recurrence["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
                 open_occurrence = self.trigger_state.get(task_id)
@@ -237,6 +274,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                         period_key="",
                         due_at=None,
                         assigned_member_id=assigned_member_id,
+                        assigned_member_ids=assigned_member_ids,
+                        trigger_sensor_value=trigger_sensor_value,
+                        trigger_sensor_unit=trigger_sensor_unit,
                     )
                     continue
                 period_key = open_occurrence["period_key"]
@@ -265,10 +305,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     # below its warning threshold.
                     status = TASK_STATUS_IDLE
 
-            if status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE) and assigned_member_id:
-                open_tasks_by_member[assigned_member_id] = (
-                    open_tasks_by_member.get(assigned_member_id, 0) + 1
-                )
+            subtasks_status: list[dict] = []
+            if task.get("kind") == TASK_KIND_CHECKLIST:
+                checked_ids = self.checklist_state.checked_ids(task_id, period_key)
+                subtasks_status = [
+                    {"id": s["id"], "name": s["name"], "checked": s["id"] in checked_ids}
+                    for s in task.get("subtasks", [])
+                ]
+
+            if status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE):
+                for member_id in assigned_member_ids:
+                    open_tasks_by_member[member_id] = open_tasks_by_member.get(member_id, 0) + 1
 
             task_statuses[task_id] = TaskStatusData(
                 task_id=task_id,
@@ -279,6 +326,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 period_key=period_key,
                 due_at=due_at,
                 assigned_member_id=assigned_member_id,
+                assigned_member_ids=assigned_member_ids,
                 last_completed_by=last_entry.get("completed_by_member_id")
                 if last_entry
                 else None,
@@ -286,6 +334,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 if last_entry
                 else None,
                 battery_entities=battery_entities,
+                trigger_sensor_value=trigger_sensor_value,
+                trigger_sensor_unit=trigger_sensor_unit,
+                subtasks=subtasks_status,
             )
 
         local_now = dt_util.now()
@@ -395,6 +446,19 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self._async_advance_rotation(task_id, task, rotation, member_ids, index)
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
             await self.trigger_state.async_clear(task_id)
+        await self._async_press_completion_button(task)
+        if task["recurrence"]["type"] == RECURRENCE_ONCE:
+            # A single, never-repeating occurrence stays permanently resolved
+            # the moment it's done - see RECURRENCE_ONCE in const.py - so
+            # there is nothing left for it to do sitting around forever
+            # showing "Erledigt". Deleting it also lets a battery-alert task
+            # (also RECURRENCE_ONCE, see _async_raise_battery_alerts) raise a
+            # fresh one the next time that battery goes low again, same as
+            # before this cleanup - see _async_raise_battery_alerts's
+            # open_alert_entities check, which only looks at tasks still in
+            # self.tasks.data.
+            await self.checklist_state.async_clear(task_id)
+            await self.tasks.async_delete_item(task_id)
         await self.async_request_refresh()
 
     async def async_skip_task(self, task_id: str) -> None:
@@ -457,6 +521,25 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             )
         index = rotation.get("current_index", 0) % len(member_ids)
         return member_ids[index]
+
+    def _assigned_member_ids(self, rotation: dict, member_ids: list[str]) -> list[str]:
+        """Return every member currently responsible for a task's occurrence.
+
+        Mirrors _assigned_member_id, but a "fixed" rotation with more than
+        one member returns all of them instead of just member_ids[0]: a
+        fixed multi-assignee task never actually rotates, so it's shared
+        between exactly those people rather than "belonging" to one of them
+        at a time (see the "Nur eigene Aufgaben" card filter, and the task
+        card's assignee display, both of which need this same list instead
+        of a single id).
+        """
+        if not member_ids:
+            return []
+        strategy = rotation.get("strategy", ROTATION_STRATEGY_ROUND_ROBIN)
+        if strategy == ROTATION_STRATEGY_FIXED and len(member_ids) > 1:
+            return list(member_ids)
+        single = self._assigned_member_id(rotation, member_ids)
+        return [single] if single else []
 
     def _member_with_least_points(
         self, member_ids: list[str], only_children: bool
@@ -560,6 +643,12 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             )
             if original_task["recurrence"]["type"] == RECURRENCE_TRIGGER:
                 await self.trigger_state.async_clear(original_task_id)
+            await self._async_press_completion_button(original_task)
+            if original_task["recurrence"]["type"] == RECURRENCE_ONCE:
+                # Same cleanup as the non-confirmation path in
+                # async_complete_task - see the comment there.
+                await self.checklist_state.async_clear(original_task_id)
+                await self.tasks.async_delete_item(original_task_id)
 
         await self.trigger_state.async_clear(confirmation_task_id)
         await self.tasks.async_delete_item(confirmation_task_id)
@@ -642,6 +731,62 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             if state is not None and state.attributes.get("user_id") in admin_user_ids:
                 member_ids.append(member_id)
         return member_ids
+
+    async def _async_press_completion_button(self, task: dict) -> None:
+        """Press a task's optional completion button, if it has one.
+
+        See CONF_COMPLETION_BUTTON_ENTITY_ID in const.py - mainly meant for
+        "trigger" tasks that mirror a device's own state (e.g. pressing a
+        vacuum's "resume cleaning" button once its "needs emptying" task is
+        completed). Best-effort: a missing/unavailable button shouldn't
+        prevent the task itself from being marked done.
+        """
+        entity_id = task.get(CONF_COMPLETION_BUTTON_ENTITY_ID)
+        if not entity_id:
+            return
+        try:
+            await self.hass.services.async_call(
+                "button", "press", {ATTR_ENTITY_ID: entity_id}, blocking=False
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("Failed to press completion button %s: %s", entity_id, err)
+
+    async def async_toggle_subtask(self, task_id: str, subtask_id: str) -> None:
+        """Check/uncheck one sub-item of a TASK_KIND_CHECKLIST task.
+
+        Mirrors async_handle_sensor_trigger: the "is this task now done"
+        decision is made right here, immediately after the toggle, instead of
+        as a side effect of _async_update_data being polled - that keeps the
+        refresh loop a pure read of current state, with side effects (points,
+        rotation, parent confirmation, once-task cleanup) only ever
+        triggered by an explicit action, same as async_complete_task itself
+        (which this delegates to once every sub-item is checked).
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+        if task.get("kind") != TASK_KIND_CHECKLIST:
+            raise HomeAssistantError(f"Task '{task_id}' is not a checklist task")
+
+        subtasks = task.get("subtasks", [])
+        if not any(s["id"] == subtask_id for s in subtasks):
+            raise HomeAssistantError(f"Unknown subtask_id '{subtask_id}' for task '{task_id}'")
+
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            raise HomeAssistantError(f"Task '{task_id}' has no open occurrence right now")
+
+        if self.completions.get_last_entry(task_id, period_key) is not None:
+            # Already resolved for this period - nothing left to toggle.
+            return
+
+        checked = await self.checklist_state.async_toggle(task_id, period_key, subtask_id)
+
+        if subtasks and all(s["id"] in checked for s in subtasks):
+            await self.async_complete_task(task_id)
+        else:
+            await self.async_request_refresh()
 
     async def async_handle_sensor_trigger(self, task_id: str) -> None:
         """Open a new occurrence for a trigger-based task, unless one is open.

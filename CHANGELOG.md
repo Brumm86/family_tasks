@@ -2,6 +2,18 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.0] - 2026-07-31
+
+### Added
+- **New task type "Checkliste"**: a task can now carry an open-ended list of named sub-items instead of a single "Erledigt" action (e.g. "Kofferpacken" with one sub-item per thing to pack). Sub-items are checked off individually - checked ones render struck-through - and the task itself only becomes "Erledigt" once every sub-item is checked for the current period (new `family_tasks.toggle_subtask` service, `FamilyTasksCoordinator.async_toggle_subtask` in `coordinator.py`, new `storage.ChecklistStateStore`). The manual "Erledigt" button is disabled for these tasks so completion always goes through the checklist; "Überspringen" still works as before.
+- **Trigger-task completion button**: a "Sensor-Ereignis" task can optionally name a `button.*` entity (new `completion_button_entity_id` task field) that gets pressed the moment the task is actually marked done - e.g. a vacuum's "resume cleaning" button once its "needs emptying" task is completed.
+- **Current sensor value on trigger tasks**: the task list now shows the bound sensor's current state/value (with unit, if any) next to its trigger definition, so it's visible how close a numeric sensor is to its threshold without leaving the card.
+
+### Changed
+- **Fixed multi-assignee tasks now show every assignee**: a task whose rotation is "Fest zugewiesen" (fixed) with more than one member selected previously only ever displayed one of them on the task card (`assigned_member_id`, an index into the rotation). The status sensor now also exposes `assigned_member_ids` - every member currently responsible, all of them for a fixed multi-assignee task - and the card's task list and "Nur eigene Aufgaben" filter both use it instead.
+- **Einmalige ("once") Aufgaben werden nach Erledigung gelöscht**: completing a `once`-recurrence task now removes it entirely instead of leaving it sitting in the list marked "Erledigt" forever. This also applies to the automatic battery-alert tasks (v0.6, also `once`), which previously piled up once resolved. Skipping a `once` task is unchanged (still resolves it in place); only actual completion deletes it.
+- **Lovelace cards occasionally failing to load correctly**: the bundled card URLs now carry a `?v=<integration version>` cache-buster. Registering the static file with `cache_headers=False` doesn't stop every client from caching it regardless - browsers can still apply heuristic caching, and Home Assistant's installed-PWA/companion-app service worker in particular caches same-URL requests aggressively - so a device could keep running an older, incompatible copy of the card after an update. Bumping the query string on every release forces a fresh fetch instead.
+
 ## [0.6.0] - 2026-07-30
 
 ### Added
