@@ -2,6 +2,17 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.0] - 2026-07-31
+
+### Added
+- **Punkte-Shop statt Wochengewinner-Belohnung**: das v0.8-Belohnungssystem (nur der aktuelle Wochengewinner darf einmal pro Woche eine Belohnungsgruppe + Freitext auswählen) ist komplett ersetzt. Eltern pflegen jetzt einen Belohnungs-Katalog (Name, optionales Icon, Preis in Punkten - admin-only CRUD, `family_tasks/reward/*`); jedes am Belohnungssystem teilnehmende Familienmitglied kann jederzeit jede Belohnung auswählen und die Auswahl bestätigen, sofern sein aktuelles Punkte-Guthaben ausreicht (`family_tasks/reward_redemption/redeem`, serverseitig erneut geprüft). Das Bestätigen zieht die erforderlichen Punkte sofort vom Konto ab - das Guthaben (`points_available`, neues Attribut des Punkte-Sensors) ist immer die Gesamtpunktzahl abzüglich aller bisherigen Einlösungen, es gibt keinen separat gepflegten Kontostand. Jedes Kind sieht dabei stets den vollständigen Katalog samt Preisen, auch wenn eine Belohnung gerade nicht leistbar ist - nur der "Auswählen"-Button ist dann deaktiviert. Bestehende v0.8-Belohnungsgruppen/-Einlösungen werden beim ersten Start automatisch ins neue Format migriert (Preis 0, keine rückwirkende Punkteabbuchung).
+- **Teilnahme-Flag für Familienmitglieder** (`participates_in_rewards`, neue Checkbox "Nimmt am Belohnungssystem teil" im Familienmitglieder-Formular der Aufgaben-Karte, Default an): legt fest, ob ein Mitglied auf der Bestenliste erscheint und Belohnungen einlösen darf - so können z. B. nur die Kinder teilnehmen.
+
+### Changed
+- **Belohnungen sind jetzt Teil der Bestenlisten-Karte, nicht mehr der Aufgaben-Karte**: die komplette Belohnungsverwaltung (Katalog, Einlösen, Verlauf) sitzt jetzt in `family-tasks-leaderboard-card.js`, zusammen mit dem Punkte-Guthaben jedes teilnehmenden Mitglieds (namentlich angezeigt, unabhängig von der Wochen-/Monatsansicht). Die Bestenliste selbst zeigt nur noch Mitglieder, die am Belohnungssystem teilnehmen.
+- **Sensor-Ereignis-Aufgaben zeigen auf der Aufgaben-Karte nur noch den aktuellen Sensorwert**: bisher stand dort z. B. "Sensor: binary_sensor.muelleimer_voll · aktuell: on", jetzt nur noch "Sensor: on" - der Entity-Name/die Entity-ID ist weiterhin im Bearbeiten-Formular sichtbar, gehört aber nicht auf die Karte.
+- **"Batterien anzeigen" und "Familienmitglieder anzeigen"** (die Buttons, die eine ausgeblendete Sektion wieder einblenden) stehen jetzt jeweils in einer eigenen Reihe statt nebeneinander.
+
 ## [0.8.0] - 2026-07-31
 
 ### Added

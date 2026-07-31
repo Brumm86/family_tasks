@@ -53,6 +53,7 @@ from .storage import (
     ChecklistStateStore,
     CompletionLogStore,
     MemberStorageCollection,
+    RewardRedemptionStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
 )
@@ -110,13 +111,15 @@ class MemberSummaryData:
     points_month: int
     points_total: int
     open_tasks: int
-    # Whether this member currently holds the most points_week among active
-    # members (ties share the win; nobody wins while every active member is
-    # still at 0 for the week) - see the computation at the end of
-    # _async_update_data. Drives the "pick a reward" prompt in the card (see
-    # WS_API_REWARD_CLAIM in const.py / ws_claim_reward in storage.py, which
-    # re-derives the same thing server-side before letting a claim through).
-    is_weekly_winner: bool = False
+    # Current spendable balance for the reward system (v0.9): points_total
+    # minus every "points_cost" this member has already redeemed (see
+    # RewardRedemptionStorageCollection in storage.py) - never a separately
+    # stored/mutated value, always computed fresh from history so it can
+    # never drift out of sync. Drives the leaderboard card's balance display
+    # and whether a given catalog reward is affordable (WS_API_REWARD_REDEEM
+    # in const.py / ws_redeem_reward in storage.py re-derives the same thing
+    # server-side before letting a redemption through).
+    points_available: int = 0
 
 
 @dataclass(slots=True)
@@ -188,6 +191,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         trigger_state: TriggerStateStore,
         battery_overrides: BatteryOverrideStorageCollection,
         checklist_state: ChecklistStateStore,
+        reward_redemptions: RewardRedemptionStorageCollection,
     ) -> None:
         super().__init__(
             hass,
@@ -202,6 +206,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.trigger_state = trigger_state
         self.battery_overrides = battery_overrides
         self.checklist_state = checklist_state
+        self.reward_redemptions = reward_redemptions
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -353,8 +358,25 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             dt_util.start_of_local_day(local_now.replace(day=1))
         )
 
+        # Total points already redeemed for a catalog reward (v0.9), per
+        # member - subtracted from points_total below so a member's
+        # "available" balance reflects past purchases. See
+        # RewardRedemptionStorageCollection in storage.py / _available_points
+        # in storage.py, which computes the same thing independently for
+        # server-side validation when a redemption is actually attempted.
+        redeemed_points: dict[str, int] = {}
+        for redemption in self.reward_redemptions.data.values():
+            redeemed_member_id = redemption.get("member_id")
+            if redeemed_member_id:
+                redeemed_points[redeemed_member_id] = redeemed_points.get(
+                    redeemed_member_id, 0
+                ) + redemption.get("points_cost", 0)
+
         member_summaries: dict[str, MemberSummaryData] = {}
         for member_id, member in self.members.data.items():
+            points_total = self.completions.points_since(
+                member_id, datetime.min.replace(tzinfo=dt_util.UTC)
+            )
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
                 name=member["name"],
@@ -362,27 +384,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 points_today=self.completions.points_since(member_id, start_of_today),
                 points_week=self.completions.points_since(member_id, start_of_week),
                 points_month=self.completions.points_since(member_id, start_of_month),
-                points_total=self.completions.points_since(
-                    member_id, datetime.min.replace(tzinfo=dt_util.UTC)
-                ),
+                points_total=points_total,
+                points_available=points_total - redeemed_points.get(member_id, 0),
                 open_tasks=open_tasks_by_member.get(member_id, 0),
             )
-
-        # Weekly winner(s): whoever among currently-active members has the
-        # most points_week, shared by every member tied for that max - nobody
-        # wins if the max is 0 (no one has completed anything yet this week).
-        # See MemberSummaryData.is_weekly_winner above.
-        active_week_points = {
-            mid: summary.points_week
-            for mid, summary in member_summaries.items()
-            if self.members.data.get(mid, {}).get("active", True)
-        }
-        max_week_points = max(active_week_points.values(), default=0)
-        winner_ids = {
-            mid for mid, points in active_week_points.items() if points == max_week_points and points > 0
-        }
-        for member_id in winner_ids:
-            member_summaries[member_id].is_weekly_winner = True
 
         return FamilyTasksData(tasks=task_statuses, members=member_summaries)
 

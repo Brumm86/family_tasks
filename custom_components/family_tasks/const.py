@@ -140,6 +140,14 @@ MEMBER_ROLE_PARENT: Final = "parent"
 MEMBER_ROLE_CHILD: Final = "child"
 MEMBER_ROLES: Final = [MEMBER_ROLE_PARENT, MEMBER_ROLE_CHILD]
 
+# Whether a member takes part in the reward system at all (v0.9): gates both
+# whether they show up on the leaderboard card and whether they may redeem a
+# catalog reward (see WS_API_REWARD_REDEEM below) - a household may only want
+# its children competing for points/rewards, not the parents themselves.
+# Defaults to True so every member kept behaving exactly as before this field
+# was introduced (opting members out is an explicit admin action).
+CONF_MEMBER_REWARDS_OPT_IN: Final = "participates_in_rewards"
+
 # Per-task override of whether a child's completion needs parental sign-off
 # (see the confirmation flow above). When absent/None, tasks assigned to a
 # "child" member always require confirmation - the historical, still-default
@@ -174,7 +182,7 @@ TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST]
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_VERSION: Final = 1
-STORAGE_VERSION_MINOR: Final = 1
+STORAGE_VERSION_MINOR: Final = 2
 
 STORAGE_KEY_TASKS: Final = f"{DOMAIN}.tasks"
 STORAGE_KEY_MEMBERS: Final = f"{DOMAIN}.members"
@@ -182,12 +190,22 @@ STORAGE_KEY_COMPLETIONS: Final = f"{DOMAIN}.completions"
 STORAGE_KEY_TRIGGER_STATE: Final = f"{DOMAIN}.trigger_state"
 STORAGE_KEY_BATTERY_OVERRIDES: Final = f"{DOMAIN}.battery_overrides"
 STORAGE_KEY_CHECKLIST_STATE: Final = f"{DOMAIN}.checklist_state"
-# Parent-defined categories a weekly winner can pick from (e.g. "Mittagessen
-# auswählen") - see RewardGroupStorageCollection in storage.py.
-STORAGE_KEY_REWARD_GROUPS: Final = f"{DOMAIN}.reward_groups"
-# Claimed rewards (one per member per calendar week) - see
-# RewardStorageCollection in storage.py.
-STORAGE_KEY_REWARDS: Final = f"{DOMAIN}.rewards"
+# The parent-defined reward catalog (v0.9): each item has a name and a price
+# in points (see RewardStorageCollection in storage.py). The physical storage
+# key/file is unchanged since v0.8, where it held "reward groups" - parent-
+# defined categories a weekly winner picked from; existing items are
+# transparently migrated in place (points_cost=0 backfilled) the first time
+# this collection loads under v0.9 - see _async_migrate_reward_catalog.
+STORAGE_KEY_REWARDS: Final = f"{DOMAIN}.reward_groups"
+# Redemption history: every time a participating member redeems a catalog
+# reward, spending points (v0.9) - see RewardRedemptionStorageCollection in
+# storage.py. The physical storage key/file is unchanged since v0.8, where it
+# held "claimed weekly-winner rewards" (one per member per calendar week);
+# existing items are migrated in place (mapped onto the new shape,
+# points_cost=0 so they don't retroactively affect anyone's balance) the
+# first time this collection loads under v0.9 - see
+# _async_migrate_reward_redemptions.
+STORAGE_KEY_REWARD_REDEMPTIONS: Final = f"{DOMAIN}.rewards"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -201,21 +219,25 @@ WS_API_PREFIX_BATTERY_OVERRIDES: Final = f"{DOMAIN}/battery_override"
 # account. See ws_create_own_task in storage.py.
 WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
 
-# --- Rewards ------------------------------------------------------------------
+# --- Rewards (v0.9) ------------------------------------------------------------
 #
-# The household's current "weekly winner" (see MemberSummaryData.is_weekly_winner
-# in coordinator.py - whoever currently has the most points_week, tie-shared,
-# nobody if no one has scored yet this week) may pick a reward: one of the
-# parent-defined WS_API_PREFIX_REWARD_GROUPS categories (e.g. "Mittagessen
-# auswählen"), plus their own free-text detail (e.g. which lunch). This is not
-# exposed through the generic storage-collection "create" command (see
-# RewardStorageCollectionWebsocket in storage.py) because creating one needs
-# the extra winner/once-per-week checks - only WS_API_REWARD_CLAIM can create
-# an item. Parents (not children, regardless of HA admin flag) can then mark a
-# reward "fulfilled".
-WS_API_PREFIX_REWARD_GROUPS: Final = f"{DOMAIN}/reward_group"
+# A points-shop: parents maintain a catalog of rewards, each with a price in
+# points (WS_API_PREFIX_REWARDS, plain admin CRUD - see RewardStorageCollection
+# in storage.py). Any family member who participates in the reward system (see
+# CONF_MEMBER_REWARDS_OPT_IN above) can redeem any catalog reward at any time,
+# provided their available point balance (all-time points earned minus
+# everything they've already redeemed - see MemberSummaryData.points_available
+# in coordinator.py) covers its price. Redeeming is not exposed through the
+# generic storage-collection "create" command for WS_API_PREFIX_REWARD_REDEMPTIONS
+# (see RewardRedemptionStorageCollectionWebsocket in storage.py) because it
+# needs the extra participation/balance checks - only WS_API_REWARD_REDEEM can
+# create a redemption entry, and creating one *is* the point deduction: balance
+# is always computed fresh from history, never stored/mutated directly.
+# Parents (not children, regardless of HA admin flag) can mark a redemption
+# "fulfilled" once they've handed the reward over.
 WS_API_PREFIX_REWARDS: Final = f"{DOMAIN}/reward"
-WS_API_REWARD_CLAIM: Final = f"{WS_API_PREFIX_REWARDS}/claim"
+WS_API_PREFIX_REWARD_REDEMPTIONS: Final = f"{DOMAIN}/reward_redemption"
+WS_API_REWARD_REDEEM: Final = f"{WS_API_PREFIX_REWARD_REDEMPTIONS}/redeem"
 
 # --- Coordinator --------------------------------------------------------------
 

@@ -11,7 +11,7 @@ StorageCollection (there is nothing to edit, only to append and prune).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -28,6 +28,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_COMPLETION_BUTTON_ENTITY_ID,
+    CONF_MEMBER_REWARDS_OPT_IN,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
     MAX_COMPLETION_LOG_ENTRIES,
@@ -45,7 +46,7 @@ from .const import (
     STORAGE_KEY_CHECKLIST_STATE,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_MEMBERS,
-    STORAGE_KEY_REWARD_GROUPS,
+    STORAGE_KEY_REWARD_REDEMPTIONS,
     STORAGE_KEY_REWARDS,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
@@ -59,10 +60,10 @@ from .const import (
     TASK_TRIGGER_STATE,
     WS_API_PREFIX_BATTERY_OVERRIDES,
     WS_API_PREFIX_MEMBERS,
-    WS_API_PREFIX_REWARD_GROUPS,
+    WS_API_PREFIX_REWARD_REDEMPTIONS,
     WS_API_PREFIX_REWARDS,
     WS_API_PREFIX_TASKS,
-    WS_API_REWARD_CLAIM,
+    WS_API_REWARD_REDEEM,
     WS_API_TASK_CREATE_OWN,
 )
 
@@ -233,6 +234,11 @@ MEMBER_CREATE_SCHEMA: collection.VolDictType = {
     # Defaults to "parent" so existing members keep behaving exactly as
     # before this field was introduced.
     vol.Optional("role", default=MEMBER_ROLE_PARENT): vol.In(MEMBER_ROLES),
+    # See CONF_MEMBER_REWARDS_OPT_IN in const.py - whether this member shows
+    # up on the leaderboard card and may redeem catalog rewards. Defaults to
+    # True so every existing member keeps behaving exactly as before this
+    # field was introduced.
+    vol.Optional(CONF_MEMBER_REWARDS_OPT_IN, default=True): bool,
 }
 
 MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
@@ -241,6 +247,7 @@ MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("icon"): str,
     vol.Optional("active"): bool,
     vol.Optional("role"): vol.In(MEMBER_ROLES),
+    vol.Optional(CONF_MEMBER_REWARDS_OPT_IN): bool,
 }
 
 
@@ -374,29 +381,42 @@ class BatteryOverrideStorageCollection(collection.DictStorageCollection):
         return updated
 
 
-# --- Rewards ------------------------------------------------------------------
+# --- Rewards (v0.9) ------------------------------------------------------------
 #
-# Parent-defined categories a weekly winner can pick from (see
-# WS_API_PREFIX_REWARD_GROUPS in const.py), e.g. a group named "Mittagessen
-# auswählen" ("choose lunch") - the actual choice (which lunch) is the
-# free-text "detail" a winner fills in when claiming one, see REWARD_CREATE_SCHEMA
-# below.
-REWARD_GROUP_CREATE_SCHEMA: collection.VolDictType = {
+# The parent-defined reward catalog: each item has a name and a price in
+# points ("points_cost") - see WS_API_PREFIX_REWARDS in const.py. Any
+# participating family member may redeem any catalog item at any time
+# (see RewardRedemptionStorageCollection below), not just a "weekly winner"
+# (v0.8's model, removed in v0.9) - so unlike then, no per-redemption
+# customization (the old free-text "detail") is needed here.
+REWARD_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
+    vol.Optional("points_cost", default=0): vol.All(int, vol.Range(min=0)),
 }
 
-REWARD_GROUP_UPDATE_SCHEMA: collection.VolDictType = {
+REWARD_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("name"): str,
     vol.Optional("icon"): str,
+    vol.Optional("points_cost"): vol.All(int, vol.Range(min=0)),
 }
 
 
-class RewardGroupStorageCollection(collection.DictStorageCollection):
-    """Storage collection for parent-defined reward categories."""
+class RewardStorageCollection(collection.DictStorageCollection):
+    """Storage collection for the parent-defined reward catalog.
 
-    CREATE_SCHEMA = vol.Schema(REWARD_GROUP_CREATE_SCHEMA)
-    UPDATE_SCHEMA = vol.Schema(REWARD_GROUP_UPDATE_SCHEMA)
+    Formerly (v0.8) "reward groups" - categories a weekly winner picked from,
+    with a free-text detail filled in at claim time. That flow is gone in
+    v0.9: every catalog item now has a fixed price in points instead, and any
+    participating member may redeem it whenever they can afford it (see
+    RewardRedemptionStorageCollection below) - existing items are migrated in
+    place the first time this collection loads (see
+    _async_migrate_reward_catalog), keeping their name/icon and getting
+    points_cost=0 until an admin sets a real price.
+    """
+
+    CREATE_SCHEMA = vol.Schema(REWARD_CREATE_SCHEMA)
+    UPDATE_SCHEMA = vol.Schema(REWARD_UPDATE_SCHEMA)
 
     async def _process_create_data(self, data: dict) -> dict:
         return self.CREATE_SCHEMA(data)
@@ -410,74 +430,87 @@ class RewardGroupStorageCollection(collection.DictStorageCollection):
         return {**item, **validated}
 
 
-# A claimed reward: which member won it, which parent-defined group they
-# picked, and their own free-text detail (e.g. which lunch). Only ever
-# created through ws_claim_reward below (never the generic "reward/create"
-# command, see RewardStorageCollectionWebsocket) - "member_name" and
-# "reward_group_name" are denormalized copies taken at claim time so a
-# reward's history/display still makes sense even if the member or reward
-# group is later renamed or deleted.
-REWARD_CREATE_SCHEMA: collection.VolDictType = {
+# A redemption: which member spent points on which catalog reward. Only ever
+# created through ws_redeem_reward below (never the generic
+# "reward_redemption/create" command, see
+# RewardRedemptionStorageCollectionWebsocket) - "member_name", "reward_name"
+# and "points_cost" are denormalized copies taken at redemption time so
+# history/display still makes sense even if the member or reward is later
+# renamed, repriced, or deleted. Creating one *is* the point deduction: a
+# member's available balance (see MemberSummaryData.points_available in
+# coordinator.py) is always computed fresh as all-time points earned minus
+# the sum of "points_cost" across their redemptions, so there is nothing else
+# to update once a redemption exists.
+REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("member_id"): str,
     vol.Required("member_name"): str,
-    vol.Required("reward_group_id"): str,
-    vol.Required("reward_group_name"): str,
-    vol.Required("detail"): str,
-    # Monday-of-the-week ISO date this reward was claimed for - see
-    # ws_claim_reward's week-boundary calculation, mirroring
-    # FamilyTasksCoordinator._async_update_data's start_of_week. At most one
-    # reward per (member_id, period_key) is allowed.
-    vol.Required("period_key"): str,
+    vol.Required("reward_id"): str,
+    vol.Required("reward_name"): str,
+    vol.Required("points_cost"): vol.All(int, vol.Range(min=0)),
     vol.Optional("fulfilled", default=False): bool,
 }
 
 # Only "fulfilled" may ever be changed after the fact - see
-# RewardStorageCollectionWebsocket, which additionally restricts *who* may
-# flip it (parents only, not a "child" member even with an admin account).
-REWARD_UPDATE_SCHEMA: collection.VolDictType = {
+# RewardRedemptionStorageCollectionWebsocket, which additionally restricts
+# *who* may flip it (parents only, not a "child" member even with an admin
+# account).
+REWARD_REDEMPTION_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("fulfilled"): bool,
 }
 
 
-class RewardStorageCollection(collection.DictStorageCollection):
-    """Storage collection for claimed weekly-winner rewards."""
+class RewardRedemptionStorageCollection(collection.DictStorageCollection):
+    """Storage collection for redeemed catalog rewards (points-shop purchases).
 
-    CREATE_SCHEMA = vol.Schema(REWARD_CREATE_SCHEMA)
-    UPDATE_SCHEMA = vol.Schema(REWARD_UPDATE_SCHEMA)
+    Formerly (v0.8) "claimed weekly-winner rewards", one per member per
+    calendar week. v0.9 removes that limit entirely - a member may redeem as
+    often as their balance allows - existing items are migrated in place the
+    first time this collection loads (see _async_migrate_reward_redemptions):
+    mapped onto the new shape with points_cost=0 so they never retroactively
+    reduce anyone's balance, exactly as if that historical claim had been free.
+    """
+
+    CREATE_SCHEMA = vol.Schema(REWARD_REDEMPTION_CREATE_SCHEMA)
+    UPDATE_SCHEMA = vol.Schema(REWARD_REDEMPTION_UPDATE_SCHEMA)
 
     async def _process_create_data(self, data: dict) -> dict:
         validated = self.CREATE_SCHEMA(data)
-        validated["created_at"] = dt_util.utcnow().isoformat()
+        validated["redeemed_at"] = dt_util.utcnow().isoformat()
         return validated
 
     @callback
     def _get_suggested_id(self, info: dict) -> str:
-        return f"{info['member_id']}-{info['period_key']}"
+        # A member may redeem the same reward more than once (no longer
+        # once-per-week, see above) - IDManager appends "_2", "_3", ... on
+        # collision, so this is just a readable base, not required to be
+        # unique by itself.
+        return f"{info['member_id']}-{info['reward_id']}"
 
     async def _update_data(self, item: dict, update_data: dict) -> dict:
         validated = self.UPDATE_SCHEMA(update_data)
         return {**item, **validated}
 
 
-class RewardStorageCollectionWebsocket(collection.DictStorageCollectionWebsocket):
-    """Reward CRUD over websocket, restricted beyond the base admin check.
+class RewardRedemptionStorageCollectionWebsocket(collection.DictStorageCollectionWebsocket):
+    """Redemption CRUD over websocket, restricted beyond the base admin check.
 
-    Creating a reward is never allowed through the generic "reward/create"
-    command, even for an admin - that's the whole point of the
-    WS_API_REWARD_CLAIM flow (see ws_claim_reward below): it has to check who
-    the current weekly winner is and that they haven't already claimed a
-    reward this week before an item may be created at all, which the generic
-    storage-collection create command has no way to enforce. Marking a
-    reward "fulfilled" (the only field the update command allows in the first
-    place, see REWARD_UPDATE_SCHEMA) additionally requires the caller not be
-    linked to a "child" member, regardless of their HA admin flag - the same
-    rule MemberStorageCollectionWebsocket applies to member management - so a
-    child can't tick off their own reward.
+    Creating a redemption is never allowed through the generic
+    "reward_redemption/create" command, even for an admin - that's the whole
+    point of the WS_API_REWARD_REDEEM flow (see ws_redeem_reward below): it
+    has to check that the caller participates in the reward system and can
+    actually afford the reward before an item may be created at all, which
+    the generic storage-collection create command has no way to enforce.
+    Marking a redemption "fulfilled" (the only field the update command
+    allows in the first place, see REWARD_REDEMPTION_UPDATE_SCHEMA)
+    additionally requires the caller not be linked to a "child" member,
+    regardless of their HA admin flag - the same rule
+    MemberStorageCollectionWebsocket applies to member management - so a
+    child can't tick off their own redemption.
     """
 
     def __init__(
         self,
-        storage_collection: RewardStorageCollection,
+        storage_collection: RewardRedemptionStorageCollection,
         api_prefix: str,
         model_name: str,
         create_schema: collection.VolDictType,
@@ -507,8 +540,8 @@ class RewardStorageCollectionWebsocket(collection.DictStorageCollectionWebsocket
         connection.send_error(
             msg["id"],
             websocket_api.ERR_UNAUTHORIZED,
-            "Belohnungen können nur vom aktuellen Wochengewinner über "
-            "family_tasks/reward/claim ausgewählt werden.",
+            "Belohnungen können nur über family_tasks/reward_redemption/redeem "
+            "eingelöst werden.",
         )
 
     async def ws_update_item(
@@ -649,13 +682,37 @@ CREATE_OWN_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
 )
 
 
-CLAIM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+REDEEM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     {
-        vol.Required("type"): WS_API_REWARD_CLAIM,
-        vol.Required("reward_group_id"): str,
-        vol.Required("detail"): str,
+        vol.Required("type"): WS_API_REWARD_REDEEM,
+        vol.Required("reward_id"): str,
     }
 )
+
+
+def _available_points(
+    completions: CompletionLogStore,
+    reward_redemptions: RewardRedemptionStorageCollection,
+    member_id: str,
+) -> int:
+    """A member's current spendable balance: all-time points minus redemptions.
+
+    Mirrors FamilyTasksCoordinator._async_update_data's points_available
+    computation (MemberSummaryData.points_available in coordinator.py) -
+    duplicated here, not imported, the same way the old is_weekly_winner
+    check used to be re-derived server-side independently of the coordinator,
+    so a redemption is always validated against the authoritative source
+    (the completion log + redemption history) rather than a value the client
+    happens to have cached.
+    """
+    since = datetime.min.replace(tzinfo=dt_util.UTC)
+    total = completions.points_since(member_id, since)
+    spent = sum(
+        r.get("points_cost", 0)
+        for r in reward_redemptions.data.values()
+        if r.get("member_id") == member_id
+    )
+    return total - spent
 
 
 @callback
@@ -664,8 +721,8 @@ def async_setup_websocket_api(
     tasks: TaskStorageCollection,
     members: MemberStorageCollection,
     battery_overrides: BatteryOverrideStorageCollection,
-    reward_groups: RewardGroupStorageCollection,
     rewards: RewardStorageCollection,
+    reward_redemptions: RewardRedemptionStorageCollection,
     completions: CompletionLogStore,
 ) -> None:
     """Expose the storage collections over the websocket API for the frontend."""
@@ -689,40 +746,40 @@ def async_setup_websocket_api(
         BATTERY_OVERRIDE_CREATE_SCHEMA,
         BATTERY_OVERRIDE_UPDATE_SCHEMA,
     ).async_setup(hass)
-    # Reward groups are an admin-only (parent) monitoring-style setting, same
-    # as battery overrides - plain CRUD, no extra role guard.
+    # The reward catalog is an admin-only (parent) monitoring-style setting,
+    # same as battery overrides - plain CRUD, no extra role guard.
     collection.DictStorageCollectionWebsocket(
-        reward_groups,
-        WS_API_PREFIX_REWARD_GROUPS,
-        "reward_group",
-        REWARD_GROUP_CREATE_SCHEMA,
-        REWARD_GROUP_UPDATE_SCHEMA,
-    ).async_setup(hass)
-    # Rewards themselves need the extra guards in RewardStorageCollectionWebsocket
-    # (create blocked entirely - see WS_API_REWARD_CLAIM below - and "fulfilled"
-    # restricted to non-child callers).
-    RewardStorageCollectionWebsocket(
         rewards,
         WS_API_PREFIX_REWARDS,
         "reward",
         REWARD_CREATE_SCHEMA,
         REWARD_UPDATE_SCHEMA,
+    ).async_setup(hass)
+    # Redemptions themselves need the extra guards in
+    # RewardRedemptionStorageCollectionWebsocket (create blocked entirely -
+    # see WS_API_REWARD_REDEEM below - and "fulfilled" restricted to
+    # non-child callers).
+    RewardRedemptionStorageCollectionWebsocket(
+        reward_redemptions,
+        WS_API_PREFIX_REWARD_REDEMPTIONS,
+        "reward_redemption",
+        REWARD_REDEMPTION_CREATE_SCHEMA,
+        REWARD_REDEMPTION_UPDATE_SCHEMA,
         members,
     ).async_setup(hass)
 
     @websocket_api.async_response
-    async def ws_claim_reward(
+    async def ws_redeem_reward(
         hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
     ) -> None:
-        """Let the current weekly winner pick a reward.
+        """Let a participating member redeem a catalog reward.
 
         No admin permission required - instead the caller must resolve (via
-        their linked person entity) to a family member, and that member must
-        currently be a weekly winner (highest points_week, ties share the
-        win, nobody wins with 0 points - mirrors
-        FamilyTasksCoordinator._async_update_data's is_weekly_winner
-        computation). At most one reward per member per calendar week is
-        allowed.
+        their linked person entity) to a family member who participates in
+        the reward system (see CONF_MEMBER_REWARDS_OPT_IN in const.py), and
+        that member's current available balance (_available_points above)
+        must cover the reward's price. Creating the redemption entry is
+        itself the deduction - there is no separate balance to update.
         """
         member_id = _member_id_for_user(hass, members, connection.user)
         member = members.data.get(member_id) if member_id else None
@@ -734,74 +791,46 @@ def async_setup_websocket_api(
             )
             return
 
-        # Mirrors the coordinator's start_of_week boundary (see
-        # FamilyTasksCoordinator._async_update_data in coordinator.py) so
-        # "who is the current weekly winner" lines up exactly with the
-        # points_week/is_weekly_winner values the card already shows.
-        local_now = dt_util.now()
-        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
-        start_of_week = start_of_today - timedelta(days=local_now.weekday())
-        period_key = (local_now.date() - timedelta(days=local_now.weekday())).isoformat()
-
-        active_member_ids = [
-            mid for mid, m in members.data.items() if m.get("active", True)
-        ]
-        points_by_member = {
-            mid: completions.points_since(mid, start_of_week) for mid in active_member_ids
-        }
-        max_points = max(points_by_member.values(), default=0)
-        winners = {mid for mid, pts in points_by_member.items() if pts == max_points and pts > 0}
-
-        if member_id not in winners:
+        if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True):
             connection.send_error(
                 msg["id"],
                 websocket_api.ERR_UNAUTHORIZED,
-                "Nur der aktuelle Wochengewinner kann eine Belohnung auswählen.",
+                "Dieses Familienmitglied nimmt nicht am Belohnungssystem teil.",
             )
             return
 
-        group = reward_groups.data.get(msg["reward_group_id"])
-        if group is None:
+        reward = rewards.data.get(msg["reward_id"])
+        if reward is None:
             connection.send_error(
-                msg["id"], websocket_api.ERR_NOT_FOUND, "Belohnungsgruppe nicht gefunden."
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Belohnung nicht gefunden."
             )
             return
 
-        already_claimed = any(
-            r["member_id"] == member_id and r["period_key"] == period_key
-            for r in rewards.data.values()
-        )
-        if already_claimed:
+        points_cost = reward.get("points_cost", 0)
+        available = _available_points(completions, reward_redemptions, member_id)
+        if available < points_cost:
             connection.send_error(
                 msg["id"],
                 websocket_api.ERR_INVALID_FORMAT,
-                "Für diese Woche wurde bereits eine Belohnung ausgewählt.",
-            )
-            return
-
-        detail = msg["detail"].strip()
-        if not detail:
-            connection.send_error(
-                msg["id"], websocket_api.ERR_INVALID_FORMAT, "Bitte eine Erläuterung angeben."
+                "Nicht genug Punkte für diese Belohnung.",
             )
             return
 
         try:
-            item = await rewards.async_create_item(
+            item = await reward_redemptions.async_create_item(
                 {
                     "member_id": member_id,
                     "member_name": member["name"],
-                    "reward_group_id": group["id"],
-                    "reward_group_name": group["name"],
-                    "detail": detail,
-                    "period_key": period_key,
+                    "reward_id": reward["id"],
+                    "reward_name": reward["name"],
+                    "points_cost": points_cost,
                 }
             )
             connection.send_result(msg["id"], item)
         except vol.Invalid as err:
             connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(msg, err))
 
-    websocket_api.async_register_command(hass, WS_API_REWARD_CLAIM, ws_claim_reward, CLAIM_REWARD_SCHEMA)
+    websocket_api.async_register_command(hass, WS_API_REWARD_REDEEM, ws_redeem_reward, REDEEM_REWARD_SCHEMA)
 
     @websocket_api.async_response
     async def ws_create_own_task(
@@ -888,28 +917,86 @@ async def async_create_battery_overrides_collection(
     return battery_overrides
 
 
-async def async_create_reward_groups_collection(
-    hass: HomeAssistant,
-) -> RewardGroupStorageCollection:
-    """Create and load the reward-groups storage collection."""
-    store: Store = Store(
-        hass, STORAGE_VERSION, STORAGE_KEY_REWARD_GROUPS, minor_version=STORAGE_VERSION_MINOR
-    )
-    id_manager = collection.IDManager()
-    reward_groups = RewardGroupStorageCollection(store, id_manager)
-    await reward_groups.async_load()
-    return reward_groups
+async def _async_migrate_reward_catalog(rewards: RewardStorageCollection) -> None:
+    """Backfill v0.8 "reward group" items with the new "points_cost" field.
+
+    v0.8 items only ever had "name"/"icon" - each gets points_cost=0 here, so
+    the household sees them appear in the v0.9 catalog immediately (an admin
+    then has to set a real price for them to be worth anything). Writes
+    directly to storage rather than going through async_update_item, since
+    that validates against REWARD_UPDATE_SCHEMA via the normal admin-facing
+    update flow - fine for a single field backfill like this, but there is no
+    need to round-trip through it for a one-time migration.
+    """
+    changed = False
+    for item in rewards.data.values():
+        if "points_cost" not in item:
+            item["points_cost"] = 0
+            changed = True
+    if changed:
+        await rewards.store.async_save({"items": list(rewards.data.values())})
+
+
+async def _async_migrate_reward_redemptions(
+    reward_redemptions: RewardRedemptionStorageCollection,
+) -> None:
+    """Backfill v0.8 "claimed reward" items into the v0.9 redemption shape.
+
+    v0.8 items carry "reward_group_id"/"reward_group_name"/"detail"/
+    "period_key" instead of "reward_id"/"reward_name"/"points_cost". Every
+    migrated item gets points_cost=0 so it never retroactively reduces
+    anyone's balance - exactly as if that historical claim had been free. The
+    free-text "detail" (e.g. which lunch) has no v0.9 equivalent field, so
+    it's folded into "reward_name" instead of being silently dropped.
+    """
+    changed = False
+    for item in reward_redemptions.data.values():
+        if "points_cost" in item:
+            continue
+        reward_id = item.pop("reward_group_id", None)
+        reward_name = item.pop("reward_group_name", None)
+        detail = item.pop("detail", None)
+        item.pop("period_key", None)
+        item["reward_id"] = item.get("reward_id", reward_id)
+        item["reward_name"] = item.get("reward_name", reward_name)
+        if detail:
+            item["reward_name"] = f"{item['reward_name']} ({detail})"
+        item["points_cost"] = 0
+        item.setdefault("redeemed_at", item.get("created_at"))
+        changed = True
+    if changed:
+        await reward_redemptions.store.async_save(
+            {"items": list(reward_redemptions.data.values())}
+        )
 
 
 async def async_create_rewards_collection(hass: HomeAssistant) -> RewardStorageCollection:
-    """Create and load the claimed-rewards storage collection."""
+    """Create and load the reward-catalog storage collection."""
     store: Store = Store(
         hass, STORAGE_VERSION, STORAGE_KEY_REWARDS, minor_version=STORAGE_VERSION_MINOR
     )
     id_manager = collection.IDManager()
     rewards = RewardStorageCollection(store, id_manager)
     await rewards.async_load()
+    await _async_migrate_reward_catalog(rewards)
     return rewards
+
+
+async def async_create_reward_redemptions_collection(
+    hass: HomeAssistant,
+) -> RewardRedemptionStorageCollection:
+    """Create and load the reward-redemptions storage collection."""
+    store: Store = Store(
+        hass,
+        STORAGE_VERSION,
+        STORAGE_KEY_REWARD_REDEMPTIONS,
+        minor_version=STORAGE_VERSION_MINOR,
+    )
+    id_manager = collection.IDManager()
+    reward_redemptions = RewardRedemptionStorageCollection(store, id_manager)
+    await reward_redemptions.async_load()
+    await _async_migrate_reward_redemptions(reward_redemptions)
+    return reward_redemptions
 
 
 class CompletionLogStore:

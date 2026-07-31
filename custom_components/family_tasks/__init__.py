@@ -38,14 +38,14 @@ from .storage import (
     ChecklistStateStore,
     CompletionLogStore,
     MemberStorageCollection,
-    RewardGroupStorageCollection,
+    RewardRedemptionStorageCollection,
     RewardStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_members_collection,
-    async_create_reward_groups_collection,
+    async_create_reward_redemptions_collection,
     async_create_rewards_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
@@ -80,8 +80,8 @@ class FamilyTasksRuntimeData:
     trigger_state: TriggerStateStore
     battery_overrides: BatteryOverrideStorageCollection
     checklist_state: ChecklistStateStore
-    reward_groups: RewardGroupStorageCollection
     rewards: RewardStorageCollection
+    reward_redemptions: RewardRedemptionStorageCollection
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -92,12 +92,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     tasks = await async_create_tasks_collection(hass)
     members = await async_create_members_collection(hass)
     battery_overrides = await async_create_battery_overrides_collection(hass)
-    reward_groups = await async_create_reward_groups_collection(hass)
     rewards = await async_create_rewards_collection(hass)
+    reward_redemptions = await async_create_reward_redemptions_collection(hass)
 
-    # Created before the websocket API is set up below - the reward-claim
-    # command needs the completion log to work out who the current weekly
-    # winner is (see ws_claim_reward in storage.py).
+    # Created before the websocket API is set up below - the reward-redeem
+    # command needs the completion log to work out a member's current
+    # available point balance (see ws_redeem_reward in storage.py).
     completions = CompletionLogStore(hass)
     await completions.async_load()
 
@@ -105,7 +105,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     # but harmless/no-ops for a second entry since single_config_entry=True
     # in the manifest already prevents that from happening in practice.
     async_setup_websocket_api(
-        hass, tasks, members, battery_overrides, reward_groups, rewards, completions
+        hass, tasks, members, battery_overrides, rewards, reward_redemptions, completions
     )
 
     trigger_state = await async_create_trigger_state_store(hass)
@@ -120,6 +120,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         trigger_state,
         battery_overrides,
         checklist_state,
+        reward_redemptions,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -130,8 +131,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         trigger_state=trigger_state,
         battery_overrides=battery_overrides,
         checklist_state=checklist_state,
-        reward_groups=reward_groups,
         rewards=rewards,
+        reward_redemptions=reward_redemptions,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -165,6 +166,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     )
     entry.async_on_unload(
         battery_overrides.async_add_change_set_listener(_async_collection_changed)
+    )
+    # A redemption changes the acting member's points_available (v0.9) - see
+    # MemberSummaryData.points_available in coordinator.py - so the
+    # leaderboard card's balance display updates right away instead of
+    # waiting for the next poll interval.
+    entry.async_on_unload(
+        reward_redemptions.async_add_change_set_listener(_async_collection_changed)
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
