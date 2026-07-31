@@ -110,6 +110,13 @@ class MemberSummaryData:
     points_month: int
     points_total: int
     open_tasks: int
+    # Whether this member currently holds the most points_week among active
+    # members (ties share the win; nobody wins while every active member is
+    # still at 0 for the week) - see the computation at the end of
+    # _async_update_data. Drives the "pick a reward" prompt in the card (see
+    # WS_API_REWARD_CLAIM in const.py / ws_claim_reward in storage.py, which
+    # re-derives the same thing server-side before letting a claim through).
+    is_weekly_winner: bool = False
 
 
 @dataclass(slots=True)
@@ -360,6 +367,22 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 ),
                 open_tasks=open_tasks_by_member.get(member_id, 0),
             )
+
+        # Weekly winner(s): whoever among currently-active members has the
+        # most points_week, shared by every member tied for that max - nobody
+        # wins if the max is 0 (no one has completed anything yet this week).
+        # See MemberSummaryData.is_weekly_winner above.
+        active_week_points = {
+            mid: summary.points_week
+            for mid, summary in member_summaries.items()
+            if self.members.data.get(mid, {}).get("active", True)
+        }
+        max_week_points = max(active_week_points.values(), default=0)
+        winner_ids = {
+            mid for mid, points in active_week_points.items() if points == max_week_points and points > 0
+        }
+        for member_id in winner_ids:
+            member_summaries[member_id].is_weekly_winner = True
 
         return FamilyTasksData(tasks=task_statuses, members=member_summaries)
 

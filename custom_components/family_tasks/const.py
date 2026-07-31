@@ -182,6 +182,12 @@ STORAGE_KEY_COMPLETIONS: Final = f"{DOMAIN}.completions"
 STORAGE_KEY_TRIGGER_STATE: Final = f"{DOMAIN}.trigger_state"
 STORAGE_KEY_BATTERY_OVERRIDES: Final = f"{DOMAIN}.battery_overrides"
 STORAGE_KEY_CHECKLIST_STATE: Final = f"{DOMAIN}.checklist_state"
+# Parent-defined categories a weekly winner can pick from (e.g. "Mittagessen
+# auswählen") - see RewardGroupStorageCollection in storage.py.
+STORAGE_KEY_REWARD_GROUPS: Final = f"{DOMAIN}.reward_groups"
+# Claimed rewards (one per member per calendar week) - see
+# RewardStorageCollection in storage.py.
+STORAGE_KEY_REWARDS: Final = f"{DOMAIN}.rewards"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -194,6 +200,22 @@ WS_API_PREFIX_BATTERY_OVERRIDES: Final = f"{DOMAIN}/battery_override"
 # to themselves only (points forced to 0), without needing an administrator
 # account. See ws_create_own_task in storage.py.
 WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
+
+# --- Rewards ------------------------------------------------------------------
+#
+# The household's current "weekly winner" (see MemberSummaryData.is_weekly_winner
+# in coordinator.py - whoever currently has the most points_week, tie-shared,
+# nobody if no one has scored yet this week) may pick a reward: one of the
+# parent-defined WS_API_PREFIX_REWARD_GROUPS categories (e.g. "Mittagessen
+# auswählen"), plus their own free-text detail (e.g. which lunch). This is not
+# exposed through the generic storage-collection "create" command (see
+# RewardStorageCollectionWebsocket in storage.py) because creating one needs
+# the extra winner/once-per-week checks - only WS_API_REWARD_CLAIM can create
+# an item. Parents (not children, regardless of HA admin flag) can then mark a
+# reward "fulfilled".
+WS_API_PREFIX_REWARD_GROUPS: Final = f"{DOMAIN}/reward_group"
+WS_API_PREFIX_REWARDS: Final = f"{DOMAIN}/reward"
+WS_API_REWARD_CLAIM: Final = f"{WS_API_PREFIX_REWARDS}/claim"
 
 # --- Coordinator --------------------------------------------------------------
 

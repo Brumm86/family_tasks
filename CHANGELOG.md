@@ -2,6 +2,16 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.8.0] - 2026-07-31
+
+### Added
+- **Kinder können eigene Checklisten-Aufgaben anlegen**: das nicht-admin-Formular „+ Eigene Aufgabe hinzufügen" (`family_tasks/task/create_own`) bietet jetzt auch den Aufgabentyp „Checkliste" mit demselben Unteraufgaben-Editor wie im Admin-Formular - weiterhin ohne Punkte und nur sich selbst zugewiesen (`storage.CREATE_OWN_TASK_SCHEMA`).
+- **Wochengewinner-Belohnung**: wer in der aktuellen Woche die meisten Punkte hat (`is_weekly_winner`, neues Attribut des Punkte-Sensors, Gleichstand teilt den Gewinn, niemand gewinnt bei 0 Punkten), bekommt in der Karte einen „Belohnung auswählen"-Hinweis. Zur Auswahl stehen von den Eltern angelegte Belohnungsgruppen (neuer admin-only Kartenabschnitt „Belohnungen" → „Belohnungsgruppen", z. B. „Mittagessen auswählen"); dazu trägt der Gewinner einen freien Text ein (z. B. welches Mittagessen) und speichert - die Belohnung erscheint dann mit dem Namen des Gewinners in der offenen Liste. Eltern können eine Belohnung als „erledigt" markieren; ein Kind kann das nicht, auch nicht mit einem Admin-Konto. Neue Websocket-API `family_tasks/reward_group/*` (admin-only CRUD) und `family_tasks/reward/*` (Auswahl ausschließlich über den eigenen, nicht-admin Befehl `family_tasks/reward/claim`, der serverseitig erneut prüft, dass der Aufrufer wirklich aktueller Wochengewinner ist und diese Woche noch keine Belohnung gewählt hat; „erledigt"-Markierung über `family_tasks/reward/update`, gesperrt für Kinder-Konten).
+
+### Changed
+- **Sichtbarkeitseinstellungen der Karte sind jetzt Eltern-only**: ein Nutzer, der einem „Kind"-Mitglied zugeordnet ist, sieht die Umschalt-Buttons „Nicht fällige ausblenden", „Nur eigene Aufgaben", die Sichtbarkeit von „Familienmitglieder"/„Batterien" sowie den Kompaktmodus-Button oben rechts nicht mehr - für Kinder ist die Aufgabenliste immer (nicht nur standardmäßig) auf die eigenen Aufgaben gefiltert.
+- **Aufgabe bearbeiten/anlegen öffnet jetzt in einem eigenen Fenster**: das Formular für „Aufgabe hinzufügen"/„Bearbeiten" (Admin) sowie „Eigene Aufgabe hinzufügen" (Kind) und die neue Belohnungsauswahl öffnen als natives Dialog-Fenster (`<dialog>`/`showModal()`) statt inline in der Karte. Zuvor konnte das Formular bei mehreren offenen Aufgaben-Karten unterhalb aller anderen landen und leicht übersehen werden; ein modales Dialogfenster liegt immer über der gesamten Seite, unabhängig davon, wo die Karte im Dashboard sitzt, und schließt sich per „Abbrechen" oder Escape.
+
 ## [0.7.0] - 2026-07-31
 
 ### Added

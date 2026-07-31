@@ -38,11 +38,15 @@ from .storage import (
     ChecklistStateStore,
     CompletionLogStore,
     MemberStorageCollection,
+    RewardGroupStorageCollection,
+    RewardStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_members_collection,
+    async_create_reward_groups_collection,
+    async_create_rewards_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
     async_setup_websocket_api,
@@ -76,6 +80,8 @@ class FamilyTasksRuntimeData:
     trigger_state: TriggerStateStore
     battery_overrides: BatteryOverrideStorageCollection
     checklist_state: ChecklistStateStore
+    reward_groups: RewardGroupStorageCollection
+    rewards: RewardStorageCollection
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -86,14 +92,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     tasks = await async_create_tasks_collection(hass)
     members = await async_create_members_collection(hass)
     battery_overrides = await async_create_battery_overrides_collection(hass)
+    reward_groups = await async_create_reward_groups_collection(hass)
+    rewards = await async_create_rewards_collection(hass)
+
+    # Created before the websocket API is set up below - the reward-claim
+    # command needs the completion log to work out who the current weekly
+    # winner is (see ws_claim_reward in storage.py).
+    completions = CompletionLogStore(hass)
+    await completions.async_load()
 
     # The websocket CRUD API is a hass-global registration; only needed once,
     # but harmless/no-ops for a second entry since single_config_entry=True
     # in the manifest already prevents that from happening in practice.
-    async_setup_websocket_api(hass, tasks, members, battery_overrides)
-
-    completions = CompletionLogStore(hass)
-    await completions.async_load()
+    async_setup_websocket_api(
+        hass, tasks, members, battery_overrides, reward_groups, rewards, completions
+    )
 
     trigger_state = await async_create_trigger_state_store(hass)
     checklist_state = await async_create_checklist_state_store(hass)
@@ -117,6 +130,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         trigger_state=trigger_state,
         battery_overrides=battery_overrides,
         checklist_state=checklist_state,
+        reward_groups=reward_groups,
+        rewards=rewards,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence

@@ -45,13 +45,30 @@
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
  *
+ * Visibility settings are admin/parent-only (v0.8): a user linked to a
+ * "child" member never sees the "nicht fällige ausblenden" / "Nur eigene
+ * Aufgaben" toggles, the compact-mode button, or the "Familienmitglieder"/
+ * "Batterien" show/hide buttons - there is nothing for them to configure,
+ * since a child's task list is always filtered down to their own tasks (the
+ * "Nur eigene Aufgaben" filter is forced on, not just defaulted, for them).
+ *
  * Task types: a task defaults to a single "Erledigt" action. Setting
  * "Aufgabentyp" to "Checkliste" instead gives it an open-ended list of named
  * sub-items (e.g. "Kofferpacken" with one sub-item per thing to pack) that
  * get checked off individually - checked items render struck-through - and
  * the task itself only becomes "Erledigt" once every sub-item is checked for
  * the current period; the manual "Erledigt" button is disabled for these
- * (see FamilyTasksCoordinator.async_toggle_subtask in coordinator.py).
+ * (see FamilyTasksCoordinator.async_toggle_subtask in coordinator.py). A
+ * "child" member creating a task for themselves (see below) can also pick
+ * "Checkliste" (v0.8) - the same self-service restrictions apply (no points,
+ * assigned only to themselves).
+ *
+ * Editing a task (admin) or adding one's own task (child) opens in a modal
+ * dialog (v0.8, native <dialog>/showModal) instead of being inlined into the
+ * card's content. Previously, with several task cards on a dashboard, the
+ * edit form could end up rendered below other cards and easy to miss; a
+ * modal dialog is always shown on top of everything else on the page,
+ * regardless of where the card sits, and closes on Escape or "Abbrechen".
  *
  * A "trigger" (sensor-based) task shows the bound sensor's current value next
  * to its trigger definition, and can optionally name a button entity
@@ -113,6 +130,19 @@
  * assigns and that becomes due/idle by itself - still works for any
  * household that already set one up, but is no longer offered when creating
  * a new task.)
+ *
+ * Rewards (v0.8): whoever currently has the most points this week
+ * ("Wochengewinner", tie-shared, nobody while everyone is still at 0 -
+ * mirrors the member points sensor's new is_weekly_winner attribute, see
+ * MemberSummaryData in coordinator.py) gets a "Belohnung auswählen" prompt.
+ * They pick one of the parent-defined reward groups (admin-only
+ * "Belohnungsgruppen" section, e.g. "Mittagessen auswählen") and fill in a
+ * free-text detail (e.g. which lunch); saving stores it as an open reward
+ * naming them, via the non-admin family_tasks/reward/claim command (which
+ * re-checks server-side that the caller really is a current winner and
+ * hasn't already claimed one this week - see ws_claim_reward in storage.py).
+ * Parents can mark an open reward "erledigt"; a child cannot, even with an
+ * HA admin account (RewardStorageCollectionWebsocket in storage.py).
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -224,19 +254,30 @@
     // What a "child" member may set when creating a task for themselves (see
     // family_tasks/task/create_own): no points, no rotation - both are
     // forced server-side to 0 / [self] - but they do get to choose whether a
-    // parent has to sign off on their completion.
+    // parent has to sign off on their completion, and (v0.8) whether it's a
+    // checklist task with their own named sub-items.
     return {
       name: "",
       icon: "",
       due_time: "",
       overdue_after_minutes: 60,
       requires_confirmation: true,
+      kind: "standard",
+      subtasks: [],
       recurrence: { type: "daily", interval: 1, weekdays: [0], anchor_date: "" },
     };
   }
 
   function emptyMemberForm() {
     return { name: "", person_entity_id: "", icon: "", active: true, role: "parent" };
+  }
+
+  function emptyRewardGroupForm() {
+    return { name: "", icon: "" };
+  }
+
+  function emptyRewardClaimForm() {
+    return { reward_group_id: "", detail: "" };
   }
 
   function taskToForm(task) {
@@ -293,6 +334,8 @@
       this._tasks = {};
       this._members = {};
       this._batteryOverrides = {};
+      this._rewardGroups = {};
+      this._rewards = {};
       this._hass = null;
       this._subscribed = false;
       this._listenersAttached = false;
@@ -300,11 +343,15 @@
       this._taskFormOpen = false;
       this._memberFormOpen = false;
       this._ownTaskFormOpen = false;
+      this._rewardGroupFormOpen = false;
+      this._rewardClaimFormOpen = false;
       this._editingTaskId = null;
       this._editingMemberId = null;
       this._taskForm = emptyTaskForm();
       this._memberForm = emptyMemberForm();
       this._ownTaskForm = emptyOwnTaskForm();
+      this._rewardGroupForm = emptyRewardGroupForm();
+      this._rewardClaimForm = emptyRewardClaimForm();
       this._hideNotDue = undefined;
       this._hideMembers = undefined;
       this._hideBattery = undefined;
@@ -430,6 +477,8 @@
       if (this._unsubTasks) this._unsubTasks();
       if (this._unsubMembers) this._unsubMembers();
       if (this._unsubBatteryOverrides) this._unsubBatteryOverrides();
+      if (this._unsubRewardGroups) this._unsubRewardGroups();
+      if (this._unsubRewards) this._unsubRewards();
     }
 
     // Only entities belonging to this integration should trigger a re-render;
@@ -471,12 +520,58 @@
         handle(this._batteryOverrides, "battery_override_id"),
         { type: "family_tasks/battery_override/subscribe" }
       );
+      this._unsubRewardGroups = await this._hass.connection.subscribeMessage(
+        handle(this._rewardGroups, "reward_group_id"),
+        { type: "family_tasks/reward_group/subscribe" }
+      );
+      this._unsubRewards = await this._hass.connection.subscribeMessage(
+        handle(this._rewards, "reward_id"),
+        { type: "family_tasks/reward/subscribe" }
+      );
     }
 
     _statusStateForTask(taskId) {
       if (!this._hass) return null;
       return Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.task_id === taskId
+      );
+    }
+
+    // The per-member points sensor (see FamilyTasksMemberPointsSensor in
+    // sensor.py) - identified by having a "points_week" attribute, unlike the
+    // "open tasks" sensor which also carries member_id but not points.
+    _pointsStateForMember(memberId) {
+      if (!this._hass) return null;
+      return Object.values(this._hass.states).find(
+        (s) =>
+          s.entity_id.startsWith("sensor.") &&
+          s.attributes.member_id === memberId &&
+          s.attributes.points_week !== undefined
+      );
+    }
+
+    _isWeeklyWinner(memberId) {
+      return !!this._pointsStateForMember(memberId)?.attributes?.is_weekly_winner;
+    }
+
+    // Monday of the current local week, as an ISO date - mirrors
+    // FamilyTasksCoordinator._async_update_data's start_of_week / ws_claim_reward's
+    // period_key in storage.py, so "already claimed this week" lines up with
+    // the server's own bookkeeping.
+    _currentWeekPeriodKey() {
+      const now = new Date();
+      const mondayOffset = (now.getDay() + 6) % 7; // Mon=0 .. Sun=6
+      const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - mondayOffset);
+      const y = monday.getFullYear();
+      const m = String(monday.getMonth() + 1).padStart(2, "0");
+      const d = String(monday.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+
+    _hasClaimedRewardThisWeek(memberId) {
+      const key = this._currentWeekPeriodKey();
+      return Object.values(this._rewards).some(
+        (r) => r.member_id === memberId && r.period_key === key
       );
     }
 
@@ -666,9 +761,19 @@
       // Restricted create path for a "child" member adding a task for
       // themselves: no admin rights needed, but no points and no choice of
       // assignee either - the backend forces both (see ws_create_own_task /
-      // family_tasks/task/create_own in storage.py).
+      // family_tasks/task/create_own in storage.py). A checklist kind is
+      // allowed too (v0.8), same "at least one named sub-item" rule as the
+      // admin task form.
       const form = this._ownTaskForm;
       if (!form.name.trim()) return;
+
+      if (form.kind === "checklist") {
+        const names = form.subtasks.map((s) => s.name.trim()).filter(Boolean);
+        if (!names.length) {
+          alert("Bitte mindestens eine Unteraufgabe für die Checkliste angeben.");
+          return;
+        }
+      }
 
       const recurrence = { type: form.recurrence.type };
       if (form.recurrence.type === "weekly") {
@@ -684,7 +789,13 @@
         name: form.name.trim(),
         recurrence,
         requires_confirmation: !!form.requires_confirmation,
+        kind: form.kind === "checklist" ? "checklist" : "standard",
       };
+      if (form.kind === "checklist") {
+        payload.subtasks = form.subtasks
+          .map((s) => ({ id: s.id, name: s.name.trim() }))
+          .filter((s) => s.name);
+      }
       if (form.icon) payload.icon = form.icon.trim();
       if (form.due_time) payload.due_time = form.due_time;
       if (form.overdue_after_minutes !== "") {
@@ -763,6 +874,79 @@
       }
     }
 
+    // --- rewards ---------------------------------------------------------
+
+    _openRewardGroupForm() {
+      this._rewardGroupForm = emptyRewardGroupForm();
+      this._rewardGroupFormOpen = true;
+      this._render();
+    }
+
+    _closeRewardGroupForm() {
+      this._rewardGroupFormOpen = false;
+      this._render();
+    }
+
+    async _saveRewardGroup() {
+      const form = this._rewardGroupForm;
+      if (!form.name.trim()) return;
+      const payload = { name: form.name.trim() };
+      if (form.icon) payload.icon = form.icon.trim();
+      await this._hass.callWS({ type: "family_tasks/reward_group/create", ...payload });
+      this._closeRewardGroupForm();
+    }
+
+    async _deleteRewardGroup(rewardGroupId) {
+      const name = this._rewardGroups[rewardGroupId]?.name ?? rewardGroupId;
+      if (!confirm(`Belohnungsgruppe "${name}" wirklich löschen?`)) return;
+      await this._hass.callWS({
+        type: "family_tasks/reward_group/delete",
+        reward_group_id: rewardGroupId,
+      });
+    }
+
+    _openRewardClaimForm() {
+      this._rewardClaimForm = emptyRewardClaimForm();
+      this._rewardClaimFormOpen = true;
+      this._render();
+    }
+
+    _closeRewardClaimForm() {
+      this._rewardClaimFormOpen = false;
+      this._render();
+    }
+
+    // Non-admin claim: the backend independently re-checks that the caller
+    // really is a current weekly winner and hasn't already claimed a reward
+    // this week (see ws_claim_reward in storage.py) - the client-side checks
+    // gating the "Belohnung auswählen" button are just there to not offer it
+    // in the first place, not the actual guard.
+    async _saveRewardClaim() {
+      const form = this._rewardClaimForm;
+      if (!form.reward_group_id) {
+        alert("Bitte eine Belohnungsgruppe auswählen.");
+        return;
+      }
+      if (!form.detail.trim()) {
+        alert("Bitte eine Erläuterung angeben (z. B. welches Mittagessen).");
+        return;
+      }
+      await this._hass.callWS({
+        type: "family_tasks/reward/claim",
+        reward_group_id: form.reward_group_id,
+        detail: form.detail.trim(),
+      });
+      this._closeRewardClaimForm();
+    }
+
+    async _fulfillReward(rewardId) {
+      await this._hass.callWS({
+        type: "family_tasks/reward/update",
+        reward_id: rewardId,
+        fulfilled: true,
+      });
+    }
+
     // --- rendering -------------------------------------------------------
 
     _render() {
@@ -772,27 +956,39 @@
       const hideAddMember = !!this._config.hide_add_member;
       const isAdmin = this._isAdmin();
       const isChildUser = this._isChildUser();
+      const currentMemberId = this._currentMemberId();
       // Children may never create/edit/delete family members, independent of
       // their HA admin flag - the backend enforces this too (see
       // MemberStorageCollectionWebsocket in storage.py); this just keeps the
       // buttons from showing up for them in the first place.
       const canManageMembers = isAdmin && !isChildUser;
+      // Same rule for reward groups/marking rewards fulfilled - a
+      // parent-only setting, blocked server-side too even for a "child" with
+      // an HA admin account (see RewardStorageCollectionWebsocket in storage.py).
+      const canManageRewards = isAdmin && !isChildUser;
+      // Visibility settings (v0.8) are admin/parent-only: a child's task list
+      // is always filtered to their own tasks, with no toggle to change that
+      // or any of the other display preferences - there's nothing for them
+      // to configure, so the controls simply don't render for them.
+      const showVisibilityControls = !isChildUser;
       // Compact mode: hides the section toggle buttons below (not the
       // section headers themselves) to keep the card small day-to-day. The
-      // button that controls it always stays visible, top-right of the card.
-      const controlsHidden = this._controlsHidden;
+      // button that controls it always stays visible, top-right of the card
+      // - but never for a child, since it only ever toggles the visibility
+      // controls they don't have anyway.
+      const controlsHidden = isChildUser ? false : this._controlsHidden;
 
       const membersSection = this._hideMembers
-        ? controlsHidden
+        ? controlsHidden || !showVisibilityControls
           ? ""
           : `<button class="link" data-action="toggle-hide-members">Familienmitglieder anzeigen</button>`
         : `
             <div class="section-header">
               <h3>Familienmitglieder</h3>
-              ${controlsHidden ? "" : `<button class="link" data-action="toggle-hide-members">Ausblenden</button>`}
+              ${controlsHidden || !showVisibilityControls ? "" : `<button class="link" data-action="toggle-hide-members">Ausblenden</button>`}
             </div>
             ${this._renderMemberList(canManageMembers)}
-            ${!canManageMembers || hideAddMember ? "" : this._memberFormOpen ? this._renderMemberForm() : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
+            ${!canManageMembers || hideAddMember ? "" : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
           `;
 
       this.shadowRoot.innerHTML = `
@@ -800,33 +996,83 @@
         <ha-card>
           <div class="card-header">
             <div class="name">${title}</div>
+            ${showVisibilityControls ? `
             <button
               class="icon-btn"
               data-action="toggle-controls"
               title="${controlsHidden ? "Steuerungen einblenden" : "Steuerungen ausblenden"}"
               aria-label="${controlsHidden ? "Steuerungen einblenden" : "Steuerungen ausblenden"}"
-            ><ha-icon icon="${controlsHidden ? "mdi:tune-variant" : "mdi:tune"}"></ha-icon></button>
+            ><ha-icon icon="${controlsHidden ? "mdi:tune-variant" : "mdi:tune"}"></ha-icon></button>` : ""}
           </div>
           <div class="card-content">
             <div class="section-header">
               <h3>Aufgaben</h3>
-              ${controlsHidden ? "" : `
+              ${!showVisibilityControls || controlsHidden ? "" : `
                 <div class="header-actions">
                   <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
                   <button class="link" data-action="toggle-only-own-tasks">${this._onlyOwnTasks ? "Alle Aufgaben anzeigen" : "Nur eigene Aufgaben"}</button>
                 </div>`}
             </div>
             ${this._renderTaskList(isAdmin)}
-            ${isAdmin ? (this._taskFormOpen ? this._renderTaskForm() : `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>`) : ""}
-            ${isChildUser && !isAdmin ? (this._ownTaskFormOpen ? this._renderOwnTaskForm() : `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>`) : ""}
+            ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
+            ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
 
-            ${isAdmin ? this._renderBatterySection(controlsHidden) : ""}
+            ${this._renderRewardsSection(canManageRewards, currentMemberId)}
+
+            ${isAdmin ? this._renderBatterySection(controlsHidden, showVisibilityControls) : ""}
 
             ${membersSection}
           </div>
+
+          ${this._taskFormOpen ? `
+          <dialog class="dialog" data-dialog="task">
+            <h3>${this._editingTaskId ? "Aufgabe bearbeiten" : "Aufgabe hinzufügen"}</h3>
+            ${this._renderTaskForm()}
+          </dialog>` : ""}
+          ${this._ownTaskFormOpen ? `
+          <dialog class="dialog" data-dialog="own-task">
+            <h3>Eigene Aufgabe hinzufügen</h3>
+            ${this._renderOwnTaskForm()}
+          </dialog>` : ""}
+          ${this._rewardClaimFormOpen ? `
+          <dialog class="dialog" data-dialog="reward-claim">
+            <h3>Belohnung auswählen</h3>
+            ${this._renderRewardClaimForm()}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
+      this._syncDialogs();
+    }
+
+    // Opens any dialog whose *FormOpen flag is true but that isn't already
+    // showing as a native modal yet (every _render() rebuilds the whole
+    // shadow DOM from scratch, so a freshly (re)inserted <dialog> always
+    // starts closed) - see the "Editing a task ... opens in a modal dialog"
+    // note at the top of this file. Also keeps our own state in sync if the
+    // dialog is closed natively (Escape key fires "cancel" then "close").
+    _syncDialogs() {
+      const specs = [
+        ["task", () => this._taskFormOpen, () => this._closeTaskForm()],
+        ["own-task", () => this._ownTaskFormOpen, () => this._closeOwnTaskForm()],
+        ["reward-claim", () => this._rewardClaimFormOpen, () => this._closeRewardClaimForm()],
+      ];
+      for (const [name, isOpenFlag, close] of specs) {
+        const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
+        if (!el || !isOpenFlag() || el.open) continue;
+        try {
+          el.showModal();
+        } catch (err) {
+          // Not supported / already open - nothing to do.
+        }
+        el.addEventListener(
+          "close",
+          () => {
+            if (isOpenFlag()) close();
+          },
+          { once: true }
+        );
+      }
     }
 
     _renderTaskList(isAdmin) {
@@ -835,7 +1081,11 @@
       if (this._hideNotDue) {
         ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
       }
-      if (this._onlyOwnTasks) {
+      // A "child" member's task list is always filtered to their own tasks -
+      // forced on (not just defaulted), regardless of the persisted toggle,
+      // since children can't access visibility settings at all (v0.8).
+      const onlyOwnTasks = this._isChildUser() || this._onlyOwnTasks;
+      if (onlyOwnTasks) {
         const currentMemberId = this._currentMemberId();
         ids = ids.filter((id) => {
           if (!currentMemberId) return false;
@@ -932,6 +1182,81 @@
         .join("")}</div>`;
     }
 
+    // Whoever currently has the most points this week gets a "Belohnung
+    // auswählen" prompt (unless they already claimed one this week); the
+    // open/claimed reward list and the admin-only "Belohnungsgruppen"
+    // management sit below it. Visible to everyone (a child should be able
+    // to see their own pending reward), unlike members/battery which are
+    // admin-gated sections - only the reward-group management and the
+    // "erledigt" action are restricted to canManageRewards.
+    _renderRewardsSection(canManageRewards, currentMemberId) {
+      const isWinner = !!currentMemberId && this._isWeeklyWinner(currentMemberId);
+      const alreadyClaimed = !!currentMemberId && this._hasClaimedRewardThisWeek(currentMemberId);
+
+      const winnerBanner =
+        isWinner && !alreadyClaimed
+          ? `
+            <div class="winner-banner">
+              <p>🏆 Du bist diese Woche Wochengewinner:in! Wähle deine Belohnung.</p>
+              <button data-action="new-reward-claim">Belohnung auswählen</button>
+            </div>`
+          : "";
+
+      const rewardIds = Object.keys(this._rewards).sort((a, b) =>
+        (this._rewards[b].created_at ?? "").localeCompare(this._rewards[a].created_at ?? "")
+      );
+      const rewardList = rewardIds.length
+        ? `<div class="list">${rewardIds
+            .map((id) => {
+              const r = this._rewards[id];
+              return `
+                <div class="row">
+                  <div class="row-main">
+                    <span class="name">${esc(r.member_name)} · ${esc(r.reward_group_name)}</span>
+                    <span class="muted">${esc(r.detail)}${r.fulfilled ? " · erledigt" : ""}</span>
+                  </div>
+                  ${!r.fulfilled && canManageRewards ? `
+                  <div class="row-actions">
+                    <button data-action="fulfill-reward" data-reward-id="${id}">Als erledigt markieren</button>
+                  </div>` : ""}
+                </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="muted">Noch keine Belohnungen ausgewählt.</p>`;
+
+      const groupIds = Object.keys(this._rewardGroups);
+      const groupList = groupIds.length
+        ? `<div class="list">${groupIds
+            .map((id) => {
+              const g = this._rewardGroups[id];
+              return `
+                <div class="row">
+                  <div class="row-main">
+                    <span class="name">${g.icon ? `<ha-icon icon="${esc(g.icon)}"></ha-icon> ` : ""}${esc(g.name)}</span>
+                  </div>
+                  ${canManageRewards ? `
+                  <div class="row-actions">
+                    <button data-action="delete-reward-group" data-reward-group-id="${id}" class="danger">Löschen</button>
+                  </div>` : ""}
+                </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="muted">Noch keine Belohnungsgruppen angelegt.</p>`;
+
+      return `
+        <div class="section-header">
+          <h3>Belohnungen</h3>
+        </div>
+        ${winnerBanner}
+        ${rewardList}
+        ${canManageRewards ? `
+          <h4>Belohnungsgruppen</h4>
+          ${groupList}
+          ${this._rewardGroupFormOpen ? this._renderRewardGroupForm() : `<button class="add" data-action="new-reward-group">+ Belohnungsgruppe hinzufügen</button>`}
+        ` : ""}
+      `;
+    }
+
     _renderMemberList(canManageMembers) {
       const ids = Object.keys(this._members);
       if (!ids.length) return `<p class="muted">Noch keine Familienmitglieder angelegt.</p>`;
@@ -965,9 +1290,9 @@
     // "Familienmitglieder" section, since it's set-and-forget for most
     // households; controlsHidden additionally hides the toggle button itself
     // (compact mode), same as elsewhere.
-    _renderBatterySection(controlsHidden) {
+    _renderBatterySection(controlsHidden, showVisibilityControls) {
       if (this._hideBattery) {
-        return controlsHidden
+        return controlsHidden || !showVisibilityControls
           ? ""
           : `<button class="link" data-action="toggle-hide-battery">Batterien anzeigen</button>`;
       }
@@ -975,7 +1300,7 @@
       return `
         <div class="section-header">
           <h3>Batterien</h3>
-          ${controlsHidden ? "" : `<button class="link" data-action="toggle-hide-battery">Ausblenden</button>`}
+          ${controlsHidden || !showVisibilityControls ? "" : `<button class="link" data-action="toggle-hide-battery">Ausblenden</button>`}
         </div>
         <p class="muted">Legt fest, welche Batterien überwacht werden und ab welchem Stand gewarnt wird. Sobald eine überwachte Batterie ihren Schwellenwert erreicht oder unterschreitet, legt die Integration automatisch eine einmalige Aufgabe für diese Batterie an, zugewiesen an alle Familienmitglieder mit Admin-Rechten - dieser Abschnitt dient nur der Konfiguration, nicht der Aufgabenverwaltung. Der Standard-Schwellenwert wird in den Integrations-Optionen festgelegt (Einstellungen → Geräte &amp; Dienste → Family Tasks → Konfigurieren).</p>
         ${batteries.length ? `<div class="list">${batteries
@@ -1109,6 +1434,14 @@
           <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
           <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></label>
 
+          <label>Aufgabentyp
+            <select data-field="kind">
+              <option value="standard" ${f.kind !== "checklist" ? "selected" : ""}>Standard</option>
+              <option value="checklist" ${f.kind === "checklist" ? "selected" : ""}>Checkliste</option>
+            </select>
+          </label>
+          ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
+
           <label>Wiederholung
             <select data-field="recurrence.type">
               ${Object.entries(OWN_TASK_RECURRENCE_LABELS).map(([value, label]) => `<option value="${value}" ${f.recurrence.type === value ? "selected" : ""}>${label}</option>`).join("")}
@@ -1239,6 +1572,46 @@
         </form>`;
     }
 
+    _renderRewardGroupForm() {
+      const f = this._rewardGroupForm;
+      return `
+        <form class="form" data-form="reward-group">
+          <label>Name<input type="text" data-field="name" placeholder="z. B. Mittagessen auswählen" value="${esc(f.name)}" required></label>
+          <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:food" value="${esc(f.icon)}"></label>
+          <div class="form-actions">
+            <button type="submit" data-action="save-reward-group">Speichern</button>
+            <button type="button" data-action="cancel-reward-group-form">Abbrechen</button>
+          </div>
+        </form>`;
+    }
+
+    // Form for the current weekly winner's reward pick (see the "Rewards"
+    // note at the top of this file) - rendered inside a modal dialog, same
+    // as the task forms, so it isn't hidden behind other open cards either.
+    _renderRewardClaimForm() {
+      const f = this._rewardClaimForm;
+      const groupOptions = Object.keys(this._rewardGroups)
+        .map((id) => {
+          const g = this._rewardGroups[id];
+          return `<option value="${esc(id)}" ${f.reward_group_id === id ? "selected" : ""}>${esc(g.name)}</option>`;
+        })
+        .join("");
+      return `
+        <form class="form" data-form="reward-claim">
+          <label>Belohnungsgruppe
+            <select data-field="reward_group_id">
+              <option value="">– auswählen –</option>
+              ${groupOptions}
+            </select>
+          </label>
+          <label>Details (z. B. welches Mittagessen)<input type="text" data-field="detail" placeholder="z. B. Pizza" value="${esc(f.detail)}"></label>
+          <div class="form-actions">
+            <button type="submit" data-action="save-reward-claim">Speichern</button>
+            <button type="button" data-action="cancel-reward-claim-form">Abbrechen</button>
+          </div>
+        </form>`;
+    }
+
     _styles() {
       return `
         .card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -1297,6 +1670,21 @@
         .chip { flex-direction: row !important; align-items: center; gap: 4px !important; background: var(--secondary-background-color, #f2f2f2);
                 border-radius: 12px; padding: 4px 8px; }
         .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        h4 { margin: 12px 0 8px; font-size: 0.95em; color: var(--secondary-text-color); }
+        .winner-banner { display: flex; flex-direction: column; gap: 8px; padding: 12px;
+                          margin: 8px 0; border-radius: 8px; background: var(--warning-color, #ff9800); color: #fff; }
+        .winner-banner p { margin: 0; font-weight: 500; }
+        .winner-banner button { background: #fff; color: var(--warning-color, #ff9800); align-self: flex-start; }
+        /* Native modal dialog (task editing/creation, reward claim, v0.8) -
+           shown via showModal() so it always renders on top of the whole
+           page, never hidden behind other open cards. */
+        dialog.dialog { border: none; border-radius: 12px; padding: 16px; max-width: 480px;
+                         width: calc(100vw - 32px); max-height: calc(100vh - 64px); overflow: auto;
+                         background: var(--card-background-color, #fff); color: var(--primary-text-color);
+                         box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3); }
+        dialog.dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+        dialog.dialog h3 { margin: 0 0 12px; }
+        dialog.dialog .form { border: none; padding: 0; margin: 0; }
       `;
     }
 
@@ -1310,9 +1698,14 @@
         ev.preventDefault();
         const form = ev.target.closest("[data-form]");
         if (!form) return;
-        if (form.dataset.form === "task") this._saveTask();
-        else if (form.dataset.form === "member") this._saveMember();
-        else if (form.dataset.form === "own-task") this._saveOwnTask();
+        const saveHandlers = {
+          task: () => this._saveTask(),
+          member: () => this._saveMember(),
+          "own-task": () => this._saveOwnTask(),
+          "reward-group": () => this._saveRewardGroup(),
+          "reward-claim": () => this._saveRewardClaim(),
+        };
+        saveHandlers[form.dataset.form]?.();
       });
 
       this.shadowRoot.addEventListener("click", (ev) => {
@@ -1341,6 +1734,24 @@
         else if (action === "cancel-member-form") this._closeMemberForm();
         else if (action === "edit-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(el.dataset.memberId); }
         else if (action === "delete-member") { if (this._isAdmin() && !this._isChildUser()) this._deleteMember(el.dataset.memberId); }
+        else if (action === "new-reward-group") { if (this._isAdmin() && !this._isChildUser()) this._openRewardGroupForm(); }
+        else if (action === "cancel-reward-group-form") this._closeRewardGroupForm();
+        else if (action === "delete-reward-group") { if (this._isAdmin() && !this._isChildUser()) this._deleteRewardGroup(el.dataset.rewardGroupId); }
+        else if (action === "new-reward-claim") {
+          // Defense-in-depth, same reasoning as the edit/delete gating above -
+          // the backend independently re-verifies winner status and the
+          // once-per-week limit (see ws_claim_reward in storage.py).
+          const currentMemberId = this._currentMemberId();
+          if (
+            currentMemberId &&
+            this._isWeeklyWinner(currentMemberId) &&
+            !this._hasClaimedRewardThisWeek(currentMemberId)
+          ) {
+            this._openRewardClaimForm();
+          }
+        }
+        else if (action === "cancel-reward-claim-form") this._closeRewardClaimForm();
+        else if (action === "fulfill-reward") { if (this._isAdmin() && !this._isChildUser()) this._fulfillReward(el.dataset.rewardId); }
         else if (action === "toggle-hide-not-due") {
           this._hideNotDue = !this._hideNotDue;
           this._saveUiState();
@@ -1362,13 +1773,21 @@
           this._saveUiState();
           this._render();
         } else if (action === "add-subtask") {
-          this._taskForm.subtasks.push({ id: newSubtaskId(), name: "" });
+          // Works for both the admin task form and a child's own-task form -
+          // both can carry a checklist (v0.8) - see _formSpec.
           const form = el.closest("[data-form]");
-          if (form) form.outerHTML = this._renderTaskForm();
+          const spec = form && this._formSpec(form.dataset.form);
+          if (spec) {
+            spec.target.subtasks.push({ id: newSubtaskId(), name: "" });
+            form.outerHTML = spec.render();
+          }
         } else if (action === "remove-subtask") {
-          this._taskForm.subtasks.splice(Number(el.dataset.subtaskIndex), 1);
           const form = el.closest("[data-form]");
-          if (form) form.outerHTML = this._renderTaskForm();
+          const spec = form && this._formSpec(form.dataset.form);
+          if (spec) {
+            spec.target.subtasks.splice(Number(el.dataset.subtaskIndex), 1);
+            form.outerHTML = spec.render();
+          }
         }
       });
 
@@ -1400,23 +1819,28 @@
         if (!el) return;
         const form = ev.target.closest("[data-form]");
         if (!form) return;
-        const target =
-          form.dataset.form === "task"
-            ? this._taskForm
-            : form.dataset.form === "member"
-            ? this._memberForm
-            : this._ownTaskForm;
-        this._applyFieldChange(target, el);
+        const spec = this._formSpec(form.dataset.form);
+        if (!spec) return;
+        this._applyFieldChange(spec.target, el);
         // Re-render only the form itself in place so unrelated typing isn't lost,
         // but recurrence-type / rotation changes need the sub-fields to redraw.
-        if (form.dataset.form === "task") {
-          form.outerHTML = this._renderTaskForm();
-        } else if (form.dataset.form === "member") {
-          form.outerHTML = this._renderMemberForm();
-        } else {
-          form.outerHTML = this._renderOwnTaskForm();
-        }
+        form.outerHTML = spec.render();
       });
+    }
+
+    // Maps a [data-form] name to its draft object and its render function -
+    // shared by the submit/change handlers and the checklist add/remove-
+    // subtask actions above, so every form (including the two that can carry
+    // a checklist, "task" and "own-task") is wired up in one place.
+    _formSpec(name) {
+      const specs = {
+        task: { target: this._taskForm, render: () => this._renderTaskForm() },
+        member: { target: this._memberForm, render: () => this._renderMemberForm() },
+        "own-task": { target: this._ownTaskForm, render: () => this._renderOwnTaskForm() },
+        "reward-group": { target: this._rewardGroupForm, render: () => this._renderRewardGroupForm() },
+        "reward-claim": { target: this._rewardClaimForm, render: () => this._renderRewardClaimForm() },
+      };
+      return specs[name];
     }
 
     _applyFieldChange(target, el) {

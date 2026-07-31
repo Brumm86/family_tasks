@@ -136,6 +136,11 @@ class FamilyTasksMemberPointsSensor(
             "points_week": member.points_week,
             "points_month": member.points_month,
             "person_entity_id": member.person_entity_id,
+            # Whether this member currently holds (or shares) the highest
+            # points_week among active members - see
+            # FamilyTasksCoordinator._async_update_data. Drives the "pick a
+            # reward" prompt in the card.
+            "is_weekly_winner": member.is_weekly_winner,
         }
 
 

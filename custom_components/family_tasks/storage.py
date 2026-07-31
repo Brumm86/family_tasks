@@ -11,7 +11,7 @@ StorageCollection (there is nothing to edit, only to append and prune).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -45,6 +45,8 @@ from .const import (
     STORAGE_KEY_CHECKLIST_STATE,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_MEMBERS,
+    STORAGE_KEY_REWARD_GROUPS,
+    STORAGE_KEY_REWARDS,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
     STORAGE_VERSION,
@@ -57,7 +59,10 @@ from .const import (
     TASK_TRIGGER_STATE,
     WS_API_PREFIX_BATTERY_OVERRIDES,
     WS_API_PREFIX_MEMBERS,
+    WS_API_PREFIX_REWARD_GROUPS,
+    WS_API_PREFIX_REWARDS,
     WS_API_PREFIX_TASKS,
+    WS_API_REWARD_CLAIM,
     WS_API_TASK_CREATE_OWN,
 )
 
@@ -369,6 +374,158 @@ class BatteryOverrideStorageCollection(collection.DictStorageCollection):
         return updated
 
 
+# --- Rewards ------------------------------------------------------------------
+#
+# Parent-defined categories a weekly winner can pick from (see
+# WS_API_PREFIX_REWARD_GROUPS in const.py), e.g. a group named "Mittagessen
+# auswählen" ("choose lunch") - the actual choice (which lunch) is the
+# free-text "detail" a winner fills in when claiming one, see REWARD_CREATE_SCHEMA
+# below.
+REWARD_GROUP_CREATE_SCHEMA: collection.VolDictType = {
+    vol.Required("name"): str,
+    vol.Optional("icon"): str,
+}
+
+REWARD_GROUP_UPDATE_SCHEMA: collection.VolDictType = {
+    vol.Optional("name"): str,
+    vol.Optional("icon"): str,
+}
+
+
+class RewardGroupStorageCollection(collection.DictStorageCollection):
+    """Storage collection for parent-defined reward categories."""
+
+    CREATE_SCHEMA = vol.Schema(REWARD_GROUP_CREATE_SCHEMA)
+    UPDATE_SCHEMA = vol.Schema(REWARD_GROUP_UPDATE_SCHEMA)
+
+    async def _process_create_data(self, data: dict) -> dict:
+        return self.CREATE_SCHEMA(data)
+
+    @callback
+    def _get_suggested_id(self, info: dict) -> str:
+        return info["name"]
+
+    async def _update_data(self, item: dict, update_data: dict) -> dict:
+        validated = self.UPDATE_SCHEMA(update_data)
+        return {**item, **validated}
+
+
+# A claimed reward: which member won it, which parent-defined group they
+# picked, and their own free-text detail (e.g. which lunch). Only ever
+# created through ws_claim_reward below (never the generic "reward/create"
+# command, see RewardStorageCollectionWebsocket) - "member_name" and
+# "reward_group_name" are denormalized copies taken at claim time so a
+# reward's history/display still makes sense even if the member or reward
+# group is later renamed or deleted.
+REWARD_CREATE_SCHEMA: collection.VolDictType = {
+    vol.Required("member_id"): str,
+    vol.Required("member_name"): str,
+    vol.Required("reward_group_id"): str,
+    vol.Required("reward_group_name"): str,
+    vol.Required("detail"): str,
+    # Monday-of-the-week ISO date this reward was claimed for - see
+    # ws_claim_reward's week-boundary calculation, mirroring
+    # FamilyTasksCoordinator._async_update_data's start_of_week. At most one
+    # reward per (member_id, period_key) is allowed.
+    vol.Required("period_key"): str,
+    vol.Optional("fulfilled", default=False): bool,
+}
+
+# Only "fulfilled" may ever be changed after the fact - see
+# RewardStorageCollectionWebsocket, which additionally restricts *who* may
+# flip it (parents only, not a "child" member even with an admin account).
+REWARD_UPDATE_SCHEMA: collection.VolDictType = {
+    vol.Optional("fulfilled"): bool,
+}
+
+
+class RewardStorageCollection(collection.DictStorageCollection):
+    """Storage collection for claimed weekly-winner rewards."""
+
+    CREATE_SCHEMA = vol.Schema(REWARD_CREATE_SCHEMA)
+    UPDATE_SCHEMA = vol.Schema(REWARD_UPDATE_SCHEMA)
+
+    async def _process_create_data(self, data: dict) -> dict:
+        validated = self.CREATE_SCHEMA(data)
+        validated["created_at"] = dt_util.utcnow().isoformat()
+        return validated
+
+    @callback
+    def _get_suggested_id(self, info: dict) -> str:
+        return f"{info['member_id']}-{info['period_key']}"
+
+    async def _update_data(self, item: dict, update_data: dict) -> dict:
+        validated = self.UPDATE_SCHEMA(update_data)
+        return {**item, **validated}
+
+
+class RewardStorageCollectionWebsocket(collection.DictStorageCollectionWebsocket):
+    """Reward CRUD over websocket, restricted beyond the base admin check.
+
+    Creating a reward is never allowed through the generic "reward/create"
+    command, even for an admin - that's the whole point of the
+    WS_API_REWARD_CLAIM flow (see ws_claim_reward below): it has to check who
+    the current weekly winner is and that they haven't already claimed a
+    reward this week before an item may be created at all, which the generic
+    storage-collection create command has no way to enforce. Marking a
+    reward "fulfilled" (the only field the update command allows in the first
+    place, see REWARD_UPDATE_SCHEMA) additionally requires the caller not be
+    linked to a "child" member, regardless of their HA admin flag - the same
+    rule MemberStorageCollectionWebsocket applies to member management - so a
+    child can't tick off their own reward.
+    """
+
+    def __init__(
+        self,
+        storage_collection: RewardStorageCollection,
+        api_prefix: str,
+        model_name: str,
+        create_schema: collection.VolDictType,
+        update_schema: collection.VolDictType,
+        members: MemberStorageCollection,
+    ) -> None:
+        super().__init__(storage_collection, api_prefix, model_name, create_schema, update_schema)
+        self._members = members
+
+    def _reject_if_child(
+        self, connection: websocket_api.ActiveConnection, msg_id: int
+    ) -> bool:
+        role = _member_role_for_user(self._members.hass, self._members, connection.user)
+        if role == MEMBER_ROLE_CHILD:
+            connection.send_error(
+                msg_id,
+                websocket_api.ERR_UNAUTHORIZED,
+                "Mitglieder mit der Rolle 'Kind' dürfen Belohnungen nicht als "
+                "erledigt markieren oder löschen.",
+            )
+            return True
+        return False
+
+    async def ws_create_item(
+        self, hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_UNAUTHORIZED,
+            "Belohnungen können nur vom aktuellen Wochengewinner über "
+            "family_tasks/reward/claim ausgewählt werden.",
+        )
+
+    async def ws_update_item(
+        self, hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        if self._reject_if_child(connection, msg["id"]):
+            return
+        await super().ws_update_item(hass, connection, msg)
+
+    async def ws_delete_item(
+        self, hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        if self._reject_if_child(connection, msg["id"]):
+            return
+        await super().ws_delete_item(hass, connection, msg)
+
+
 def _member_id_for_user(
     hass: HomeAssistant, members: MemberStorageCollection, user: Any
 ) -> str | None:
@@ -479,6 +636,24 @@ CREATE_OWN_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
         # Chosen by the child creating the task: whether a parent has to sign
         # off before it counts as done. Defaults to True (the safer default).
         vol.Optional(CONF_TASK_REQUIRES_CONFIRMATION, default=True): bool,
+        # A child may also create a checklist task for themselves (see
+        # TASK_KIND_CHECKLIST in const.py) - same "kind"/"subtasks" fields as
+        # the admin task schema; TaskStorageCollection._process_create_data
+        # (invoked below via tasks.async_create_item) already enforces at
+        # least one subtask for a checklist, no extra check needed here.
+        vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
+        vol.Optional("subtasks", default=list): vol.All(
+            [SUBTASK_SCHEMA], _require_unique_subtask_ids
+        ),
+    }
+)
+
+
+CLAIM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_REWARD_CLAIM,
+        vol.Required("reward_group_id"): str,
+        vol.Required("detail"): str,
     }
 )
 
@@ -489,6 +664,9 @@ def async_setup_websocket_api(
     tasks: TaskStorageCollection,
     members: MemberStorageCollection,
     battery_overrides: BatteryOverrideStorageCollection,
+    reward_groups: RewardGroupStorageCollection,
+    rewards: RewardStorageCollection,
+    completions: CompletionLogStore,
 ) -> None:
     """Expose the storage collections over the websocket API for the frontend."""
     collection.DictStorageCollectionWebsocket(
@@ -511,6 +689,119 @@ def async_setup_websocket_api(
         BATTERY_OVERRIDE_CREATE_SCHEMA,
         BATTERY_OVERRIDE_UPDATE_SCHEMA,
     ).async_setup(hass)
+    # Reward groups are an admin-only (parent) monitoring-style setting, same
+    # as battery overrides - plain CRUD, no extra role guard.
+    collection.DictStorageCollectionWebsocket(
+        reward_groups,
+        WS_API_PREFIX_REWARD_GROUPS,
+        "reward_group",
+        REWARD_GROUP_CREATE_SCHEMA,
+        REWARD_GROUP_UPDATE_SCHEMA,
+    ).async_setup(hass)
+    # Rewards themselves need the extra guards in RewardStorageCollectionWebsocket
+    # (create blocked entirely - see WS_API_REWARD_CLAIM below - and "fulfilled"
+    # restricted to non-child callers).
+    RewardStorageCollectionWebsocket(
+        rewards,
+        WS_API_PREFIX_REWARDS,
+        "reward",
+        REWARD_CREATE_SCHEMA,
+        REWARD_UPDATE_SCHEMA,
+        members,
+    ).async_setup(hass)
+
+    @websocket_api.async_response
+    async def ws_claim_reward(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Let the current weekly winner pick a reward.
+
+        No admin permission required - instead the caller must resolve (via
+        their linked person entity) to a family member, and that member must
+        currently be a weekly winner (highest points_week, ties share the
+        win, nobody wins with 0 points - mirrors
+        FamilyTasksCoordinator._async_update_data's is_weekly_winner
+        computation). At most one reward per member per calendar week is
+        allowed.
+        """
+        member_id = _member_id_for_user(hass, members, connection.user)
+        member = members.data.get(member_id) if member_id else None
+        if member is None:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Kein mit diesem Konto verknüpftes Familienmitglied.",
+            )
+            return
+
+        # Mirrors the coordinator's start_of_week boundary (see
+        # FamilyTasksCoordinator._async_update_data in coordinator.py) so
+        # "who is the current weekly winner" lines up exactly with the
+        # points_week/is_weekly_winner values the card already shows.
+        local_now = dt_util.now()
+        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
+        start_of_week = start_of_today - timedelta(days=local_now.weekday())
+        period_key = (local_now.date() - timedelta(days=local_now.weekday())).isoformat()
+
+        active_member_ids = [
+            mid for mid, m in members.data.items() if m.get("active", True)
+        ]
+        points_by_member = {
+            mid: completions.points_since(mid, start_of_week) for mid in active_member_ids
+        }
+        max_points = max(points_by_member.values(), default=0)
+        winners = {mid for mid, pts in points_by_member.items() if pts == max_points and pts > 0}
+
+        if member_id not in winners:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Nur der aktuelle Wochengewinner kann eine Belohnung auswählen.",
+            )
+            return
+
+        group = reward_groups.data.get(msg["reward_group_id"])
+        if group is None:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Belohnungsgruppe nicht gefunden."
+            )
+            return
+
+        already_claimed = any(
+            r["member_id"] == member_id and r["period_key"] == period_key
+            for r in rewards.data.values()
+        )
+        if already_claimed:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_INVALID_FORMAT,
+                "Für diese Woche wurde bereits eine Belohnung ausgewählt.",
+            )
+            return
+
+        detail = msg["detail"].strip()
+        if not detail:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, "Bitte eine Erläuterung angeben."
+            )
+            return
+
+        try:
+            item = await rewards.async_create_item(
+                {
+                    "member_id": member_id,
+                    "member_name": member["name"],
+                    "reward_group_id": group["id"],
+                    "reward_group_name": group["name"],
+                    "detail": detail,
+                    "period_key": period_key,
+                }
+            )
+            connection.send_result(msg["id"], item)
+        except vol.Invalid as err:
+            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(msg, err))
+
+    websocket_api.async_register_command(hass, WS_API_REWARD_CLAIM, ws_claim_reward, CLAIM_REWARD_SCHEMA)
 
     @websocket_api.async_response
     async def ws_create_own_task(
@@ -595,6 +886,30 @@ async def async_create_battery_overrides_collection(
     battery_overrides = BatteryOverrideStorageCollection(store, id_manager)
     await battery_overrides.async_load()
     return battery_overrides
+
+
+async def async_create_reward_groups_collection(
+    hass: HomeAssistant,
+) -> RewardGroupStorageCollection:
+    """Create and load the reward-groups storage collection."""
+    store: Store = Store(
+        hass, STORAGE_VERSION, STORAGE_KEY_REWARD_GROUPS, minor_version=STORAGE_VERSION_MINOR
+    )
+    id_manager = collection.IDManager()
+    reward_groups = RewardGroupStorageCollection(store, id_manager)
+    await reward_groups.async_load()
+    return reward_groups
+
+
+async def async_create_rewards_collection(hass: HomeAssistant) -> RewardStorageCollection:
+    """Create and load the claimed-rewards storage collection."""
+    store: Store = Store(
+        hass, STORAGE_VERSION, STORAGE_KEY_REWARDS, minor_version=STORAGE_VERSION_MINOR
+    )
+    id_manager = collection.IDManager()
+    rewards = RewardStorageCollection(store, id_manager)
+    await rewards.async_load()
+    return rewards
 
 
 class CompletionLogStore:
