@@ -905,6 +905,11 @@
             <h3>Eigene Aufgabe hinzufügen</h3>
             ${this._renderOwnTaskForm()}
           </dialog>` : ""}
+          ${this._memberFormOpen ? `
+          <dialog class="dialog" data-dialog="member">
+            <h3>${this._editingMemberId ? "Mitglied bearbeiten" : "Mitglied hinzufügen"}</h3>
+            ${this._renderMemberForm()}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
@@ -921,6 +926,7 @@
       const specs = [
         ["task", () => this._taskFormOpen, () => this._closeTaskForm()],
         ["own-task", () => this._ownTaskFormOpen, () => this._closeOwnTaskForm()],
+        ["member", () => this._memberFormOpen, () => this._closeMemberForm()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -1011,6 +1017,16 @@
               : "Keine Batterie niedrig"
             : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.`;
           const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
+          // "Überspringen" only makes sense for a task that recurs on a
+          // schedule (daily/weekly/interval_days) - skipping a "once" task,
+          // a sensor-bound "trigger" task, or the legacy aggregate "battery"
+          // task doesn't have the same "move on to next occurrence"
+          // semantics, so the button is hidden for those (v0.10). The
+          // parent-confirmation flow reuses the same button as "Ablehnen"
+          // (reject the child's claim) and stays available regardless of the
+          // original task's recurrence type.
+          const isRecurring = ["daily", "weekly", "interval_days"].includes(task.recurrence?.type);
+          const showSkip = isConfirmation || isRecurring;
           // A checklist task only becomes "done" once every sub-item is
           // checked (see async_toggle_subtask in coordinator.py) - the
           // manual "Erledigt" button is disabled for it so completion always
@@ -1038,7 +1054,7 @@
                 </div>
                 <div class="row-actions">
                   <button data-action="complete-task" data-task-id="${id}" ${disableComplete ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
-                  <button data-action="skip-task" data-task-id="${id}" ${resolved ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>
+                  ${showSkip ? `<button data-action="skip-task" data-task-id="${id}" ${resolved ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>` : ""}
                   ${isConfirmation || !isAdmin ? "" : `
                   <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
                   <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>`}
@@ -1057,17 +1073,19 @@
       return `<div class="list">${ids
         .map((id) => {
           const member = this._members[id];
-          const roleSuffix = member.role === "child" ? " · Kind" : "";
-          // Whether this member takes part in the reward system (v0.9) -
-          // gates their leaderboard visibility and ability to redeem a
-          // catalog reward, see family-tasks-leaderboard-card.js.
-          const rewardsSuffix =
-            member.participates_in_rewards === false ? " · nimmt nicht an Belohnungen teil" : "";
+          // Only the member's own name is shown here (v0.10) - the linked
+          // person entity id used to be appended too, but that's an internal
+          // configuration detail (edited via the member form), not something
+          // that belongs on the card itself.
+          const statusParts = [];
+          if (member.active === false) statusParts.push("inaktiv");
+          if (member.role === "child") statusParts.push("Kind");
+          if (member.participates_in_rewards === false) statusParts.push("nimmt nicht an Belohnungen teil");
           return `
             <div class="row">
               <div class="row-main">
                 <span class="name">${esc(member.name)}</span>
-                <span class="muted">${member.person_entity_id ? esc(member.person_entity_id) : "keine Verknüpfung"}${member.active === false ? " · inaktiv" : ""}${roleSuffix}${rewardsSuffix}</span>
+                ${statusParts.length ? `<span class="muted">${esc(statusParts.join(" · "))}</span>` : ""}
               </div>
               ${canManageMembers ? `
               <div class="row-actions">

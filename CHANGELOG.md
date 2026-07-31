@@ -2,6 +2,16 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.0] - 2026-07-31
+
+### Fixed
+- **Familienmitglieder bearbeiten funktionierte nicht**: das Bearbeiten-Formular (und ebenso "+ Mitglied hinzufügen") setzte zwar den internen "Formular offen"-Status, das dazugehörige `<dialog>` fehlte aber komplett in `_render()` (`family-tasks-card.js`) - der Klick auf "Bearbeiten" tat dadurch sichtbar nichts. Das Mitglieder-Formular öffnet jetzt wie das Aufgaben-Formular als natives Dialogfenster.
+- **"1 Punkte" statt "1 Punkt"**: der Preis einer Belohnung, der Einlöse-Bestätigungstext, der Belohnungsverlauf und die Guthaben-Anzeige in der Bestenlisten-Karte verwendeten immer die Pluralform. Ein Punkt heißt jetzt korrekt "1 Punkt".
+
+### Changed
+- **Familienmitglieder zeigen nur noch ihren Namen**: die verknüpfte Person-Entity-ID (bzw. "keine Verknüpfung") stand bisher zusätzlich unter dem Namen in der Aufgaben-Karte - das ist eine Konfigurationsdetail des Bearbeiten-Formulars und gehört nicht auf die Karte. Status-Hinweise ("inaktiv", "Kind", "nimmt nicht an Belohnungen teil") werden weiterhin angezeigt.
+- **"Überspringen" nur noch bei turnusmäßigen Aufgaben**: der Button erschien bisher bei jeder Aufgabe, unabhängig vom Wiederholungstyp. Er wird jetzt nur noch für Aufgaben mit einem festen Rhythmus (täglich, wöchentlich, alle N Tage) angezeigt - bei "Einmalig", "Sensor-Ereignis" und der veralteten automatischen Batteriewarnung ergibt "zur nächsten Zuteilung überspringen" keinen Sinn. Der "Ablehnen"-Button der Eltern-Bestätigung (derselbe Button, andere Beschriftung) bleibt davon unberührt.
+
 ## [0.9.0] - 2026-07-31
 
 ### Added

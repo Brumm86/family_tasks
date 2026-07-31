@@ -64,6 +64,15 @@
     );
   }
 
+  // "1 Punkt" vs. "2 Punkte" (v0.10) - every place a reward's point cost or
+  // a member's point balance is rendered as the word "Punkte" (not the
+  // "Pkt." abbreviation used elsewhere) goes through this so the singular
+  // case reads correctly.
+  function pointsLabel(value) {
+    const n = Number(value) || 0;
+    return `${esc(n)} ${n === 1 ? "Punkt" : "Punkte"}`;
+  }
+
   function emptyRewardForm() {
     return { name: "", icon: "", points_cost: 0 };
   }
@@ -377,7 +386,7 @@
                       <span class="points">${esc(entry.points)} Pkt.</span>
                     </div>
                     <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-                    <div class="balance">${esc(entry.member.name)}: ${esc(available)} Punkte verfügbar</div>
+                    <div class="balance">${esc(entry.member.name)}: ${pointsLabel(available)} verfügbar</div>
                   </div>
                 </div>`;
                     })
@@ -417,7 +426,7 @@
                   <div class="row">
                     <div class="row-main">
                       <span class="name">${r.icon ? `<ha-icon icon="${esc(r.icon)}"></ha-icon> ` : ""}${esc(r.name)}</span>
-                      <span class="muted">${esc(cost)} Punkte</span>
+                      <span class="muted">${pointsLabel(cost)}</span>
                     </div>
                     <div class="row-actions">
                       ${currentMemberId && currentParticipates ? `<button data-action="select-reward" data-reward-id="${id}" ${affordable ? "" : "disabled"}>Auswählen</button>` : ""}
@@ -428,7 +437,7 @@
                   </div>
                   ${isPending ? `
                   <div class="confirm-row">
-                    <span>„${esc(r.name)}" für ${esc(cost)} Punkte einlösen?</span>
+                    <span>„${esc(r.name)}" für ${pointsLabel(cost)} einlösen?</span>
                     <button data-action="confirm-redeem" data-reward-id="${id}">Bestätigen</button>
                     <button type="button" class="link" data-action="cancel-redeem">Abbrechen</button>
                   </div>` : ""}
@@ -448,7 +457,7 @@
                 <div class="row">
                   <div class="row-main">
                     <span class="name">${esc(r.member_name)} · ${esc(r.reward_name)}</span>
-                    <span class="muted">${esc(r.points_cost ?? 0)} Punkte${r.fulfilled ? " · erledigt" : ""}</span>
+                    <span class="muted">${pointsLabel(r.points_cost ?? 0)}${r.fulfilled ? " · erledigt" : ""}</span>
                   </div>
                   ${!r.fulfilled && canManageRewards ? `
                   <div class="row-actions">
@@ -463,7 +472,7 @@
         <div class="section-header">
           <h3>Belohnungen</h3>
         </div>
-        ${currentMemberId ? `<p class="muted">Dein Guthaben: ${esc(availablePoints)} Punkte${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
+        ${currentMemberId ? `<p class="muted">Dein Guthaben: ${pointsLabel(availablePoints)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
         ${catalogList}
         ${canManageRewards ? `
           ${this._rewardFormOpen ? this._renderRewardForm() : `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>`}
