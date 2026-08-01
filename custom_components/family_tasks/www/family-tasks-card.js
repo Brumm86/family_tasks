@@ -163,6 +163,20 @@
  * whether they may redeem a catalog reward) is set per-member via the
  * "Nimmt am Belohnungssystem teil" checkbox in the Familienmitglieder
  * section below (CONF_MEMBER_REWARDS_OPT_IN in const.py).
+ *
+ * Checklist display (v0.12): a checklist task's sub-items are now sorted
+ * alphabetically for display - open items first (alphabetically among
+ * themselves), then checked items (also alphabetically) - instead of
+ * whatever order they were originally typed in when the task was created.
+ * Purely a display-order concern (see the sortedSubtasks sort in
+ * _renderTaskList); the stored order in task.subtasks is untouched, and the
+ * task's own edit form (where sub-items are added/removed/named) still shows
+ * them in that original order, not this sorted one.
+ *
+ * Also v0.12: fixed a bug where checking off several sub-items of a
+ * checklist task in quick succession could leave some of them showing as
+ * still unchecked even after things had settled - see the last_updated vs.
+ * last_changed note on _relevantStatesSignature below.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -511,6 +525,18 @@
     // Only entities belonging to this integration should trigger a re-render;
     // otherwise unrelated state churn elsewhere in the house would rebuild the
     // whole card (and any open form) every few seconds.
+    //
+    // Uses last_updated, not last_changed (v0.12 fix): last_changed only
+    // moves when the entity's *state string* changes (e.g. "pending" ->
+    // "done"), while checking off one sub-item of a checklist task only
+    // changes the "subtasks" *attribute* - the state string stays "pending"
+    // until the very last sub-item is checked. With last_changed, that
+    // attribute-only update produced the exact same signature as before, so
+    // the render was silently skipped: the checkbox looked unchanged (or, if
+    // several were ticked in quick succession, some appeared to "not take"
+    // even after things had settled) until some unrelated state change
+    // finally forced a re-render. last_updated moves on every attribute
+    // change too, so each toggle is now always picked up.
     _relevantStatesSignature() {
       if (!this._hass) return "";
       const parts = [];
@@ -519,7 +545,7 @@
           state.entity_id.startsWith("sensor.") &&
           (state.attributes.task_id || state.attributes.member_id)
         ) {
-          parts.push(`${state.entity_id}:${state.state}:${state.last_changed}`);
+          parts.push(`${state.entity_id}:${state.state}:${state.last_updated}`);
         }
       }
       parts.sort();
@@ -1068,8 +1094,21 @@
           // goes through the checklist itself; "Überspringen" still works
           // like on any other task.
           const disableComplete = resolved || isChecklist;
+          // Alphabetical, unchecked items first (v0.12): a checklist can grow
+          // to a couple dozen items (e.g. a packing list) and the backend
+          // preserves whatever order they were originally typed in, which
+          // stops being useful once several are checked off in different
+          // sessions. Sorting open items alphabetically first, then done
+          // items alphabetically, keeps the still-open work easy to scan at
+          // the top without the list visually reshuffling item-by-item as
+          // things get checked (each item only ever moves into the "done"
+          // block, never around within it).
+          const sortedSubtasks = [...subtasks].sort((a, b) => {
+            if (a.checked !== b.checked) return a.checked ? 1 : -1;
+            return a.name.localeCompare(b.name, "de", { sensitivity: "base" });
+          });
           const subtaskList = isChecklist && subtasks.length
-            ? `<div class="subtask-list">${subtasks
+            ? `<div class="subtask-list">${sortedSubtasks
                 .map(
                   (st) => `
                   <label class="subtask-item ${st.checked ? "checked" : ""}">

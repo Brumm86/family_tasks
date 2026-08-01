@@ -65,6 +65,26 @@
  * backend deliberately know nothing about Family Link or any other specific
  * downstream action; two rewards with different screen_time_minutes values
  * (one per child) is the intended way to size the amount per child.
+ *
+ * Reward editing (v0.12): "+ Belohnung hinzufügen"/"Bearbeiten" now opens as
+ * its own native modal dialog (`<dialog>`/`showModal()`, see _syncDialogs)
+ * instead of being inlined into the "Belohnungen" section - same reasoning
+ * and pattern as the main card's task/member forms (v0.8). The form also
+ * gained a "Belohnungstyp" select ("Sonstige" / "Handyzeit"): the
+ * "Bildschirmzeit in Minuten" field is only shown (and required) once
+ * "Handyzeit" is picked - it's a form-only distinction, not its own stored
+ * field, derived from/collapsed back into screen_time_minutes on load/save
+ * (see rewardToForm/_saveReward). A new "Gilt mit der Einlösung sofort als
+ * erledigt" checkbox (`auto_fulfill`, CONF_REWARD_AUTO_FULFILL in const.py)
+ * makes the resulting redemption start out "fulfilled" instead of waiting
+ * for a parent to mark it so by hand - most useful for a Handyzeit reward,
+ * since EVENT_REWARD_REDEEMED already grants that time automatically with no
+ * parent action needed, but selectable for any reward.
+ *
+ * "Bisherige Einlösungen" hides already-fulfilled entries by default now
+ * (v0.12, "Erledigte anzeigen"/"ausblenden" toggle, persisted the same way as
+ * the Woche/Monat tab) - a household that redeems regularly ends up with a
+ * long history that's mostly settled noise otherwise.
  */
 (() => {
   const VIEWS = {
@@ -89,7 +109,14 @@
   }
 
   function emptyRewardForm() {
-    return { name: "", icon: "", points_cost: 0, screen_time_minutes: "" };
+    return {
+      name: "",
+      icon: "",
+      points_cost: 0,
+      reward_type: "custom",
+      screen_time_minutes: "",
+      auto_fulfill: false,
+    };
   }
 
   function rewardToForm(reward) {
@@ -97,10 +124,18 @@
       name: reward?.name ?? "",
       icon: reward?.icon ?? "",
       points_cost: reward?.points_cost ?? 0,
+      // "Belohnungstyp" (v0.12) is a form-only concept, not its own stored
+      // field - derived from whether a screen-time value is set, and used to
+      // decide whether the minutes field below is even shown (see
+      // _renderRewardForm). Switching it back to "Sonstige" clears the value
+      // on save (_saveReward), same as leaving the old field blank used to.
+      reward_type: reward?.screen_time_minutes ? "screen_time" : "custom",
       // Blank (not 0) when unset, so the field reads as "not a screen-time
       // reward" rather than "0 minutes" - see CONF_REWARD_SCREEN_TIME_MINUTES
       // in const.py.
       screen_time_minutes: reward?.screen_time_minutes ?? "",
+      // See CONF_REWARD_AUTO_FULFILL in const.py.
+      auto_fulfill: reward?.auto_fulfill ?? false,
     };
   }
 
@@ -128,6 +163,10 @@
       // Which catalog reward is currently showing its "wirklich einlösen?"
       // confirm step for the current user - only one at a time.
       this._pendingRedeemId = null;
+      // Whether already-fulfilled redemptions are hidden from "Bisherige
+      // Einlösungen" (v0.12) - see setConfig for the default-on/persisted
+      // first-run rule, same pattern as the main card's toggles.
+      this._hideFulfilled = undefined;
     }
 
     setConfig(config) {
@@ -136,6 +175,12 @@
         const saved = this._loadUiState();
         const initial = saved?.view ?? this._config.default_view ?? "week";
         this._view = VIEWS[initial] ? initial : "week";
+        // Defaults to hidden (v0.12): a household that redeems rewards
+        // regularly ends up with a "Bisherige Einlösungen" list that's
+        // mostly noise once most entries are fulfilled - see the in-card
+        // "Erledigte anzeigen"/"ausblenden" toggle. Persisted the same way
+        // as the week/month tab, per card title.
+        this._hideFulfilled = saved?.hideFulfilled ?? true;
       }
     }
 
@@ -154,7 +199,10 @@
 
     _saveUiState() {
       try {
-        window.localStorage.setItem(this._storageKey(), JSON.stringify({ view: this._view }));
+        window.localStorage.setItem(
+          this._storageKey(),
+          JSON.stringify({ view: this._view, hideFulfilled: this._hideFulfilled })
+        );
       } catch (err) {
         // Storage unavailable/full - the tab still works for this session,
         // it just won't be remembered next time.
@@ -231,12 +279,19 @@
     }
 
     // Only the per-member points sensors should trigger a re-render.
+    //
+    // Uses last_updated, not last_changed (v0.12 fix, mirrors the same fix in
+    // family-tasks-card.js): redeeming a reward only changes the points
+    // sensor's "points_available" *attribute*, not its state string (still
+    // the all-time total) - last_changed doesn't move for an attribute-only
+    // update, so the balance display could silently stay stale after a
+    // redemption until some unrelated state change forced a re-render.
     _relevantStatesSignature() {
       if (!this._hass) return "";
       const parts = [];
       for (const state of Object.values(this._hass.states)) {
         if (state.entity_id.startsWith("sensor.") && state.attributes.member_id) {
-          parts.push(`${state.entity_id}:${state.state}:${state.last_changed}`);
+          parts.push(`${state.entity_id}:${state.state}:${state.last_updated}`);
         }
       }
       parts.sort();
@@ -317,16 +372,26 @@
     async _saveReward() {
       const f = this._rewardForm;
       if (!f.name.trim()) return;
+      // "Belohnungstyp" gates whether the minutes field is even meant to
+      // apply (see _renderRewardForm/rewardToForm) - selecting "Sonstige"
+      // always clears any previously set value, regardless of what's still
+      // sitting in the (hidden) minutes input.
+      const isScreenTime = f.reward_type === "screen_time";
+      if (isScreenTime && (f.screen_time_minutes === "" || f.screen_time_minutes == null)) {
+        alert("Bitte die Bildschirmzeit in Minuten angeben.");
+        return;
+      }
       const payload = {
         name: f.name.trim(),
         points_cost: Math.max(0, Number(f.points_cost) || 0),
+        auto_fulfill: !!f.auto_fulfill,
       };
       if (f.icon) payload.icon = f.icon.trim();
-      // Empty field -> not a screen-time reward. When editing, that has to be
+      // Not a screen-time reward -> not set. When editing, that has to be
       // sent as an explicit null so the backend clears a previously set
       // value (see CONF_REWARD_SCREEN_TIME_MINUTES in const.py); when
       // creating, omitting the key entirely is enough.
-      if (f.screen_time_minutes !== "" && f.screen_time_minutes != null) {
+      if (isScreenTime) {
         payload.screen_time_minutes = Math.max(1, Number(f.screen_time_minutes) || 1);
       } else if (this._editingRewardId) {
         payload.screen_time_minutes = null;
@@ -438,9 +503,38 @@
 
             ${this._renderRewardsSection(canManageRewards, currentMemberId)}
           </div>
+
+          ${this._rewardFormOpen ? `
+          <dialog class="dialog" data-dialog="reward">
+            <h3>${this._editingRewardId ? "Belohnung bearbeiten" : "Belohnung hinzufügen"}</h3>
+            ${this._renderRewardForm()}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
+      this._syncDialogs();
+    }
+
+    // Opens the reward-form dialog if it isn't already showing as a native
+    // modal yet - mirrors family-tasks-card.js's _syncDialogs (v0.12: reward
+    // editing/creation moved into its own window, same as task/member editing
+    // there, instead of being inlined into the "Belohnungen" section where it
+    // could end up rendered below other cards on a dashboard).
+    _syncDialogs() {
+      const el = this.shadowRoot.querySelector('dialog[data-dialog="reward"]');
+      if (!el || !this._rewardFormOpen || el.open) return;
+      try {
+        el.showModal();
+      } catch (err) {
+        // Not supported / already open - nothing to do.
+      }
+      el.addEventListener(
+        "close",
+        () => {
+          if (this._rewardFormOpen) this._closeRewardForm();
+        },
+        { once: true }
+      );
     }
 
     _renderRewardsSection(canManageRewards, currentMemberId) {
@@ -488,9 +582,17 @@
             .join("")}</div>`
         : `<p class="muted">Noch keine Belohnungen angelegt.</p>`;
 
-      const redemptionIds = Object.keys(this._redemptions).sort((a, b) =>
+      // Erledigte Einlösungen sind standardmäßig ausgeblendet (v0.12) - see
+      // _hideFulfilled in setConfig - since a household that redeems
+      // regularly ends up with a "Bisherige Einlösungen" list that's mostly
+      // settled noise. Toggle button mirrors the main card's
+      // hide-not-due/hide-members pattern.
+      const allRedemptionIds = Object.keys(this._redemptions).sort((a, b) =>
         (this._redemptions[b].redeemed_at ?? "").localeCompare(this._redemptions[a].redeemed_at ?? "")
       );
+      const redemptionIds = this._hideFulfilled
+        ? allRedemptionIds.filter((id) => !this._redemptions[id].fulfilled)
+        : allRedemptionIds;
       const historyList = redemptionIds.length
         ? `<div class="list">${redemptionIds
             .map((id) => {
@@ -508,7 +610,9 @@
                 </div>`;
             })
             .join("")}</div>`
-        : `<p class="muted">Noch keine Belohnungen eingelöst.</p>`;
+        : `<p class="muted">${
+            allRedemptionIds.length ? "Keine offenen Einlösungen." : "Noch keine Belohnungen eingelöst."
+          }</p>`;
 
       return `
         <div class="section-header">
@@ -516,22 +620,36 @@
         </div>
         ${currentMemberId ? `<p class="muted">Dein Guthaben: ${pointsLabel(availablePoints)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
         ${catalogList}
-        ${canManageRewards ? `
-          ${this._rewardFormOpen ? this._renderRewardForm() : `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>`}
-        ` : ""}
-        <h4>Bisherige Einlösungen</h4>
+        ${canManageRewards ? `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>` : ""}
+        <div class="section-header">
+          <h4>Bisherige Einlösungen</h4>
+          ${allRedemptionIds.length ? `<button class="link" data-action="toggle-hide-fulfilled">${this._hideFulfilled ? "Erledigte anzeigen" : "Erledigte ausblenden"}</button>` : ""}
+        </div>
         ${historyList}
       `;
     }
 
     _renderRewardForm() {
       const f = this._rewardForm;
+      const isScreenTime = f.reward_type === "screen_time";
       return `
         <form class="form" data-form="reward">
           <label>Name<input type="text" data-reward-field="name" placeholder="z. B. Filmabend aussuchen" value="${esc(f.name)}" required></label>
           <label>Icon (optional)<input type="text" data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></label>
           <label>Preis (Punkte)<input type="number" min="0" data-reward-field="points_cost" value="${esc(f.points_cost)}"></label>
-          <label>Zusätzliche Bildschirmzeit in Minuten (optional)<input type="number" min="1" data-reward-field="screen_time_minutes" placeholder="z. B. 30" value="${esc(f.screen_time_minutes)}"></label>
+          <label>Belohnungstyp
+            <select data-reward-field="reward_type">
+              <option value="custom" ${!isScreenTime ? "selected" : ""}>Sonstige</option>
+              <option value="screen_time" ${isScreenTime ? "selected" : ""}>Handyzeit</option>
+            </select>
+          </label>
+          ${isScreenTime ? `
+          <label>Bildschirmzeit in Minuten<input type="number" min="1" data-reward-field="screen_time_minutes" placeholder="z. B. 30" value="${esc(f.screen_time_minutes)}" required></label>
+          ` : ""}
+          <label class="checkbox-label">
+            <input type="checkbox" data-reward-field="auto_fulfill" ${f.auto_fulfill ? "checked" : ""}>
+            Gilt mit der Einlösung sofort als erledigt${isScreenTime ? " (bei Handyzeit meist sinnvoll, da automatisch gewährt)" : ""}
+          </label>
           <div class="form-actions">
             <button type="submit" data-action="save-reward">Speichern</button>
             <button type="button" data-action="cancel-reward-form">Abbrechen</button>
@@ -552,8 +670,14 @@
       this.shadowRoot.addEventListener("change", (ev) => {
         const el = ev.target.closest("[data-reward-field]");
         if (!el) return;
-        this._rewardForm[el.dataset.rewardField] = el.value;
-        this._render();
+        this._rewardForm[el.dataset.rewardField] = el.type === "checkbox" ? el.checked : el.value;
+        // Re-render just the form in place, same as the main card's
+        // task/member forms - switching "Belohnungstyp" needs to immediately
+        // show/hide the minutes field, but replacing only the <form> (not
+        // the whole dialog) avoids the dialog itself flickering shut/open
+        // again on every field change.
+        const form = ev.target.closest('[data-form="reward"]');
+        if (form) form.outerHTML = this._renderRewardForm();
       });
 
       this.shadowRoot.addEventListener("click", (ev) => {
@@ -583,6 +707,10 @@
           if (this._isAdmin() && !this._isChildUser()) this._deleteReward(el.dataset.rewardId);
         } else if (action === "fulfill-redemption") {
           if (this._isAdmin() && !this._isChildUser()) this._fulfillRedemption(el.dataset.redemptionId);
+        } else if (action === "toggle-hide-fulfilled") {
+          this._hideFulfilled = !this._hideFulfilled;
+          this._saveUiState();
+          this._render();
         }
       });
     }
@@ -626,9 +754,21 @@
         .form { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 16px;
                 padding: 12px; border-radius: 8px; border: 1px solid var(--divider-color, #e0e0e0); }
         .form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
-        .form input { padding: 6px; border-radius: 4px; border: 1px solid var(--divider-color, #ccc);
+        .form label.checkbox-label { flex-direction: row; align-items: center; gap: 8px; }
+        .form input, .form select { padding: 6px; border-radius: 4px; border: 1px solid var(--divider-color, #ccc);
                       background: var(--card-background-color, #fff); color: inherit; }
+        .form input[type="checkbox"] { width: auto; }
         .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+        /* Native modal dialog (reward editing/creation, v0.12) - mirrors
+           family-tasks-card.js's dialog.dialog, see _syncDialogs above. */
+        dialog.dialog { border: none; border-radius: 12px; padding: 16px; max-width: 480px;
+                         width: calc(100vw - 32px); max-height: calc(100vh - 64px); overflow: auto;
+                         background: var(--card-background-color, #fff); color: var(--primary-text-color);
+                         box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3); }
+        dialog.dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+        dialog.dialog h3 { margin: 0 0 12px; }
+        dialog.dialog .form { border: none; padding: 0; margin: 0; }
       `;
     }
   }

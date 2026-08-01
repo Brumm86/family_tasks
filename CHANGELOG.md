@@ -2,6 +2,20 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.0] - 2026-08-01
+
+### Added
+- **Belohnungstyp "Handyzeit"**: das Belohnungsformular (Bestenlisten-Karte) hat jetzt ein "Belohnungstyp"-Feld ("Sonstige" / "Handyzeit") - die Eingabe "Bildschirmzeit in Minuten" (`screen_time_minutes`, seit v0.11) wird nur noch angezeigt, wenn "Handyzeit" gewählt ist, statt immer sichtbar zu sein. Rein clientseitige Unterscheidung, kein neues gespeichertes Feld - beim Speichern wird `screen_time_minutes` wie bisher gesetzt bzw. auf `null` geleert, je nachdem was gewählt ist.
+- **Belohnungen können sofort als erledigt gelten** (`auto_fulfill`, neue Checkbox "Gilt mit der Einlösung sofort als erledigt" im Belohnungsformular, `CONF_REWARD_AUTO_FULFILL` in `const.py`, Default aus): ist die Checkbox gesetzt, wird eine Einlösung dieser Belohnung direkt mit `fulfilled: true` angelegt, statt wie bisher immer unerledigt zu starten und auf ein manuelles "Als erledigt markieren" durch ein Elternteil zu warten. Besonders sinnvoll bei Handyzeit-Belohnungen, da das zugehörige `family_tasks_reward_redeemed`-Event (seit v0.11) die Bildschirmzeit bereits automatisch per Automatisierung gewährt, ohne dass ein Elternteil eingreifen muss - die Option ist aber für jede Belohnung wählbar, nicht nur für Handyzeit.
+
+### Changed
+- **Belohnung bearbeiten öffnet jetzt in einem eigenen Fenster**: "+ Belohnung hinzufügen"/"Bearbeiten" (Bestenlisten-Karte) öffnen jetzt wie das Aufgaben-/Mitglieder-Formular der Aufgaben-Karte als natives Dialogfenster (`<dialog>`/`showModal()`), statt inline im Belohnungen-Abschnitt der Karte zu erscheinen.
+- **Erledigte Belohnungs-Einlösungen sind standardmäßig ausgeblendet**: die Liste "Bisherige Einlösungen" zeigt jetzt nur noch offene (nicht erledigte) Einlösungen, mit einem neuen "Erledigte anzeigen"/"ausblenden"-Umschalter darüber - persistiert pro Gerät wie die Woche/Monat-Ansicht. Ohne den Umschalter wuchs die Liste in aktiven Haushalten schnell zu einem größtenteils erledigten Verlauf an.
+- **Checklisten-Unterpunkte werden alphabetisch sortiert**: offene Punkte zuerst (alphabetisch), danach abgehakte Punkte (ebenfalls alphabetisch) - statt in der Reihenfolge, in der sie beim Anlegen der Aufgabe eingetragen wurden. Betrifft nur die Anzeige beim Abhaken (Aufgaben-Karte); das Bearbeiten-Formular der Checkliste selbst zeigt Unterpunkte weiterhin in ihrer ursprünglichen Reihenfolge.
+
+### Fixed
+- **Abgehakte Checklisten-Punkte wurden nach mehrfachem schnellem Abhaken teilweise nicht übernommen**: `_relevantStatesSignature()` (beide Karten) verglich Entitäten anhand von `state` + `last_changed`, um unnötige Neu-Renderings zu vermeiden. Das Abhaken eines einzelnen Checklisten-Punkts ändert aber nur das `subtasks`-Attribut des Status-Sensors, nicht dessen Zustands-String ("pending" bleibt "pending", bis der letzte Punkt abgehakt ist) - `last_changed` bewegt sich in Home Assistant nur bei einer Zustands-String-Änderung, nicht bei reinen Attribut-Änderungen. Die Karte übersprang das Neu-Rendern dadurch, obwohl sich die Checkliste im Hintergrund korrekt aktualisiert hatte - sichtbar vor allem, wenn mehrere Punkte kurz hintereinander angeklickt wurden. Beide Karten verwenden jetzt `last_updated` statt `last_changed`, das sich bei jeder Attribut- oder Zustandsänderung bewegt. Aus demselben Grund konnte in der Bestenlisten-Karte auch das verfügbare Punkte-Guthaben nach einer Belohnungs-Einlösung veraltet stehen bleiben - derselbe Fix behebt das mit.
+
 ## [0.11.0] - 2026-08-01
 
 ### Added

@@ -29,6 +29,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_REWARDS_OPT_IN,
+    CONF_REWARD_AUTO_FULFILL,
     CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
@@ -397,6 +398,8 @@ REWARD_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional("points_cost", default=0): vol.All(int, vol.Range(min=0)),
     # See CONF_REWARD_SCREEN_TIME_MINUTES/EVENT_REWARD_REDEEMED in const.py.
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
+    # See CONF_REWARD_AUTO_FULFILL in const.py.
+    vol.Optional(CONF_REWARD_AUTO_FULFILL, default=False): bool,
 }
 
 REWARD_UPDATE_SCHEMA: collection.VolDictType = {
@@ -409,6 +412,7 @@ REWARD_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.Any(
         None, vol.All(int, vol.Range(min=1))
     ),
+    vol.Optional(CONF_REWARD_AUTO_FULFILL): bool,
 }
 
 
@@ -851,6 +855,14 @@ def async_setup_websocket_api(
             }
             if screen_time_minutes is not None:
                 redemption_data[CONF_REWARD_SCREEN_TIME_MINUTES] = screen_time_minutes
+            # See CONF_REWARD_AUTO_FULFILL in const.py: a reward configured
+            # that way (typically a screen-time reward, granted automatically
+            # by a household automation reacting to EVENT_REWARD_REDEEMED
+            # below) is created already "fulfilled" instead of sitting in the
+            # "Bisherige Einlösungen" list waiting for a parent to mark it so
+            # by hand.
+            if reward.get(CONF_REWARD_AUTO_FULFILL):
+                redemption_data["fulfilled"] = True
             item = await reward_redemptions.async_create_item(redemption_data)
             connection.send_result(msg["id"], item)
         except vol.Invalid as err:

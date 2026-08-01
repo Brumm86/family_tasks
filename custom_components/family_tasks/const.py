@@ -249,6 +249,19 @@ WS_API_REWARD_REDEEM: Final = f"{WS_API_PREFIX_REWARD_REDEMPTIONS}/redeem"
 # "threshold".
 CONF_REWARD_SCREEN_TIME_MINUTES: Final = "screen_time_minutes"
 
+# Optional per-reward field (v0.12): whether redeeming this catalog item
+# should mark the resulting redemption "fulfilled" immediately, instead of
+# leaving it for a parent to mark "erledigt" by hand later (see
+# RewardRedemptionStorageCollectionWebsocket/ws_redeem_reward in storage.py).
+# Off by default - most rewards ("Filmabend aussuchen") still need a parent
+# to actually hand something over before they're done. On for a screen-time
+# reward this is more than a convenience: EVENT_REWARD_REDEEMED already fires
+# unconditionally and a household automation applies the extra screen time
+# right away with no parent involved, so "fulfilled" should reflect that it
+# already happened rather than sit as a permanently-open item nobody will
+# ever manually resolve.
+CONF_REWARD_AUTO_FULFILL: Final = "auto_fulfill"
+
 # Fired on hass.bus the moment a redemption is created (end of ws_redeem_reward
 # in storage.py), carrying member_id/member_name/reward_id/reward_name/
 # points_cost/screen_time_minutes. This - not a hardcoded call into a specific
