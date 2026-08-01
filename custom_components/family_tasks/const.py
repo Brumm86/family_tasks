@@ -239,6 +239,31 @@ WS_API_PREFIX_REWARDS: Final = f"{DOMAIN}/reward"
 WS_API_PREFIX_REWARD_REDEMPTIONS: Final = f"{DOMAIN}/reward_redemption"
 WS_API_REWARD_REDEEM: Final = f"{WS_API_PREFIX_REWARD_REDEMPTIONS}/redeem"
 
+# Optional per-reward field (v0.11): how many minutes of extra screen time
+# this catalog item is worth, purely informational as far as this integration
+# is concerned - see EVENT_REWARD_REDEEMED below for how a household actually
+# wires it up to something (e.g. Google Family Link) via their own
+# automation. Absent/None means "not a screen-time reward" (e.g. "Filmabend
+# aussuchen"); explicitly setting it to null via reward/update clears a
+# previously set value, same pattern as BatteryOverrideStorageCollection's
+# "threshold".
+CONF_REWARD_SCREEN_TIME_MINUTES: Final = "screen_time_minutes"
+
+# Fired on hass.bus the moment a redemption is created (end of ws_redeem_reward
+# in storage.py), carrying member_id/member_name/reward_id/reward_name/
+# points_cost/screen_time_minutes. This - not a hardcoded call into a specific
+# automation entity_id - is the integration's extension point for "redeeming
+# this reward should immediately *do* something": a household automation
+# listens for this event (event trigger) and branches on event_data.member_id
+# (e.g. to add screen_time_minutes of extra time to the right child's Google
+# Family Link account, each child needing its own amount/target entity - both
+# entirely defined in that automation, not in this integration). Triggering
+# the automation directly by ID instead would bypass its own trigger
+# conditions and hardcode an HA-specific entity_id into this integration;
+# firing a plain event keeps the coupling one-directional and lets more than
+# one automation react to the same redemption if needed.
+EVENT_REWARD_REDEEMED: Final = f"{DOMAIN}_reward_redeemed"
+
 # --- Coordinator --------------------------------------------------------------
 
 COORDINATOR_UPDATE_INTERVAL: Final = timedelta(minutes=15)

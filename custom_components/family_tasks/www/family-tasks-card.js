@@ -19,14 +19,18 @@
  *                               time the card runs on a device - after that
  *                               the card's own persisted state, see below,
  *                               wins so a dashboard reload doesn't undo a
- *                               manual toggle)
- *   hide_members_list: true  - initial value for the "Familienmitglieder"
+ *                               manual toggle). Defaults to false (shown)
+ *                               unless set here.
+ *   hide_members_list: false - initial value for the "Familienmitglieder"
  *                               visibility toggle (same first-run-only rule
- *                               as above). When active, the entire members
+ *                               as above, and same v0.11 default flip as
+ *                               only_own_tasks below - explicitly set this to
+ *                               false to have the section shown by default
+ *                               again). When active, the entire members
  *                               section - heading, list, and the "+
  *                               Mitglied hinzufügen" button - is hidden, not
  *                               just the list.
- *   only_own_tasks: true     - initial value for the "Nur eigene Aufgaben"
+ *   only_own_tasks: false    - initial value for the "Nur eigene Aufgaben"
  *                               toggle (same first-run-only rule as above).
  *                               Filters the task list down to occurrences
  *                               assigned to whichever family member is
@@ -39,11 +43,27 @@
  *                               "currently belonging" to just one of them).
  *                               Any other rotation option only ever shows
  *                               the task to whoever is currently responsible.
- *   hide_battery_section: true - initial value for the "Batterien"
+ *   hide_battery_section: false - initial value for the "Batterien"
  *                               visibility toggle (same first-run-only rule
  *                               as above). That section is configuration-only
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
+ *
+ * v0.11 default flip: hide_members_list, hide_battery_section and
+ * only_own_tasks now default to *true* (compact, own-tasks-only) the very
+ * first time the card runs on a device and no persisted localStorage state
+ * exists yet, instead of *false* (everything shown) - set any of them to
+ * `false` explicitly in the card config to keep the pre-v0.11 "show
+ * everything" first-run behavior. This also softens a real-world failure
+ * mode: on some devices/browsers (observed on a Samsung Galaxy S24, likely a
+ * webview/private-mode storage restriction) window.localStorage silently
+ * throws on every read/write, so the toggle state never persists at all and
+ * every load falls back to this default - previously that meant "always
+ * shows everything, every time", now it means "always compact, own tasks
+ * only", which is the safer default to be stuck with. hide_not_due_tasks is
+ * unchanged (still defaults to false) - it's a task-list filter, not an
+ * extra section, and hiding not-yet-due tasks by default isn't obviously
+ * desirable the way collapsing the admin-only sections is.
  *
  * The "Familienmitglieder anzeigen" / "Batterien anzeigen" buttons (shown
  * once their section is hidden) each render on their own row (v0.9) - they
@@ -364,10 +384,15 @@
       if (this._hideNotDue === undefined) {
         const saved = this._loadUiState();
         this._hideNotDue = saved?.hideNotDue ?? !!this._config.hide_not_due_tasks;
-        this._hideMembers = saved?.hideMembers ?? !!this._config.hide_members_list;
-        this._hideBattery = saved?.hideBattery ?? !!this._config.hide_battery_section;
+        // v0.11: default to hidden/own-tasks-only on a genuinely fresh device
+        // (no saved state) unless the config explicitly opts back into the
+        // old "show everything" default with `false` - see the file header
+        // comment for why. Previously these three fell back to `false`
+        // (shown) the same way hide_not_due_tasks still does.
+        this._hideMembers = saved?.hideMembers ?? this._config.hide_members_list !== false;
+        this._hideBattery = saved?.hideBattery ?? this._config.hide_battery_section !== false;
         this._controlsHidden = saved?.controlsHidden ?? false;
-        this._onlyOwnTasks = saved?.onlyOwnTasks ?? !!this._config.only_own_tasks;
+        this._onlyOwnTasks = saved?.onlyOwnTasks ?? this._config.only_own_tasks !== false;
       }
     }
 
@@ -471,6 +496,16 @@
       if (this._unsubTasks) this._unsubTasks();
       if (this._unsubMembers) this._unsubMembers();
       if (this._unsubBatteryOverrides) this._unsubBatteryOverrides();
+      // Reset so a later reconnect actually resubscribes (v0.11 fix): Lovelace
+      // can detach and reattach the very same element instance - e.g.
+      // reordering/editing a dashboard, or switching between views that reuse
+      // it - which fires disconnectedCallback/set hass() again on the *same*
+      // instance without ever recreating it. Since "set hass" only calls
+      // _subscribe() while _subscribed is still false, leaving it true here
+      // meant the card silently kept running on dead subscriptions after
+      // reattachment - no error, just a card that "occasionally fails to load
+      // correctly" (stale/empty task list until a full page reload).
+      this._subscribed = false;
     }
 
     // Only entities belonging to this integration should trigger a re-render;

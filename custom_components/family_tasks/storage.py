@@ -29,8 +29,10 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_REWARDS_OPT_IN,
+    CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
+    EVENT_REWARD_REDEEMED,
     MAX_COMPLETION_LOG_ENTRIES,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
@@ -393,12 +395,20 @@ REWARD_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
     vol.Optional("points_cost", default=0): vol.All(int, vol.Range(min=0)),
+    # See CONF_REWARD_SCREEN_TIME_MINUTES/EVENT_REWARD_REDEEMED in const.py.
+    vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
 }
 
 REWARD_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("name"): str,
     vol.Optional("icon"): str,
     vol.Optional("points_cost"): vol.All(int, vol.Range(min=0)),
+    # Explicitly setting this to null clears a previously set value - same
+    # "clear via null" pattern as BatteryOverrideStorageCollection's
+    # "threshold" below.
+    vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.Any(
+        None, vol.All(int, vol.Range(min=1))
+    ),
 }
 
 
@@ -427,7 +437,15 @@ class RewardStorageCollection(collection.DictStorageCollection):
 
     async def _update_data(self, item: dict, update_data: dict) -> dict:
         validated = self.UPDATE_SCHEMA(update_data)
-        return {**item, **validated}
+        updated = {**item, **validated}
+        if (
+            CONF_REWARD_SCREEN_TIME_MINUTES in validated
+            and validated[CONF_REWARD_SCREEN_TIME_MINUTES] is None
+        ):
+            # Explicit clear, rather than persisting a literal None - mirrors
+            # BatteryOverrideStorageCollection's "threshold" clearing below.
+            updated.pop(CONF_REWARD_SCREEN_TIME_MINUTES, None)
+        return updated
 
 
 # A redemption: which member spent points on which catalog reward. Only ever
@@ -440,7 +458,11 @@ class RewardStorageCollection(collection.DictStorageCollection):
 # member's available balance (see MemberSummaryData.points_available in
 # coordinator.py) is always computed fresh as all-time points earned minus
 # the sum of "points_cost" across their redemptions, so there is nothing else
-# to update once a redemption exists.
+# to update once a redemption exists. "screen_time_minutes" (v0.11) is the
+# same kind of denormalized copy, taken from the reward at redemption time -
+# see CONF_REWARD_SCREEN_TIME_MINUTES in const.py - so history/the fired
+# event still show the value that applied at redemption time even if the
+# catalog item's own value is changed or cleared afterwards.
 REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("member_id"): str,
     vol.Required("member_name"): str,
@@ -448,6 +470,7 @@ REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("reward_name"): str,
     vol.Required("points_cost"): vol.All(int, vol.Range(min=0)),
     vol.Optional("fulfilled", default=False): bool,
+    vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
 }
 
 # Only "fulfilled" may ever be changed after the fact - see
@@ -816,19 +839,43 @@ def async_setup_websocket_api(
             )
             return
 
+        screen_time_minutes = reward.get(CONF_REWARD_SCREEN_TIME_MINUTES)
+
         try:
-            item = await reward_redemptions.async_create_item(
-                {
-                    "member_id": member_id,
-                    "member_name": member["name"],
-                    "reward_id": reward["id"],
-                    "reward_name": reward["name"],
-                    "points_cost": points_cost,
-                }
-            )
+            redemption_data = {
+                "member_id": member_id,
+                "member_name": member["name"],
+                "reward_id": reward["id"],
+                "reward_name": reward["name"],
+                "points_cost": points_cost,
+            }
+            if screen_time_minutes is not None:
+                redemption_data[CONF_REWARD_SCREEN_TIME_MINUTES] = screen_time_minutes
+            item = await reward_redemptions.async_create_item(redemption_data)
             connection.send_result(msg["id"], item)
         except vol.Invalid as err:
             connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(msg, err))
+            return
+
+        # Fires unconditionally, independent of screen_time_minutes: this is
+        # the generic "a redemption just happened" extension point (see
+        # EVENT_REWARD_REDEEMED in const.py), not screen-time-specific. A
+        # household automation with an event trigger decides for itself what
+        # to do with it - e.g. branch on event_data["member_id"] to bump the
+        # right child's Google Family Link screen time by
+        # event_data["screen_time_minutes"] if present, immediately and
+        # without any parent having to intervene.
+        hass.bus.async_fire(
+            EVENT_REWARD_REDEEMED,
+            {
+                "member_id": member_id,
+                "member_name": member["name"],
+                "reward_id": reward["id"],
+                "reward_name": reward["name"],
+                "points_cost": points_cost,
+                CONF_REWARD_SCREEN_TIME_MINUTES: screen_time_minutes,
+            },
+        )
 
     websocket_api.async_register_command(hass, WS_API_REWARD_REDEEM, ws_redeem_reward, REDEEM_REWARD_SCHEMA)
 

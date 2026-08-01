@@ -50,6 +50,21 @@
  * can mark a redemption "erledigt" once they've handed the reward over; a
  * child cannot, even with an HA admin account (mirrors every other
  * parent-only action in this integration).
+ *
+ * Screen-time rewards (v0.11): a catalog item can optionally carry a
+ * "Zusätzliche Bildschirmzeit in Minuten" value (screen_time_minutes,
+ * CONF_REWARD_SCREEN_TIME_MINUTES in const.py) - purely informational to
+ * this card/integration, shown as a "· +N Min. Bildschirmzeit" suffix
+ * wherever the reward is listed. The backend fires a household-wide
+ * "family_tasks_reward_redeemed" event on every redemption (member_id/
+ * member_name/reward_id/reward_name/points_cost/screen_time_minutes, see
+ * EVENT_REWARD_REDEEMED/ws_redeem_reward in storage.py) - a household's own
+ * automation reacts to that event (e.g. to add the redeemed minutes to the
+ * right child's Google Family Link screen time immediately, no parent
+ * action needed, each child using its own amount/target). This card and the
+ * backend deliberately know nothing about Family Link or any other specific
+ * downstream action; two rewards with different screen_time_minutes values
+ * (one per child) is the intended way to size the amount per child.
  */
 (() => {
   const VIEWS = {
@@ -74,7 +89,7 @@
   }
 
   function emptyRewardForm() {
-    return { name: "", icon: "", points_cost: 0 };
+    return { name: "", icon: "", points_cost: 0, screen_time_minutes: "" };
   }
 
   function rewardToForm(reward) {
@@ -82,7 +97,17 @@
       name: reward?.name ?? "",
       icon: reward?.icon ?? "",
       points_cost: reward?.points_cost ?? 0,
+      // Blank (not 0) when unset, so the field reads as "not a screen-time
+      // reward" rather than "0 minutes" - see CONF_REWARD_SCREEN_TIME_MINUTES
+      // in const.py.
+      screen_time_minutes: reward?.screen_time_minutes ?? "",
     };
+  }
+
+  // Small "· +30 Min. Bildschirmzeit" suffix shared by the catalog list and
+  // the redemption history - undefined/null/"" all mean "not set".
+  function screenTimeSuffix(minutes) {
+    return minutes ? ` · +${esc(minutes)} Min. Bildschirmzeit` : "";
   }
 
   class FamilyTasksLeaderboardCard extends HTMLElement {
@@ -195,6 +220,14 @@
       if (this._unsubMembers) this._unsubMembers();
       if (this._unsubRewards) this._unsubRewards();
       if (this._unsubRedemptions) this._unsubRedemptions();
+      // Reset so a later reconnect actually resubscribes - same lifecycle fix
+      // as family-tasks-card.js (v0.11): Lovelace can detach and reattach the
+      // same element instance (dashboard edit/reorder, switching views) which
+      // re-fires disconnectedCallback/set hass() on that instance without
+      // recreating it. Leaving _subscribed true here meant the card kept
+      // running on dead subscriptions after reattachment - the "leaderboard
+      // occasionally fails to load correctly" symptom.
+      this._subscribed = false;
     }
 
     // Only the per-member points sensors should trigger a re-render.
@@ -289,6 +322,15 @@
         points_cost: Math.max(0, Number(f.points_cost) || 0),
       };
       if (f.icon) payload.icon = f.icon.trim();
+      // Empty field -> not a screen-time reward. When editing, that has to be
+      // sent as an explicit null so the backend clears a previously set
+      // value (see CONF_REWARD_SCREEN_TIME_MINUTES in const.py); when
+      // creating, omitting the key entirely is enough.
+      if (f.screen_time_minutes !== "" && f.screen_time_minutes != null) {
+        payload.screen_time_minutes = Math.max(1, Number(f.screen_time_minutes) || 1);
+      } else if (this._editingRewardId) {
+        payload.screen_time_minutes = null;
+      }
       if (this._editingRewardId) {
         await this._hass.callWS({
           type: "family_tasks/reward/update",
@@ -426,7 +468,7 @@
                   <div class="row">
                     <div class="row-main">
                       <span class="name">${r.icon ? `<ha-icon icon="${esc(r.icon)}"></ha-icon> ` : ""}${esc(r.name)}</span>
-                      <span class="muted">${pointsLabel(cost)}</span>
+                      <span class="muted">${pointsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}</span>
                     </div>
                     <div class="row-actions">
                       ${currentMemberId && currentParticipates ? `<button data-action="select-reward" data-reward-id="${id}" ${affordable ? "" : "disabled"}>Auswählen</button>` : ""}
@@ -457,7 +499,7 @@
                 <div class="row">
                   <div class="row-main">
                     <span class="name">${esc(r.member_name)} · ${esc(r.reward_name)}</span>
-                    <span class="muted">${pointsLabel(r.points_cost ?? 0)}${r.fulfilled ? " · erledigt" : ""}</span>
+                    <span class="muted">${pointsLabel(r.points_cost ?? 0)}${screenTimeSuffix(r.screen_time_minutes)}${r.fulfilled ? " · erledigt" : ""}</span>
                   </div>
                   ${!r.fulfilled && canManageRewards ? `
                   <div class="row-actions">
@@ -489,6 +531,7 @@
           <label>Name<input type="text" data-reward-field="name" placeholder="z. B. Filmabend aussuchen" value="${esc(f.name)}" required></label>
           <label>Icon (optional)<input type="text" data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></label>
           <label>Preis (Punkte)<input type="number" min="0" data-reward-field="points_cost" value="${esc(f.points_cost)}"></label>
+          <label>Zusätzliche Bildschirmzeit in Minuten (optional)<input type="number" min="1" data-reward-field="screen_time_minutes" placeholder="z. B. 30" value="${esc(f.screen_time_minutes)}"></label>
           <div class="form-actions">
             <button type="submit" data-action="save-reward">Speichern</button>
             <button type="button" data-action="cancel-reward-form">Abbrechen</button>
