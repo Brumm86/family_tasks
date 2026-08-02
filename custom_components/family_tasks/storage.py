@@ -20,7 +20,7 @@ from voluptuous.humanize import humanize_error
 
 from homeassistant.components import websocket_api
 from homeassistant.const import CONF_ID
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers import collection
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
@@ -619,6 +619,27 @@ def _member_role_for_user(
     if member_id is None:
         return None
     return members.data[member_id].get("role", MEMBER_ROLE_PARENT)
+
+
+async def async_member_id_for_context(
+    hass: HomeAssistant, members: MemberStorageCollection, context: Context | None
+) -> str | None:
+    """Resolve the family member linked to a service call's calling user.
+
+    Mirrors _member_id_for_user, but a plain ``hass.services.async_call`` (the
+    family_tasks.complete_task/toggle_subtask services, see
+    _async_register_services in __init__.py) has no equivalent of the
+    websocket API's already-resolved ``connection.user`` - only a Context
+    carrying the caller's user_id (set automatically by HA for any call
+    originating from a logged-in frontend session; None for calls with no
+    associated user, e.g. from an automation). Returns None in that case, same
+    as _member_id_for_user does for an unlinked/unknown user - callers should
+    treat that as "can't tell who this is", not as an error.
+    """
+    if context is None or context.user_id is None:
+        return None
+    user = await hass.auth.async_get_user(context.user_id)
+    return _member_id_for_user(hass, members, user)
 
 
 class MemberStorageCollectionWebsocket(collection.DictStorageCollectionWebsocket):

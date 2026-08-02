@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.13.0] - 2026-08-02
+
+### Fixed
+- **Eltern-Bestätigung nannte bei geteilten Aufgaben manchmal das falsche Kind**: der "Erledigt"-Button der Aufgaben-Karte (und ebenso das Abhaken von Checklisten-Punkten) ruft die Services `family_tasks.complete_task`/`toggle_subtask` bisher ohne `member_id` auf - die Karte kennt diesen Parameter gar nicht. Ohne explizite `member_id` fiel `FamilyTasksCoordinator.async_complete_task` auf `_assigned_member_id` zurück, was bei einer Aufgabe mit fester Zuweisung an mehrere Mitglieder (`rotation.strategy: "fixed"` mit mehr als einem Eintrag in `member_ids`, z. B. eine Aufgabe für beide Kinder) immer `member_ids[0]` liefert - unabhängig davon, wer die Aufgabe tatsächlich erledigt hat, da eine "fixed"-Rotation nie weiterrückt. Dadurch konnte die automatisch erzeugte Bestätigungsaufgabe für die Eltern (`_async_request_confirmation`) das falsche Kind nennen, obwohl das andere Kind den Haken gesetzt hatte. Beide Services lösen den ausführenden Nutzer jetzt serverseitig über `call.context.user_id` auf (von Home Assistant automatisch bei jedem Aufruf durch einen eingeloggten Nutzer gesetzt) und ordnen ihn wie schon bei der Belohnungs-Einlösung/`create_own_task` über die verknüpfte `person`-Entity (`person_entity_id`) einem Familienmitglied zu (`storage.async_member_id_for_context`). Ein explizit übergebenes `member_id` (z. B. aus einer Automatisierung) hat weiterhin Vorrang; ist der aufrufende Nutzer mit keinem Mitglied verknüpft, bleibt das bisherige Verhalten (Zuordnung über `_assigned_member_id`) als Fallback erhalten.
+
 ## [0.12.0] - 2026-08-01
 
 ### Added

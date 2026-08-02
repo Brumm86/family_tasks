@@ -415,6 +415,19 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         - If the member who would act on a normal task has role "child", the
           completion is not logged yet; instead a confirmation task is raised
           for the household's parents (see ``_async_request_confirmation``).
+
+        ``member_id`` should be who *actually* completed the task whenever
+        that's known (see _async_register_services in __init__.py, which
+        resolves it from the calling service call's Context via
+        storage.async_member_id_for_context before landing here). Left as
+        ``None``, this falls back to ``_assigned_member_id`` - fine for a
+        task with a single assignee or a rotation that only ever has one
+        "current" member, but for a "fixed" rotation shared by several
+        members (see _assigned_member_ids) that fallback always resolves to
+        member_ids[0], regardless of which of the assignees actually did it -
+        so a caller that *can* identify the acting member (any real user
+        action) should always pass it explicitly instead of relying on the
+        fallback.
         """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
@@ -779,7 +792,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         except HomeAssistantError as err:
             _LOGGER.warning("Failed to press completion button %s: %s", entity_id, err)
 
-    async def async_toggle_subtask(self, task_id: str, subtask_id: str) -> None:
+    async def async_toggle_subtask(
+        self, task_id: str, subtask_id: str, member_id: str | None = None
+    ) -> None:
         """Check/uncheck one sub-item of a TASK_KIND_CHECKLIST task.
 
         Mirrors async_handle_sensor_trigger: the "is this task now done"
@@ -788,7 +803,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         refresh loop a pure read of current state, with side effects (points,
         rotation, parent confirmation, once-task cleanup) only ever
         triggered by an explicit action, same as async_complete_task itself
-        (which this delegates to once every sub-item is checked).
+        (which this delegates to once every sub-item is checked - ``member_id``
+        is passed through unchanged so a checklist task shared between
+        several fixed assignees still attributes completion/confirmation to
+        whoever actually checked the last box, not just member_ids[0]; see
+        async_complete_task's docstring).
         """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
@@ -812,7 +831,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         checked = await self.checklist_state.async_toggle(task_id, period_key, subtask_id)
 
         if subtasks and all(s["id"] in checked for s in subtasks):
-            await self.async_complete_task(task_id)
+            await self.async_complete_task(task_id, member_id)
         else:
             await self.async_request_refresh()
 

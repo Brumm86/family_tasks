@@ -49,6 +49,7 @@ from .storage import (
     async_create_rewards_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
+    async_member_id_for_context,
     async_setup_websocket_api,
 )
 from .trigger import TaskTriggerListener
@@ -66,6 +67,7 @@ TOGGLE_SUBTASK_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TASK_ID): cv.string,
         vol.Required(ATTR_SUBTASK_ID): cv.string,
+        vol.Optional(ATTR_MEMBER_ID): cv.string,
     }
 )
 
@@ -242,11 +244,32 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_COMPLETE_TASK):
         return
 
+    async def _async_resolve_member_id(call: ServiceCall) -> str | None:
+        """Who actually made this call, if it's explicit or resolvable.
+
+        An explicit ``member_id`` in call.data always wins (e.g. an
+        automation acting on a specific member's behalf). Otherwise, for a
+        call originating from a logged-in frontend session (the Lovelace
+        card's "Erledigt"/checklist controls, which never set member_id
+        themselves - see family-tasks-card.js), HA's own service-call
+        machinery already stamps call.context.user_id with the calling
+        user's id; async_member_id_for_context resolves that to a family
+        member via the same person_entity_id link used elsewhere (redemption,
+        create_own_task). Without this, a task shared between several fixed
+        assignees always attributed every completion to member_ids[0]
+        regardless of who actually pressed the button - see
+        FamilyTasksCoordinator.async_complete_task's docstring.
+        """
+        coordinator = _get_coordinator(hass)
+        member_id = call.data.get(ATTR_MEMBER_ID)
+        if member_id is not None:
+            return member_id
+        return await async_member_id_for_context(hass, coordinator.members, call.context)
+
     async def _async_complete_task(call: ServiceCall) -> None:
         coordinator = _get_coordinator(hass)
-        await coordinator.async_complete_task(
-            call.data[ATTR_TASK_ID], call.data.get(ATTR_MEMBER_ID)
-        )
+        member_id = await _async_resolve_member_id(call)
+        await coordinator.async_complete_task(call.data[ATTR_TASK_ID], member_id)
 
     async def _async_skip_task(call: ServiceCall) -> None:
         coordinator = _get_coordinator(hass)
@@ -254,8 +277,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def _async_toggle_subtask(call: ServiceCall) -> None:
         coordinator = _get_coordinator(hass)
+        member_id = await _async_resolve_member_id(call)
         await coordinator.async_toggle_subtask(
-            call.data[ATTR_TASK_ID], call.data[ATTR_SUBTASK_ID]
+            call.data[ATTR_TASK_ID], call.data[ATTR_SUBTASK_ID], member_id
         )
 
     hass.services.async_register(
