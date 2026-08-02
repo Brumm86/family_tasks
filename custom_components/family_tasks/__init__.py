@@ -9,11 +9,13 @@ from typing import TypeAlias
 
 import voluptuous as vol
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import collection
 from homeassistant.helpers import config_validation as cv
 from homeassistant.loader import async_get_integration
 
@@ -23,7 +25,9 @@ from .const import (
     ATTR_TASK_ID,
     CARD_FILENAME,
     CARD_URL_PATH,
+    CONF_MEMBER_NOTIFY_SERVICE,
     DOMAIN,
+    EVENT_TASK_ASSIGNED,
     LEADERBOARD_CARD_FILENAME,
     LEADERBOARD_CARD_URL_PATH,
     PLATFORMS,
@@ -42,6 +46,7 @@ from .storage import (
     RewardStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
+    WeeklyBonusStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_members_collection,
@@ -49,6 +54,7 @@ from .storage import (
     async_create_rewards_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
+    async_create_weekly_bonus_state_store,
     async_member_id_for_context,
     async_setup_websocket_api,
 )
@@ -84,6 +90,7 @@ class FamilyTasksRuntimeData:
     checklist_state: ChecklistStateStore
     rewards: RewardStorageCollection
     reward_redemptions: RewardRedemptionStorageCollection
+    weekly_bonus_state: WeeklyBonusStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -107,11 +114,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     # but harmless/no-ops for a second entry since single_config_entry=True
     # in the manifest already prevents that from happening in practice.
     async_setup_websocket_api(
-        hass, tasks, members, battery_overrides, rewards, reward_redemptions, completions
+        hass, entry, tasks, members, battery_overrides, rewards, reward_redemptions, completions
     )
 
     trigger_state = await async_create_trigger_state_store(hass)
     checklist_state = await async_create_checklist_state_store(hass)
+    weekly_bonus_state = await async_create_weekly_bonus_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
         hass,
@@ -123,6 +131,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         battery_overrides,
         checklist_state,
         reward_redemptions,
+        weekly_bonus_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -135,6 +144,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         checklist_state=checklist_state,
         rewards=rewards,
         reward_redemptions=reward_redemptions,
+        weekly_bonus_state=weekly_bonus_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -162,6 +172,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     )
     entry.async_on_unload(
         tasks.async_add_change_set_listener(trigger_listener.async_on_tasks_changed)
+    )
+    entry.async_on_unload(
+        tasks.async_add_change_set_listener(_async_notify_new_task_assignments(hass, members))
     )
     entry.async_on_unload(
         members.async_add_change_set_listener(_async_collection_changed)
@@ -196,6 +209,81 @@ def _get_coordinator(hass: HomeAssistant) -> FamilyTasksCoordinator:
     if not entries:
         raise HomeAssistantError("Family Tasks is not configured")
     return entries[0].runtime_data.coordinator
+
+
+async def _async_notify_member(
+    hass: HomeAssistant, member_id: str, member: dict, task_id: str, task_name: str
+) -> None:
+    """Best-effort notify one member that a new task now involves them.
+
+    Two channels, same reasoning as CONF_MEMBER_NOTIFY_SERVICE in const.py:
+    a persistent_notification is always raised (visible inside Home
+    Assistant's own frontend/companion-app notification panel), but that
+    alone never reaches the phone as an actual push notification - only
+    calling the member's own configured notify.* service (Home Assistant
+    Companion App) does that, so it's used in addition whenever set.
+    EVENT_TASK_ASSIGNED fires unconditionally on top, for a household that
+    wants to react some other way entirely (same extension-point pattern as
+    EVENT_REWARD_REDEEMED).
+    """
+    title = "Family Tasks"
+    message = f"Neue Aufgabe: {task_name}"
+
+    try:
+        persistent_notification.async_create(
+            hass, message, title=title, notification_id=f"{DOMAIN}_task_{task_id}_{member_id}"
+        )
+    except Exception as err:  # noqa: BLE001 - best-effort, must never block task creation
+        _LOGGER.warning("Failed to raise persistent notification for %s: %s", member_id, err)
+
+    notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
+    if notify_service:
+        try:
+            await hass.services.async_call(
+                "notify", notify_service, {"title": title, "message": message}, blocking=False
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("Failed to call notify.%s for %s: %s", notify_service, member_id, err)
+
+    hass.bus.async_fire(
+        EVENT_TASK_ASSIGNED,
+        {
+            "member_id": member_id,
+            "member_name": member.get("name"),
+            "task_id": task_id,
+            "task_name": task_name,
+        },
+    )
+
+
+def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStorageCollection):
+    """Build a tasks change-set listener that notifies newly assigned members.
+
+    Registered alongside the other family_tasks.task change-set listeners in
+    async_setup_entry (see tasks.async_add_change_set_listener below) -
+    fires for a task an admin creates by hand as well as one the coordinator
+    raises automatically (a parent-confirmation task, a battery alert), since
+    both go through TaskStorageCollection.async_create_item the same way.
+    Only "added" changes are notified - an edit that merely changes who a
+    task is assigned to isn't treated as "a new task" here.
+    """
+
+    async def _listener(change_sets) -> None:
+        for change in change_sets:
+            if change.change_type != collection.CHANGE_ADDED:
+                continue
+            item = change.item
+            member_ids = (item.get("rotation") or {}).get("member_ids") or []
+            if not member_ids:
+                continue
+            task_name = item.get("name", "Aufgabe")
+            for member_id in member_ids:
+                member = members.data.get(member_id)
+                if not member or not member.get("active", True):
+                    continue
+                await _async_notify_member(hass, member_id, member, item.get("id", ""), task_name)
+
+    return _listener
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:

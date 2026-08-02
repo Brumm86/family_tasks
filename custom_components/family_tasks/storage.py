@@ -28,16 +28,21 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_COMPLETION_BUTTON_ENTITY_ID,
+    CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_REWARD_AUTO_FULFILL,
+    CONF_REWARD_SCREEN_TIME_INVESTABLE,
     CONF_REWARD_SCREEN_TIME_MINUTES,
+    CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
+    DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     EVENT_REWARD_REDEEMED,
     MAX_COMPLETION_LOG_ENTRIES,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
     MEMBER_ROLES,
+    OWN_TASK_KINDS,
     RECURRENCE_INTERVAL_DAYS,
     RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
@@ -53,6 +58,7 @@ from .const import (
     STORAGE_KEY_REWARDS,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
+    STORAGE_KEY_WEEKLY_BONUS_STATE,
     STORAGE_VERSION,
     STORAGE_VERSION_MINOR,
     TASK_KIND_CHECKLIST,
@@ -242,6 +248,8 @@ MEMBER_CREATE_SCHEMA: collection.VolDictType = {
     # True so every existing member keeps behaving exactly as before this
     # field was introduced.
     vol.Optional(CONF_MEMBER_REWARDS_OPT_IN, default=True): bool,
+    # See CONF_MEMBER_NOTIFY_SERVICE in const.py.
+    vol.Optional(CONF_MEMBER_NOTIFY_SERVICE): str,
 }
 
 MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
@@ -251,6 +259,9 @@ MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("active"): bool,
     vol.Optional("role"): vol.In(MEMBER_ROLES),
     vol.Optional(CONF_MEMBER_REWARDS_OPT_IN): bool,
+    # Explicitly setting this to null clears a previously configured notify
+    # service, same "clear via null" pattern used elsewhere in this module.
+    vol.Optional(CONF_MEMBER_NOTIFY_SERVICE): vol.Any(None, str),
 }
 
 
@@ -333,7 +344,13 @@ class MemberStorageCollection(collection.DictStorageCollection):
 
     async def _update_data(self, item: dict, update_data: dict) -> dict:
         validated = self.UPDATE_SCHEMA(update_data)
-        return {**item, **validated}
+        updated = {**item, **validated}
+        if (
+            CONF_MEMBER_NOTIFY_SERVICE in validated
+            and validated[CONF_MEMBER_NOTIFY_SERVICE] is None
+        ):
+            updated.pop(CONF_MEMBER_NOTIFY_SERVICE, None)
+        return updated
 
 
 # Per-entity overrides for the automatic battery-warning task (recurrence
@@ -400,6 +417,8 @@ REWARD_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
     # See CONF_REWARD_AUTO_FULFILL in const.py.
     vol.Optional(CONF_REWARD_AUTO_FULFILL, default=False): bool,
+    # See CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py.
+    vol.Optional(CONF_REWARD_SCREEN_TIME_INVESTABLE, default=False): bool,
 }
 
 REWARD_UPDATE_SCHEMA: collection.VolDictType = {
@@ -413,6 +432,7 @@ REWARD_UPDATE_SCHEMA: collection.VolDictType = {
         None, vol.All(int, vol.Range(min=1))
     ),
     vol.Optional(CONF_REWARD_AUTO_FULFILL): bool,
+    vol.Optional(CONF_REWARD_SCREEN_TIME_INVESTABLE): bool,
 }
 
 
@@ -475,6 +495,13 @@ REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("points_cost"): vol.All(int, vol.Range(min=0)),
     vol.Optional("fulfilled", default=False): bool,
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
+    # v0.14: how many points the member chose to invest, only present for a
+    # CONF_REWARD_SCREEN_TIME_INVESTABLE redemption - see ws_redeem_reward.
+    # For that kind of redemption this is the same number as "points_cost"
+    # (both are the deduction), kept as its own field purely so the history/
+    # event payload can label it distinctly ("12 Punkte investiert" instead of
+    # implying a fixed catalog price).
+    vol.Optional("points_invested"): vol.All(int, vol.Range(min=1)),
 }
 
 # Only "fulfilled" may ever be changed after the fact - see
@@ -722,7 +749,11 @@ CREATE_OWN_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
         # the admin task schema; TaskStorageCollection._process_create_data
         # (invoked below via tasks.async_create_item) already enforces at
         # least one subtask for a checklist, no extra check needed here.
-        vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
+        # "mandatory" (TASK_KIND_MANDATORY) is deliberately excluded here -
+        # see OWN_TASK_KINDS in const.py: it exists to let a parent gate a
+        # child's screen time, not something a child should be able to set up
+        # for themselves.
+        vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(OWN_TASK_KINDS),
         vol.Optional("subtasks", default=list): vol.All(
             [SUBTASK_SCHEMA], _require_unique_subtask_ids
         ),
@@ -734,6 +765,13 @@ REDEEM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     {
         vol.Required("type"): WS_API_REWARD_REDEEM,
         vol.Required("reward_id"): str,
+        # v0.14: required (and only meaningful) for a
+        # CONF_REWARD_SCREEN_TIME_INVESTABLE reward - how many points the
+        # member wants to invest this time; the backend re-derives the
+        # granted screen time from this (points_spent *
+        # CONF_SCREEN_TIME_MINUTES_PER_POINT) rather than trusting a
+        # client-computed minutes value. Ignored for any other reward.
+        vol.Optional("points_spent"): vol.All(int, vol.Range(min=1)),
     }
 )
 
@@ -766,6 +804,7 @@ def _available_points(
 @callback
 def async_setup_websocket_api(
     hass: HomeAssistant,
+    entry: Any,
     tasks: TaskStorageCollection,
     members: MemberStorageCollection,
     battery_overrides: BatteryOverrideStorageCollection,
@@ -773,7 +812,15 @@ def async_setup_websocket_api(
     reward_redemptions: RewardRedemptionStorageCollection,
     completions: CompletionLogStore,
 ) -> None:
-    """Expose the storage collections over the websocket API for the frontend."""
+    """Expose the storage collections over the websocket API for the frontend.
+
+    ``entry`` (the config entry) is only needed so ws_redeem_reward can read
+    CONF_SCREEN_TIME_MINUTES_PER_POINT from its options fresh on every
+    redemption - same "read live, don't cache at setup" approach already used
+    for CONF_OVERDUE_AFTER_MINUTES/CONF_BATTERY_WARNING_THRESHOLD in
+    coordinator.py, so a parent changing the bonus factor in Settings applies
+    immediately without a restart.
+    """
     collection.DictStorageCollectionWebsocket(
         tasks, WS_API_PREFIX_TASKS, "task", TASK_CREATE_SCHEMA, TASK_UPDATE_SCHEMA
     ).async_setup(hass)
@@ -828,6 +875,15 @@ def async_setup_websocket_api(
         that member's current available balance (_available_points above)
         must cover the reward's price. Creating the redemption entry is
         itself the deduction - there is no separate balance to update.
+
+        A CONF_REWARD_SCREEN_TIME_INVESTABLE reward (v0.14) works
+        differently: there is no fixed "points_cost" to check against - the
+        caller supplies "points_spent" instead, and the screen time granted
+        is derived from it (points_spent * CONF_SCREEN_TIME_MINUTES_PER_POINT,
+        the household-wide bonus factor from Options) rather than a value
+        stored on the catalog item. The balance check and deduction use
+        points_spent in place of the (unused, for this reward kind)
+        points_cost field.
         """
         member_id = _member_id_for_user(hass, members, connection.user)
         member = members.data.get(member_id) if member_id else None
@@ -854,7 +910,31 @@ def async_setup_websocket_api(
             )
             return
 
-        points_cost = reward.get("points_cost", 0)
+        is_investable = bool(reward.get(CONF_REWARD_SCREEN_TIME_INVESTABLE))
+        points_invested: int | None = None
+        screen_time_minutes = reward.get(CONF_REWARD_SCREEN_TIME_MINUTES)
+
+        if is_investable:
+            points_invested = msg.get("points_spent")
+            if not points_invested:
+                connection.send_error(
+                    msg["id"],
+                    websocket_api.ERR_INVALID_FORMAT,
+                    "Bitte angeben, wie viele Punkte investiert werden sollen.",
+                )
+                return
+            points_cost = points_invested
+            bonus_per_point = (
+                entry.options.get(
+                    CONF_SCREEN_TIME_MINUTES_PER_POINT, DEFAULT_SCREEN_TIME_MINUTES_PER_POINT
+                )
+                if entry is not None
+                else DEFAULT_SCREEN_TIME_MINUTES_PER_POINT
+            )
+            screen_time_minutes = points_invested * bonus_per_point
+        else:
+            points_cost = reward.get("points_cost", 0)
+
         available = _available_points(completions, reward_redemptions, member_id)
         if available < points_cost:
             connection.send_error(
@@ -863,8 +943,6 @@ def async_setup_websocket_api(
                 "Nicht genug Punkte für diese Belohnung.",
             )
             return
-
-        screen_time_minutes = reward.get(CONF_REWARD_SCREEN_TIME_MINUTES)
 
         try:
             redemption_data = {
@@ -876,6 +954,8 @@ def async_setup_websocket_api(
             }
             if screen_time_minutes is not None:
                 redemption_data[CONF_REWARD_SCREEN_TIME_MINUTES] = screen_time_minutes
+            if points_invested is not None:
+                redemption_data["points_invested"] = points_invested
             # See CONF_REWARD_AUTO_FULFILL in const.py: a reward configured
             # that way (typically a screen-time reward, granted automatically
             # by a household automation reacting to EVENT_REWARD_REDEEMED
@@ -906,6 +986,7 @@ def async_setup_websocket_api(
                 "reward_id": reward["id"],
                 "reward_name": reward["name"],
                 "points_cost": points_cost,
+                "points_invested": points_invested,
                 CONF_REWARD_SCREEN_TIME_MINUTES: screen_time_minutes,
             },
         )
@@ -1050,6 +1131,32 @@ async def _async_migrate_reward_redemptions(
         )
 
 
+async def _async_migrate_screen_time_investable(rewards: RewardStorageCollection) -> None:
+    """Switch existing "Handyzeit" rewards over to the v0.14 invest-points flow.
+
+    Before v0.14, a reward with CONF_REWARD_SCREEN_TIME_MINUTES set granted a
+    fixed number of minutes for a fixed "points_cost". From v0.14 on, that
+    kind of reward instead lets the redeeming member choose how many points
+    to invest, multiplied by the household-wide
+    CONF_SCREEN_TIME_MINUTES_PER_POINT bonus factor - see
+    CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py. Every existing catalog
+    item that already has screen_time_minutes set is therefore flagged
+    investable here the first time this collection loads under v0.14, so a
+    household's existing Handyzeit rewards pick up the new dynamic behavior
+    automatically instead of silently keeping the old fixed-minutes one.
+    Items created fresh after this point already go through
+    REWARD_CREATE_SCHEMA, which defaults the flag to False - a parent has to
+    deliberately pick "Handyzeit" as the reward type for a new item.
+    """
+    changed = False
+    for item in rewards.data.values():
+        if item.get(CONF_REWARD_SCREEN_TIME_MINUTES) is not None and CONF_REWARD_SCREEN_TIME_INVESTABLE not in item:
+            item[CONF_REWARD_SCREEN_TIME_INVESTABLE] = True
+            changed = True
+    if changed:
+        await rewards.store.async_save({"items": list(rewards.data.values())})
+
+
 async def async_create_rewards_collection(hass: HomeAssistant) -> RewardStorageCollection:
     """Create and load the reward-catalog storage collection."""
     store: Store = Store(
@@ -1059,6 +1166,7 @@ async def async_create_rewards_collection(hass: HomeAssistant) -> RewardStorageC
     rewards = RewardStorageCollection(store, id_manager)
     await rewards.async_load()
     await _async_migrate_reward_catalog(rewards)
+    await _async_migrate_screen_time_investable(rewards)
     return rewards
 
 
@@ -1241,5 +1349,45 @@ class ChecklistStateStore:
 async def async_create_checklist_state_store(hass: HomeAssistant) -> ChecklistStateStore:
     """Create and load the checklist sub-item state store."""
     store = ChecklistStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class WeeklyBonusStateStore:
+    """Tracks the last calendar week the weekly-winner bonus was awarded for.
+
+    See CONF_WEEKLY_WINNER_BONUS_ENABLED/CONF_WEEKLY_WINNER_BONUS_POINTS in
+    const.py and FamilyTasksCoordinator._async_process_weekly_winner_bonus in
+    coordinator.py: at most one award happens per completed calendar week,
+    computed from the *previous* week's points the first time a refresh
+    happens after that week ends (Monday 00:00 local, i.e. "mit Ablauf des
+    Sonntags"). "last_awarded_week" is the Monday-date (ISO) of the most
+    recently awarded week - not a StorageCollection, this is coordinator-
+    internal bookkeeping, never edited by the user, same as TriggerStateStore.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_WEEKLY_BONUS_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        self._state: dict[str, Any] = {}
+
+    async def async_load(self) -> None:
+        """Load the last-awarded-week marker from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def last_awarded_week(self) -> str | None:
+        """Return the Monday-date (ISO) of the last week a bonus was awarded for."""
+        return self._state.get("last_awarded_week")
+
+    async def async_set_last_awarded_week(self, period_key: str) -> None:
+        """Record that a given week has now been processed (win or no winner)."""
+        self._state["last_awarded_week"] = period_key
+        await self._store.async_save(self._state)
+
+
+async def async_create_weekly_bonus_state_store(hass: HomeAssistant) -> WeeklyBonusStateStore:
+    """Create and load the weekly-winner-bonus state store."""
+    store = WeeklyBonusStateStore(hass)
     await store.async_load()
     return store

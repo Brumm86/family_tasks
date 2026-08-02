@@ -90,6 +90,10 @@ class FamilyTasksTaskStatusSensor(
             # Only non-empty for a TASK_KIND_CHECKLIST task: every sub-item
             # with its current checked state, as {id, name, checked}.
             "subtasks": task.subtasks,
+            # standard / checklist / mandatory (v0.14) - see TASK_KINDS in
+            # const.py, lets an automation identify a "Pflichtaufgabe"
+            # without needing the raw stored task object.
+            "kind": task.kind,
         }
 
 

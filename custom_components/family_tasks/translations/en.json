@@ -20,7 +20,10 @@
         "data": {
           "overdue_after_minutes": "Grace period before overdue (minutes)",
           "default_rotation_strategy": "Default rotation strategy",
-          "battery_warning_threshold": "Default battery warning level (%)"
+          "battery_warning_threshold": "Default battery warning level (%)",
+          "screen_time_minutes_per_point": "Screen time minutes per invested point",
+          "weekly_winner_bonus_enabled": "Award a weekly-winner bonus",
+          "weekly_winner_bonus_points": "Weekly-winner bonus points"
         }
       }
     }
@@ -50,6 +53,11 @@
     "button": {
       "complete_task": {
         "name": "Done"
+      }
+    },
+    "binary_sensor": {
+      "screen_time_grant_active": {
+        "name": "Screen time grant active"
       }
     }
   },

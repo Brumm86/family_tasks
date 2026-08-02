@@ -15,6 +15,7 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -26,9 +27,15 @@ from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_OVERDUE_AFTER_MINUTES,
+    CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_WEEKLY_WINNER_BONUS_ENABLED,
+    CONF_WEEKLY_WINNER_BONUS_POINTS,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
+    DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+    DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
+    DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
     ROTATION_STRATEGIES,
 )
@@ -115,6 +122,39 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     NumberSelectorConfig(
                         min=0, max=100, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
                     )
+                ),
+                # v0.14: how many minutes of screen time one point invested
+                # into a CONF_REWARD_SCREEN_TIME_INVESTABLE ("Handyzeit")
+                # reward is worth - see ws_redeem_reward in storage.py.
+                vol.Optional(
+                    CONF_SCREEN_TIME_MINUTES_PER_POINT,
+                    default=options.get(
+                        CONF_SCREEN_TIME_MINUTES_PER_POINT,
+                        DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1, max=120, mode=NumberSelectorMode.BOX, unit_of_measurement="min"
+                    )
+                ),
+                # v0.14: whether/how many bonus points the current week's
+                # point leader(s) get, credited once the week ends - see
+                # FamilyTasksCoordinator._async_process_weekly_winner_bonus.
+                vol.Optional(
+                    CONF_WEEKLY_WINNER_BONUS_ENABLED,
+                    default=options.get(
+                        CONF_WEEKLY_WINNER_BONUS_ENABLED,
+                        DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
+                    ),
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_WEEKLY_WINNER_BONUS_POINTS,
+                    default=options.get(
+                        CONF_WEEKLY_WINNER_BONUS_POINTS,
+                        DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
             }
         )

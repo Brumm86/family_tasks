@@ -85,6 +85,19 @@
  * (v0.12, "Erledigte anzeigen"/"ausblenden" toggle, persisted the same way as
  * the Woche/Monat tab) - a household that redeems regularly ends up with a
  * long history that's mostly settled noise otherwise.
+ *
+ * Invest-points Handyzeit rewards (v0.14): a Handyzeit reward can now be
+ * marked "Kind wählt Punkte selbst aus" (screen_time_investable,
+ * CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py) instead of carrying a
+ * fixed price/fixed minutes pair - "Preis (Punkte)"/"Bildschirmzeit in
+ * Minuten" are hidden for it in the reward form, and redeeming it shows a
+ * "Punkte investieren" number field (bounded by the member's current
+ * balance) instead of a fixed "für X Punkte einlösen?" confirmation. The
+ * backend derives the granted minutes from points_spent *
+ * CONF_SCREEN_TIME_MINUTES_PER_POINT (an Options-level bonus factor, not
+ * shown live in this card - see ws_redeem_reward in storage.py) and returns
+ * the actual minutes on the created redemption, which then shows up in
+ * "Bisherige Einlösungen" the same way a fixed-minutes reward always has.
  */
 (() => {
   const VIEWS = {
@@ -116,6 +129,7 @@
       reward_type: "custom",
       screen_time_minutes: "",
       auto_fulfill: false,
+      screen_time_investable: false,
     };
   }
 
@@ -129,13 +143,17 @@
       // decide whether the minutes field below is even shown (see
       // _renderRewardForm). Switching it back to "Sonstige" clears the value
       // on save (_saveReward), same as leaving the old field blank used to.
-      reward_type: reward?.screen_time_minutes ? "screen_time" : "custom",
+      reward_type: reward?.screen_time_minutes || reward?.screen_time_investable ? "screen_time" : "custom",
       // Blank (not 0) when unset, so the field reads as "not a screen-time
       // reward" rather than "0 minutes" - see CONF_REWARD_SCREEN_TIME_MINUTES
       // in const.py.
       screen_time_minutes: reward?.screen_time_minutes ?? "",
       // See CONF_REWARD_AUTO_FULFILL in const.py.
       auto_fulfill: reward?.auto_fulfill ?? false,
+      // v0.14 - see CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py: lets the
+      // redeeming member choose how many points to invest instead of a fixed
+      // price/fixed minutes pair.
+      screen_time_investable: reward?.screen_time_investable ?? false,
     };
   }
 
@@ -163,6 +181,10 @@
       // Which catalog reward is currently showing its "wirklich einlösen?"
       // confirm step for the current user - only one at a time.
       this._pendingRedeemId = null;
+      // How many points the current user has typed into the "Punkte
+      // investieren" field for the pending investable (Handyzeit) redemption
+      // - see CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py.
+      this._pendingInvestPoints = 1;
       // Whether already-fulfilled redemptions are hidden from "Bisherige
       // Einlösungen" (v0.12) - see setConfig for the default-on/persisted
       // first-run rule, same pattern as the main card's toggles.
@@ -377,21 +399,26 @@
       // always clears any previously set value, regardless of what's still
       // sitting in the (hidden) minutes input.
       const isScreenTime = f.reward_type === "screen_time";
-      if (isScreenTime && (f.screen_time_minutes === "" || f.screen_time_minutes == null)) {
-        alert("Bitte die Bildschirmzeit in Minuten angeben.");
+      const isInvestable = isScreenTime && !!f.screen_time_investable;
+      if (isScreenTime && !isInvestable && (f.screen_time_minutes === "" || f.screen_time_minutes == null)) {
+        alert("Bitte die Bildschirmzeit in Minuten angeben (oder \"Punkte investieren lassen\" aktivieren).");
         return;
       }
       const payload = {
         name: f.name.trim(),
         points_cost: Math.max(0, Number(f.points_cost) || 0),
         auto_fulfill: !!f.auto_fulfill,
+        screen_time_investable: isInvestable,
       };
       if (f.icon) payload.icon = f.icon.trim();
       // Not a screen-time reward -> not set. When editing, that has to be
       // sent as an explicit null so the backend clears a previously set
       // value (see CONF_REWARD_SCREEN_TIME_MINUTES in const.py); when
-      // creating, omitting the key entirely is enough.
-      if (isScreenTime) {
+      // creating, omitting the key entirely is enough. An investable
+      // Handyzeit reward (v0.14) has no fixed minutes value either - the
+      // member chooses at redemption time - so it's cleared the same way a
+      // non-screen-time reward is.
+      if (isScreenTime && !isInvestable) {
         payload.screen_time_minutes = Math.max(1, Number(f.screen_time_minutes) || 1);
       } else if (this._editingRewardId) {
         payload.screen_time_minutes = null;
@@ -416,6 +443,7 @@
 
     _selectReward(rewardId) {
       this._pendingRedeemId = rewardId;
+      this._pendingInvestPoints = 1;
       this._render();
     }
 
@@ -427,11 +455,17 @@
     // Non-admin redeem: the backend independently re-checks that the caller
     // participates in the reward system and can actually afford the reward
     // (see ws_redeem_reward in storage.py) - the client-side "disabled"
-    // state on the "Auswählen" button is just there to not offer it in the
-    // first place, not the actual guard.
+    // state on the "Auswählen"/"Bestätigen" buttons is just there to not
+    // offer it in the first place, not the actual guard.
     async _confirmRedeem(rewardId) {
-      await this._hass.callWS({ type: "family_tasks/reward_redemption/redeem", reward_id: rewardId });
+      const reward = this._rewards[rewardId];
+      const msg = { type: "family_tasks/reward_redemption/redeem", reward_id: rewardId };
+      if (reward?.screen_time_investable) {
+        msg.points_spent = Math.max(1, Number(this._pendingInvestPoints) || 1);
+      }
+      await this._hass.callWS(msg);
       this._pendingRedeemId = null;
+      this._pendingInvestPoints = 1;
       this._render();
     }
 
@@ -554,15 +588,21 @@
         ? `<div class="list">${rewardIds
             .map((id) => {
               const r = this._rewards[id];
+              const isInvestable = !!r.screen_time_investable;
               const cost = r.points_cost ?? 0;
-              const affordable = currentParticipates && availablePoints >= cost;
+              // An investable Handyzeit reward (v0.14) has no fixed price -
+              // the member picks how many points to invest at redeem time -
+              // so affordability just needs at least 1 available point
+              // rather than a specific cost.
+              const affordable = currentParticipates && (isInvestable ? availablePoints >= 1 : availablePoints >= cost);
               const isPending = this._pendingRedeemId === id;
+              const priceLabel = isInvestable ? "Punkte frei wählbar" : `${pointsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}`;
               return `
                 <div class="row-wrap">
                   <div class="row">
                     <div class="row-main">
                       <span class="name">${r.icon ? `<ha-icon icon="${esc(r.icon)}"></ha-icon> ` : ""}${esc(r.name)}</span>
-                      <span class="muted">${pointsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}</span>
+                      <span class="muted">${priceLabel}</span>
                     </div>
                     <div class="row-actions">
                       ${currentMemberId && currentParticipates ? `<button data-action="select-reward" data-reward-id="${id}" ${affordable ? "" : "disabled"}>Auswählen</button>` : ""}
@@ -571,7 +611,15 @@
                       <button data-action="delete-reward" data-reward-id="${id}" class="danger">Löschen</button>` : ""}
                     </div>
                   </div>
-                  ${isPending ? `
+                  ${isPending && isInvestable ? `
+                  <div class="confirm-row">
+                    <label>Punkte investieren
+                      <input type="number" min="1" max="${availablePoints}" data-action="invest-points" data-reward-id="${id}" value="${esc(this._pendingInvestPoints ?? 1)}">
+                    </label>
+                    <button data-action="confirm-redeem" data-reward-id="${id}" ${this._pendingInvestPoints >= 1 && this._pendingInvestPoints <= availablePoints ? "" : "disabled"}>Bestätigen</button>
+                    <button type="button" class="link" data-action="cancel-redeem">Abbrechen</button>
+                  </div>` : ""}
+                  ${isPending && !isInvestable ? `
                   <div class="confirm-row">
                     <span>„${esc(r.name)}" für ${pointsLabel(cost)} einlösen?</span>
                     <button data-action="confirm-redeem" data-reward-id="${id}">Bestätigen</button>
@@ -632,11 +680,14 @@
     _renderRewardForm() {
       const f = this._rewardForm;
       const isScreenTime = f.reward_type === "screen_time";
+      const isInvestable = isScreenTime && !!f.screen_time_investable;
       return `
         <form class="form" data-form="reward">
           <label>Name<input type="text" data-reward-field="name" placeholder="z. B. Filmabend aussuchen" value="${esc(f.name)}" required></label>
           <label>Icon (optional)<input type="text" data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></label>
+          ${isInvestable ? "" : `
           <label>Preis (Punkte)<input type="number" min="0" data-reward-field="points_cost" value="${esc(f.points_cost)}"></label>
+          `}
           <label>Belohnungstyp
             <select data-reward-field="reward_type">
               <option value="custom" ${!isScreenTime ? "selected" : ""}>Sonstige</option>
@@ -644,6 +695,12 @@
             </select>
           </label>
           ${isScreenTime ? `
+          <label class="checkbox-label">
+            <input type="checkbox" data-reward-field="screen_time_investable" ${isInvestable ? "checked" : ""}>
+            Kind wählt Punkte selbst aus (Minuten = investierte Punkte × Bonusfaktor aus den Integrations-Optionen)
+          </label>
+          ` : ""}
+          ${isScreenTime && !isInvestable ? `
           <label>Bildschirmzeit in Minuten<input type="number" min="1" data-reward-field="screen_time_minutes" placeholder="z. B. 30" value="${esc(f.screen_time_minutes)}" required></label>
           ` : ""}
           <label class="checkbox-label">
@@ -668,6 +725,16 @@
       });
 
       this.shadowRoot.addEventListener("change", (ev) => {
+        // Points-to-invest field for an investable Handyzeit redemption
+        // (v0.14) - not part of the reward-catalog form itself, just the
+        // pending-redeem confirm row, so it's handled separately from the
+        // data-reward-field inputs below.
+        const investEl = ev.target.closest('[data-action="invest-points"]');
+        if (investEl) {
+          this._pendingInvestPoints = Math.max(1, Number(investEl.value) || 1);
+          this._render();
+          return;
+        }
         const el = ev.target.closest("[data-reward-field]");
         if (!el) return;
         this._rewardForm[el.dataset.rewardField] = el.type === "checkbox" ? el.checked : el.value;

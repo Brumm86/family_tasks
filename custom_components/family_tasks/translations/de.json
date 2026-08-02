@@ -20,7 +20,10 @@
         "data": {
           "overdue_after_minutes": "Karenzzeit bis überfällig (Minuten)",
           "default_rotation_strategy": "Standard-Rotationsstrategie",
-          "battery_warning_threshold": "Standard-Batteriewarnschwelle (%)"
+          "battery_warning_threshold": "Standard-Batteriewarnschwelle (%)",
+          "screen_time_minutes_per_point": "Handyzeit-Minuten pro investiertem Punkt",
+          "weekly_winner_bonus_enabled": "Wochensieger-Bonus vergeben",
+          "weekly_winner_bonus_points": "Bonuspunkte für den Wochensieger"
         }
       }
     }
@@ -50,6 +53,11 @@
     "button": {
       "complete_task": {
         "name": "Erledigt"
+      }
+    },
+    "binary_sensor": {
+      "screen_time_grant_active": {
+        "name": "Handyzeitgewährung aktiv"
       }
     }
   },

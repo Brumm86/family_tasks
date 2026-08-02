@@ -25,10 +25,15 @@ from .battery import LowBattery, async_compute_low_batteries
 from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
+    CONF_MEMBER_REWARDS_OPT_IN,
     CONF_TASK_REQUIRES_CONFIRMATION,
+    CONF_WEEKLY_WINNER_BONUS_ENABLED,
+    CONF_WEEKLY_WINNER_BONUS_POINTS,
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
+    DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
+    DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
@@ -42,6 +47,8 @@ from .const import (
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
     TASK_KIND_CHECKLIST,
+    TASK_KIND_MANDATORY,
+    TASK_KIND_STANDARD,
     TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_DONE,
     TASK_STATUS_IDLE,
@@ -56,9 +63,19 @@ from .storage import (
     RewardRedemptionStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
+    WeeklyBonusStateStore,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Internal-only sentinel task_id for completion-log entries created by
+# FamilyTasksCoordinator._async_process_weekly_winner_bonus - never a real
+# task, so it never shows up in the task list. Points logged under this id
+# still count towards a member's points_total/points_available/points_week
+# (it's real, spendable points) but are deliberately excluded from the *next*
+# week's winner determination (_points_earned_in_range) - see
+# CONF_WEEKLY_WINNER_BONUS_ENABLED in const.py for why that exclusion matters.
+WEEKLY_BONUS_TASK_ID = "__weekly_winner_bonus__"
 
 
 @dataclass(slots=True)
@@ -97,6 +114,10 @@ class TaskStatusData:
     # current checked state for this period, as dicts {id, name, checked} -
     # see FamilyTasksCoordinator.async_toggle_subtask.
     subtasks: list[dict] = field(default_factory=list)
+    # standard / checklist / mandatory - see TASK_KINDS in const.py. Exposed
+    # here (and as a sensor attribute) mainly so an automation can identify a
+    # TASK_KIND_MANDATORY task without needing the raw stored task object.
+    kind: str = TASK_KIND_STANDARD
 
 
 @dataclass(slots=True)
@@ -120,6 +141,17 @@ class MemberSummaryData:
     # in const.py / ws_redeem_reward in storage.py re-derives the same thing
     # server-side before letting a redemption through).
     points_available: int = 0
+    # v0.14: whether tick-based screen-time granting should currently be
+    # active for this member - True unless they have at least one
+    # TASK_KIND_MANDATORY task assigned that is currently TASK_STATUS_OVERDUE
+    # (see the screen_time_paused_members computation in
+    # FamilyTasksCoordinator._async_update_data). Exposed via a per-member
+    # binary_sensor (see binary_sensor.py) for a household's own tick-granting
+    # automation to gate on - this integration never grants screen time
+    # itself, only this flag. Resumes automatically (no explicit "resume"
+    # action) the moment none of their mandatory tasks are overdue anymore;
+    # ticks missed while paused are never made up.
+    screen_time_grant_active: bool = True
 
 
 @dataclass(slots=True)
@@ -192,6 +224,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         battery_overrides: BatteryOverrideStorageCollection,
         checklist_state: ChecklistStateStore,
         reward_redemptions: RewardRedemptionStorageCollection,
+        weekly_bonus_state: WeeklyBonusStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -207,10 +240,21 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.battery_overrides = battery_overrides
         self.checklist_state = checklist_state
         self.reward_redemptions = reward_redemptions
+        self.weekly_bonus_state = weekly_bonus_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
         today = dt_util.now().date()
+
+        # Moved up from further down (was only computed just before the
+        # member-summaries loop) so _async_process_weekly_winner_bonus below
+        # can use start_of_week too.
+        local_now = dt_util.now()
+        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
+        start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
+        start_of_month = dt_util.as_utc(
+            dt_util.start_of_local_day(local_now.replace(day=1))
+        )
 
         # Computed once per refresh and shared by every recurrence-"battery"
         # task below (see RECURRENCE_BATTERY in const.py) - which batteries
@@ -229,8 +273,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # one (see _async_raise_battery_alerts).
         await self._async_raise_battery_alerts(low_batteries)
 
+        # Also raised before the main loop, same reasoning: a bonus awarded
+        # this refresh should already be reflected in this same refresh's
+        # member_summaries below, not just after a second refresh.
+        await self._async_process_weekly_winner_bonus(start_of_week)
+
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
+        # Every member with at least one TASK_KIND_MANDATORY task currently
+        # TASK_STATUS_OVERDUE and assigned to them - see
+        # MemberSummaryData.screen_time_grant_active below.
+        screen_time_paused_members: set[str] = set()
 
         # Original (task_id, period_key) occurrences that currently have an
         # open, not-yet-resolved parent confirmation task raised against them
@@ -289,6 +342,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                         assigned_member_ids=assigned_member_ids,
                         trigger_sensor_value=trigger_sensor_value,
                         trigger_sensor_unit=trigger_sensor_unit,
+                        kind=task.get("kind", TASK_KIND_STANDARD),
                     )
                     continue
                 period_key = open_occurrence["period_key"]
@@ -329,6 +383,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 for member_id in assigned_member_ids:
                     open_tasks_by_member[member_id] = open_tasks_by_member.get(member_id, 0) + 1
 
+            if task.get("kind") == TASK_KIND_MANDATORY and status == TASK_STATUS_OVERDUE:
+                # See MemberSummaryData.screen_time_grant_active: an overdue
+                # mandatory task pauses tick-based screen-time granting for
+                # exactly whoever it's currently assigned to, not the whole
+                # household.
+                screen_time_paused_members.update(assigned_member_ids)
+
             task_statuses[task_id] = TaskStatusData(
                 task_id=task_id,
                 name=task["name"],
@@ -339,6 +400,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 due_at=due_at,
                 assigned_member_id=assigned_member_id,
                 assigned_member_ids=assigned_member_ids,
+                kind=task.get("kind", TASK_KIND_STANDARD),
                 last_completed_by=last_entry.get("completed_by_member_id")
                 if last_entry
                 else None,
@@ -350,13 +412,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 trigger_sensor_unit=trigger_sensor_unit,
                 subtasks=subtasks_status,
             )
-
-        local_now = dt_util.now()
-        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
-        start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
-        start_of_month = dt_util.as_utc(
-            dt_util.start_of_local_day(local_now.replace(day=1))
-        )
 
         # Total points already redeemed for a catalog reward (v0.9), per
         # member - subtracted from points_total below so a member's
@@ -387,6 +442,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 points_total=points_total,
                 points_available=points_total - redeemed_points.get(member_id, 0),
                 open_tasks=open_tasks_by_member.get(member_id, 0),
+                screen_time_grant_active=member_id not in screen_time_paused_members,
             )
 
         return FamilyTasksData(tasks=task_statuses, members=member_summaries)
@@ -747,6 +803,104 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             }
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
+
+    def _points_earned_in_range(
+        self, member_id: str, start: datetime, end: datetime
+    ) -> int:
+        """Sum a member's awarded points within [start, end), for ranking purposes.
+
+        Like CompletionLogStore.points_since, but bounded on both ends and
+        deliberately excluding WEEKLY_BONUS_TASK_ID entries - a previous
+        weekly-winner bonus is real, spendable points (see
+        MemberSummaryData.points_total/points_available, which do include
+        it), but must not itself count towards *this* determination, per
+        CONF_WEEKLY_WINNER_BONUS_ENABLED in const.py. Excluding by task_id
+        rather than by date range is deliberate: a bonus entry's
+        "completed_at" timestamp falls at the moment it was awarded (this
+        week), even though period_key names the week it was awarded *for*
+        (last week) - filtering on task_id sidesteps that mismatch entirely.
+        """
+        total = 0
+        for entry in self.completions.entries:
+            if (
+                entry["completed_by_member_id"] != member_id
+                or entry["skipped"]
+                or entry["task_id"] == WEEKLY_BONUS_TASK_ID
+            ):
+                continue
+            completed_at = dt_util.parse_datetime(entry["completed_at"])
+            if start <= completed_at < end:
+                total += entry["points_awarded"]
+        return total
+
+    async def _async_process_weekly_winner_bonus(self, start_of_week: datetime) -> None:
+        """Award bonus points to the previous week's point leader(s), once.
+
+        See CONF_WEEKLY_WINNER_BONUS_ENABLED/CONF_WEEKLY_WINNER_BONUS_POINTS
+        in const.py: off unless a parent turns it on and sets a bonus > 0.
+        Runs on every refresh but only actually does anything the first time
+        a refresh happens after a calendar week ends (Monday 00:00 local,
+        i.e. "mit Ablauf des Sonntags") - self.weekly_bonus_state tracks the
+        last week already processed so this never double-awards, and never
+        chains through more than the single most-recently-completed week
+        even if the feature was off (or Home Assistant was down) for a
+        while - only ever "the week that just ended", never older ones.
+
+        Eligibility mirrors the leaderboard: only members who participate in
+        the reward system (CONF_MEMBER_REWARDS_OPT_IN) and are active. Ties
+        split the bonus evenly (floor division) rather than each tied member
+        getting the full amount; nobody wins with 0 points. The awarded
+        points are logged via the normal completion log (so they show up in
+        points_total/points_week/points_available/history like any other
+        points) under the internal WEEKLY_BONUS_TASK_ID sentinel, which
+        _points_earned_in_range excludes so this bonus never counts towards
+        determining a *future* week's winner.
+        """
+        if not self.config_entry:
+            return
+        options = self.config_entry.options
+        if not options.get(
+            CONF_WEEKLY_WINNER_BONUS_ENABLED, DEFAULT_WEEKLY_WINNER_BONUS_ENABLED
+        ):
+            return
+        bonus_points = options.get(
+            CONF_WEEKLY_WINNER_BONUS_POINTS, DEFAULT_WEEKLY_WINNER_BONUS_POINTS
+        )
+        if bonus_points <= 0:
+            return
+
+        previous_week_start = start_of_week - timedelta(days=7)
+        period_key = previous_week_start.date().isoformat()
+        if self.weekly_bonus_state.last_awarded_week() == period_key:
+            return
+
+        candidates = {
+            member_id: self._points_earned_in_range(
+                member_id, previous_week_start, start_of_week
+            )
+            for member_id, member in self.members.data.items()
+            if member.get(CONF_MEMBER_REWARDS_OPT_IN, True) and member.get("active", True)
+        }
+        max_points = max(candidates.values(), default=0)
+        if max_points > 0:
+            winners = [m for m, p in candidates.items() if p == max_points]
+            share = bonus_points // len(winners)
+            if share > 0:
+                for winner_id in winners:
+                    await self.completions.async_add_entry(
+                        task_id=WEEKLY_BONUS_TASK_ID,
+                        period_key=period_key,
+                        member_id=winner_id,
+                        points_awarded=share,
+                    )
+                _LOGGER.debug(
+                    "Awarded %s weekly-winner bonus points each to %s for week %s",
+                    share,
+                    winners,
+                    period_key,
+                )
+
+        await self.weekly_bonus_state.async_set_last_awarded_week(period_key)
 
     async def _async_admin_member_ids(self) -> list[str]:
         """Family members linked (via person_entity_id) to a HA admin account.

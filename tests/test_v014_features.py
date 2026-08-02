@@ -1,0 +1,438 @@
+"""Tests for the v0.14 features:
+
+- Handyzeit reward "invest points" flow (CONF_REWARD_SCREEN_TIME_INVESTABLE):
+  a reward flagged this way lets the redeeming member choose how many points
+  to spend, and the granted screen time is points_spent *
+  CONF_SCREEN_TIME_MINUTES_PER_POINT (see ws_redeem_reward in storage.py).
+  Existing rewards that already had a fixed screen_time_minutes are migrated
+  to this flag on load (see _async_migrate_screen_time_investable).
+- Weekly-winner bonus (CONF_WEEKLY_WINNER_BONUS_ENABLED/
+  CONF_WEEKLY_WINNER_BONUS_POINTS): the previous week's point leader(s) get a
+  configurable bonus credited once the week rolls over, split on a tie, and
+  excluded from the *next* week's winner determination (see
+  FamilyTasksCoordinator._async_process_weekly_winner_bonus in
+  coordinator.py).
+- The new "mandatory" task kind (TASK_KIND_MANDATORY, "Pflichtaufgabe"): an
+  overdue occurrence pauses the per-member screen_time_grant_active flag
+  (MemberSummaryData.screen_time_grant_active / the new binary_sensor.py
+  platform) for exactly whoever it's assigned to, resuming automatically once
+  it's no longer overdue.
+- A new task with an assigned member fires EVENT_TASK_ASSIGNED and, if the
+  member has CONF_MEMBER_NOTIFY_SERVICE set, calls that notify.* service (see
+  _async_notify_new_task_assignments in __init__.py).
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from unittest.mock import patch
+
+from homeassistant.util import dt as dt_util
+
+from custom_components.family_tasks.const import (
+    CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_WEEKLY_WINNER_BONUS_ENABLED,
+    CONF_WEEKLY_WINNER_BONUS_POINTS,
+    EVENT_TASK_ASSIGNED,
+    TASK_STATUS_OVERDUE,
+)
+
+
+async def _client_for_new_user(hass, hass_ws_client, *, is_admin: bool, name: str = "Test User"):
+    from homeassistant.auth.const import GROUP_ID_ADMIN
+
+    group_ids = [GROUP_ID_ADMIN] if is_admin else []
+    user = await hass.auth.async_create_user(name, group_ids=group_ids)
+    refresh_token = await hass.auth.async_create_refresh_token(user)
+    access_token = hass.auth.async_create_access_token(refresh_token)
+    client = await hass_ws_client(hass, access_token)
+    return user, client
+
+
+async def _add_task(runtime, *, member_ids, **overrides):
+    payload = {
+        "name": "Testaufgabe",
+        "points": 5,
+        "recurrence": {"type": "daily"},
+        "rotation": {"member_ids": member_ids, "strategy": "fixed"},
+    }
+    payload.update(overrides)
+    return await runtime.tasks.async_create_item(payload)
+
+
+# --- Handyzeit "invest points" redemption -----------------------------------
+
+
+async def test_investable_redeem_derives_minutes_from_default_bonus_factor(
+    hass, init_integration, hass_ws_client
+) -> None:
+    """Default bonus factor is 1 minute per point (DEFAULT_SCREEN_TIME_MINUTES_PER_POINT)."""
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item(
+        {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
+    )
+    reward = await runtime.rewards.async_create_item(
+        {"name": "Handyzeit", "screen_time_investable": True}
+    )
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
+    await runtime.coordinator.async_refresh()
+    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
+
+    user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
+    hass.states.async_set("person.anna", "home", {"user_id": user.id})
+
+    await client.send_json_auto_id(
+        {
+            "type": "family_tasks/reward_redemption/redeem",
+            "reward_id": reward["id"],
+            "points_spent": 12,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is True
+    assert response["result"]["points_cost"] == 12
+    assert response["result"]["points_invested"] == 12
+    assert response["result"]["screen_time_minutes"] == 12
+
+    await runtime.coordinator.async_refresh()
+    assert runtime.coordinator.data.members[anna["id"]].points_available == 8
+
+
+async def test_investable_redeem_uses_configured_bonus_factor(
+    hass, init_integration, hass_ws_client
+) -> None:
+    runtime = init_integration.runtime_data
+    hass.config_entries.async_update_entry(
+        init_integration, options={CONF_SCREEN_TIME_MINUTES_PER_POINT: 3}
+    )
+    anna = await runtime.members.async_create_item(
+        {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
+    )
+    reward = await runtime.rewards.async_create_item(
+        {"name": "Handyzeit", "screen_time_investable": True}
+    )
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
+    await runtime.coordinator.async_refresh()
+    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
+
+    user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
+    hass.states.async_set("person.anna", "home", {"user_id": user.id})
+
+    await client.send_json_auto_id(
+        {
+            "type": "family_tasks/reward_redemption/redeem",
+            "reward_id": reward["id"],
+            "points_spent": 4,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is True
+    assert response["result"]["screen_time_minutes"] == 12  # 4 points * 3 min/point
+
+
+async def test_investable_redeem_requires_points_spent(hass, init_integration, hass_ws_client) -> None:
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item(
+        {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
+    )
+    reward = await runtime.rewards.async_create_item(
+        {"name": "Handyzeit", "screen_time_investable": True}
+    )
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
+    await runtime.coordinator.async_refresh()
+    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
+
+    user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
+    hass.states.async_set("person.anna", "home", {"user_id": user.id})
+
+    await client.send_json_auto_id(
+        {"type": "family_tasks/reward_redemption/redeem", "reward_id": reward["id"]}
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is False
+
+
+async def test_investable_redeem_rejected_without_enough_points(
+    hass, init_integration, hass_ws_client
+) -> None:
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item(
+        {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
+    )
+    reward = await runtime.rewards.async_create_item(
+        {"name": "Handyzeit", "screen_time_investable": True}
+    )
+    # Anna has 0 points so far.
+
+    user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
+    hass.states.async_set("person.anna", "home", {"user_id": user.id})
+
+    await client.send_json_auto_id(
+        {
+            "type": "family_tasks/reward_redemption/redeem",
+            "reward_id": reward["id"],
+            "points_spent": 5,
+        }
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is False
+    assert not runtime.reward_redemptions.data
+
+
+async def test_existing_screen_time_reward_is_migrated_to_investable(hass, init_integration) -> None:
+    """A pre-v0.14 catalog item (screen_time_minutes set, no investable key
+    at all) is switched over to the invest-points flow the next time the
+    rewards collection loads - see _async_migrate_screen_time_investable."""
+    from custom_components.family_tasks.storage import _async_migrate_screen_time_investable
+
+    runtime = init_integration.runtime_data
+    reward = await runtime.rewards.async_create_item(
+        {"name": "Alte Handyzeit", "points_cost": 5, "screen_time_minutes": 30}
+    )
+    # Simulate a pre-v0.14 stored item: drop the key the schema would
+    # otherwise have defaulted to False, exactly like data written before
+    # this field existed.
+    del runtime.rewards.data[reward["id"]]["screen_time_investable"]
+
+    await _async_migrate_screen_time_investable(runtime.rewards)
+
+    assert runtime.rewards.data[reward["id"]]["screen_time_investable"] is True
+
+
+# --- Weekly-winner bonus -----------------------------------------------------
+
+
+def _start_of_week_utc(offset_weeks: int = 0):
+    """Mirror FamilyTasksCoordinator._async_update_data's start_of_week math.
+
+    Deriving the reference Monday from the exact same
+    now -> start_of_local_day -> as_utc -> subtract-weekday formula the
+    coordinator itself uses (rather than approximating it independently)
+    means these tests stay correct regardless of the test environment's
+    configured timezone.
+    """
+    local_now = dt_util.now()
+    start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
+    start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
+    return start_of_week + timedelta(weeks=offset_weeks)
+
+
+async def _refresh_at_utc(runtime, utc_dt) -> None:
+    local_dt = dt_util.as_local(utc_dt)
+    with (
+        patch.object(dt_util, "now", return_value=local_dt),
+        patch.object(dt_util, "utcnow", return_value=utc_dt),
+    ):
+        await runtime.coordinator.async_refresh()
+
+
+async def _complete_at_utc(runtime, task_id, utc_dt) -> None:
+    local_dt = dt_util.as_local(utc_dt)
+    with (
+        patch.object(dt_util, "now", return_value=local_dt),
+        patch.object(dt_util, "utcnow", return_value=utc_dt),
+    ):
+        await runtime.coordinator.async_complete_task(task_id)
+
+
+async def test_weekly_winner_bonus_awarded_and_excluded_from_next_week(
+    hass, init_integration
+) -> None:
+    """The higher scorer of week W0 gets the bonus once week W0 ends; that
+    bonus must not itself count when determining week W1's winner."""
+    runtime = init_integration.runtime_data
+    hass.config_entries.async_update_entry(
+        init_integration,
+        options={CONF_WEEKLY_WINNER_BONUS_ENABLED: True, CONF_WEEKLY_WINNER_BONUS_POINTS: 10},
+    )
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+    ben = await runtime.members.async_create_item({"name": "Ben"})
+    task_anna = await _add_task(runtime, member_ids=[anna["id"]], points=10)
+    task_ben = await _add_task(runtime, member_ids=[ben["id"]], points=5)
+
+    monday_b = _start_of_week_utc(0)  # start of "this" week, W1
+    monday_a = _start_of_week_utc(-1)  # W0, the week that just ended
+
+    # W0: Anna earns more than Ben.
+    await _complete_at_utc(runtime, task_anna["id"], monday_a + timedelta(days=2, hours=10))
+    await _complete_at_utc(runtime, task_ben["id"], monday_a + timedelta(days=2, hours=11))
+
+    # Refresh just after W1 begins - awards the W0 bonus to Anna.
+    await _refresh_at_utc(runtime, monday_b + timedelta(hours=1))
+
+    assert runtime.coordinator.data.members[anna["id"]].points_total == 10 + 10
+    assert runtime.coordinator.data.members[ben["id"]].points_total == 5
+    assert runtime.weekly_bonus_state.last_awarded_week() == monday_a.date().isoformat()
+
+    # W1: Ben now earns real points; Anna earns none, but her W0 bonus
+    # completion entry's timestamp falls inside W1 - it must not make her
+    # look like the W1 leader.
+    task_ben_2 = await _add_task(runtime, member_ids=[ben["id"]], points=6, name="Zweite Aufgabe")
+    await _complete_at_utc(runtime, task_ben_2["id"], monday_b + timedelta(days=2, hours=10))
+
+    monday_c = monday_b + timedelta(days=7)
+    await _refresh_at_utc(runtime, monday_c + timedelta(hours=1))
+
+    assert runtime.weekly_bonus_state.last_awarded_week() == monday_b.date().isoformat()
+    # Ben wins W1 (6 real points beats Anna's 0 real points that week).
+    assert runtime.coordinator.data.members[ben["id"]].points_total == 5 + 6 + 10
+    # Anna gets nothing further - still exactly her W0 total.
+    assert runtime.coordinator.data.members[anna["id"]].points_total == 10 + 10
+
+
+async def test_weekly_winner_bonus_split_on_tie(hass, init_integration) -> None:
+    runtime = init_integration.runtime_data
+    hass.config_entries.async_update_entry(
+        init_integration,
+        options={CONF_WEEKLY_WINNER_BONUS_ENABLED: True, CONF_WEEKLY_WINNER_BONUS_POINTS: 10},
+    )
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+    ben = await runtime.members.async_create_item({"name": "Ben"})
+    task_anna = await _add_task(runtime, member_ids=[anna["id"]], points=7)
+    task_ben = await _add_task(runtime, member_ids=[ben["id"]], points=7)
+
+    monday_b = _start_of_week_utc(0)
+    monday_a = _start_of_week_utc(-1)
+
+    await _complete_at_utc(runtime, task_anna["id"], monday_a + timedelta(days=1))
+    await _complete_at_utc(runtime, task_ben["id"], monday_a + timedelta(days=1, hours=1))
+
+    await _refresh_at_utc(runtime, monday_b + timedelta(hours=1))
+
+    # 10 bonus points split between two tied winners -> 5 each.
+    assert runtime.coordinator.data.members[anna["id"]].points_total == 7 + 5
+    assert runtime.coordinator.data.members[ben["id"]].points_total == 7 + 5
+
+
+async def test_weekly_winner_bonus_disabled_by_default(hass, init_integration) -> None:
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+    task_anna = await _add_task(runtime, member_ids=[anna["id"]], points=10)
+
+    monday_b = _start_of_week_utc(0)
+    monday_a = _start_of_week_utc(-1)
+    await _complete_at_utc(runtime, task_anna["id"], monday_a + timedelta(days=1))
+    await _refresh_at_utc(runtime, monday_b + timedelta(hours=1))
+
+    assert runtime.coordinator.data.members[anna["id"]].points_total == 10
+    assert runtime.weekly_bonus_state.last_awarded_week() is None
+
+
+# --- Mandatory tasks / screen_time_grant_active -----------------------------
+
+
+async def _refresh_at_local(runtime, local_dt) -> None:
+    with (
+        patch.object(dt_util, "now", return_value=local_dt),
+        patch.object(dt_util, "utcnow", return_value=dt_util.as_utc(local_dt)),
+    ):
+        await runtime.coordinator.async_refresh()
+
+
+async def _complete_at_local(runtime, task_id, local_dt) -> None:
+    with (
+        patch.object(dt_util, "now", return_value=local_dt),
+        patch.object(dt_util, "utcnow", return_value=dt_util.as_utc(local_dt)),
+    ):
+        await runtime.coordinator.async_complete_task(task_id)
+
+
+async def test_overdue_mandatory_task_pauses_only_the_assigned_member(
+    hass, init_integration
+) -> None:
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+    ben = await runtime.members.async_create_item({"name": "Ben"})
+
+    frozen_local = dt_util.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    due_time_str = (frozen_local - timedelta(hours=2)).strftime("%H:%M")
+
+    task = await _add_task(
+        runtime,
+        member_ids=[anna["id"]],
+        kind="mandatory",
+        due_time=due_time_str,
+        overdue_after_minutes=30,
+    )
+
+    await _refresh_at_local(runtime, frozen_local)
+
+    assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_OVERDUE
+    assert runtime.coordinator.data.members[anna["id"]].screen_time_grant_active is False
+    # Ben has no mandatory task at all - unaffected.
+    assert runtime.coordinator.data.members[ben["id"]].screen_time_grant_active is True
+
+
+async def test_completing_the_mandatory_task_resumes_the_grant(hass, init_integration) -> None:
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+
+    frozen_local = dt_util.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    due_time_str = (frozen_local - timedelta(hours=2)).strftime("%H:%M")
+    task = await _add_task(
+        runtime,
+        member_ids=[anna["id"]],
+        kind="mandatory",
+        due_time=due_time_str,
+        overdue_after_minutes=30,
+    )
+    await _refresh_at_local(runtime, frozen_local)
+    assert runtime.coordinator.data.members[anna["id"]].screen_time_grant_active is False
+
+    await _complete_at_local(runtime, task["id"], frozen_local)
+
+    assert runtime.coordinator.data.members[anna["id"]].screen_time_grant_active is True
+
+
+async def test_pending_not_yet_overdue_mandatory_task_does_not_pause(hass, init_integration) -> None:
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+    task = await _add_task(runtime, member_ids=[anna["id"]], kind="mandatory")
+    await runtime.coordinator.async_refresh()
+
+    assert runtime.coordinator.data.tasks[task["id"]].status != TASK_STATUS_OVERDUE
+    assert runtime.coordinator.data.members[anna["id"]].screen_time_grant_active is True
+
+
+# --- New-task notifications -------------------------------------------------
+
+
+async def test_new_task_assignment_fires_event_and_calls_notify_service(hass, init_integration) -> None:
+    from pytest_homeassistant_custom_component.common import async_capture_events, async_mock_service
+
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item(
+        {"name": "Anna", "notify_service": "test_target"}
+    )
+    notify_calls = async_mock_service(hass, "notify", "test_target")
+    events = async_capture_events(hass, EVENT_TASK_ASSIGNED)
+
+    task = await _add_task(runtime, member_ids=[anna["id"]])
+    await hass.async_block_till_done()
+
+    assert len(events) == 1
+    assert events[0].data["member_id"] == anna["id"]
+    assert events[0].data["task_id"] == task["id"]
+
+    assert len(notify_calls) == 1
+    assert "Testaufgabe" in notify_calls[0].data["message"]
+
+
+async def test_new_task_without_notify_service_still_fires_event(hass, init_integration) -> None:
+    from pytest_homeassistant_custom_component.common import async_capture_events
+
+    runtime = init_integration.runtime_data
+    anna = await runtime.members.async_create_item({"name": "Anna"})
+    events = async_capture_events(hass, EVENT_TASK_ASSIGNED)
+
+    await _add_task(runtime, member_ids=[anna["id"]])
+    await hass.async_block_till_done()
+
+    assert len(events) == 1

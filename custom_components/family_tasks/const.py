@@ -9,7 +9,7 @@ from homeassistant.const import Platform
 
 DOMAIN: Final = "family_tasks"
 
-PLATFORMS: Final = [Platform.SENSOR, Platform.BUTTON]
+PLATFORMS: Final = [Platform.SENSOR, Platform.BUTTON, Platform.BINARY_SENSOR]
 
 # --- Config / options keys -------------------------------------------------
 
@@ -21,9 +21,28 @@ CONF_DEFAULT_ROTATION_STRATEGY: Final = "default_rotation_strategy"
 # storage.BatteryOverrideStorageCollection / battery.py.
 CONF_BATTERY_WARNING_THRESHOLD: Final = "battery_warning_threshold"
 
+# v0.14: household-wide conversion rate for the "invest points" Handyzeit
+# reward flow (see CONF_REWARD_SCREEN_TIME_INVESTABLE below) - how many
+# minutes of screen time one invested point is worth. Applied at redemption
+# time (storage.ws_redeem_reward), read fresh from the config entry's options
+# every time, same as CONF_OVERDUE_AFTER_MINUTES/CONF_BATTERY_WARNING_THRESHOLD
+# - so a parent changing it in Settings takes effect on the very next
+# redemption without needing a restart.
+CONF_SCREEN_TIME_MINUTES_PER_POINT: Final = "screen_time_minutes_per_point"
+
+# v0.14: whether awarding bonus points to the current week's point leader(s)
+# is turned on at all, and how many bonus points that is - see
+# FamilyTasksCoordinator._async_process_weekly_winner_bonus in coordinator.py.
+# Off by default so nothing changes for a household that doesn't opt in.
+CONF_WEEKLY_WINNER_BONUS_ENABLED: Final = "weekly_winner_bonus_enabled"
+CONF_WEEKLY_WINNER_BONUS_POINTS: Final = "weekly_winner_bonus_points"
+
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
+DEFAULT_SCREEN_TIME_MINUTES_PER_POINT: Final = 1
+DEFAULT_WEEKLY_WINNER_BONUS_ENABLED: Final = False
+DEFAULT_WEEKLY_WINNER_BONUS_POINTS: Final = 0
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
 ROTATION_STRATEGY_RANDOM: Final = "random"
@@ -148,6 +167,16 @@ MEMBER_ROLES: Final = [MEMBER_ROLE_PARENT, MEMBER_ROLE_CHILD]
 # was introduced (opting members out is an explicit admin action).
 CONF_MEMBER_REWARDS_OPT_IN: Final = "participates_in_rewards"
 
+# v0.14: optional notify.* service (just the part after "notify.", e.g.
+# "mobile_app_pixel_8") this member's phone actually reads pushes from. See
+# EVENT_TASK_ASSIGNED below - a plain persistent_notification.create is always
+# raised too, but that only ever shows up inside Home Assistant's own
+# frontend/companion-app notification panel, not as a real push notification
+# on the phone's lock screen; only calling this member's own notify.* service
+# does that, which needs the Home Assistant Companion App set up on their
+# phone and its notify service name filled in here.
+CONF_MEMBER_NOTIFY_SERVICE: Final = "notify_service"
+
 # Per-task override of whether a child's completion needs parental sign-off
 # (see the confirmation flow above). When absent/None, tasks assigned to a
 # "child" member always require confirmation - the historical, still-default
@@ -177,12 +206,30 @@ CONF_COMPLETION_BUTTON_ENTITY_ID: Final = "completion_button_entity_id"
 # whenever a new period starts, same as any other recurring task.
 TASK_KIND_STANDARD: Final = "standard"
 TASK_KIND_CHECKLIST: Final = "checklist"
-TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST]
+# v0.14: a "Pflichtaufgabe" (mandatory task) - behaves exactly like
+# TASK_KIND_STANDARD as far as completion itself goes (a single "Erledigt"
+# action), but is called out to the child as mandatory in the card, and while
+# an occurrence of it is TASK_STATUS_OVERDUE, tick-based screen-time granting
+# for exactly the member(s) it is assigned to is paused - see
+# FamilyTasksCoordinator._async_update_data's screen_time_grant_active
+# computation and binary_sensor.py. Resumes automatically the moment the
+# occurrence is no longer overdue (completed, or - for a "child" assignee
+# needing parental sign-off - once a parent confirms it); missed ticks are
+# never made up, this only ever gates whether the *next* tick may grant
+# anything. Not combinable with TASK_KIND_CHECKLIST - a task is one or the
+# other, chosen via "Aufgabentyp" like any other kind.
+TASK_KIND_MANDATORY: Final = "mandatory"
+TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST, TASK_KIND_MANDATORY]
+# Kinds a "child" member may pick when creating a task for themselves (see
+# WS_API_TASK_CREATE_OWN below) - "mandatory" is a parent-only concept (it
+# exists to let a parent gate a child's screen time), so it's deliberately
+# left out here.
+OWN_TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST]
 
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_VERSION: Final = 1
-STORAGE_VERSION_MINOR: Final = 2
+STORAGE_VERSION_MINOR: Final = 3
 
 STORAGE_KEY_TASKS: Final = f"{DOMAIN}.tasks"
 STORAGE_KEY_MEMBERS: Final = f"{DOMAIN}.members"
@@ -206,6 +253,11 @@ STORAGE_KEY_REWARDS: Final = f"{DOMAIN}.reward_groups"
 # first time this collection loads under v0.9 - see
 # _async_migrate_reward_redemptions.
 STORAGE_KEY_REWARD_REDEMPTIONS: Final = f"{DOMAIN}.rewards"
+# v0.14: tracks the last calendar week (Monday's ISO date) the weekly-winner
+# bonus was already awarded for, so FamilyTasksCoordinator only ever awards it
+# once per week, regardless of how often the coordinator refreshes. See
+# storage.WeeklyBonusStateStore.
+STORAGE_KEY_WEEKLY_BONUS_STATE: Final = f"{DOMAIN}.weekly_bonus_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -262,6 +314,20 @@ CONF_REWARD_SCREEN_TIME_MINUTES: Final = "screen_time_minutes"
 # ever manually resolve.
 CONF_REWARD_AUTO_FULFILL: Final = "auto_fulfill"
 
+# v0.14: marks a "Handyzeit" catalog reward as using the "invest points"
+# flow instead of a fixed price/fixed screen_time_minutes pair - the member
+# chooses how many points to spend at redemption time (family_tasks/
+# reward_redemption/redeem's new "points_spent"), and the screen time granted
+# is points_spent * CONF_SCREEN_TIME_MINUTES_PER_POINT (the household-wide
+# bonus factor from Options), not a value stored on the catalog item itself.
+# "points_cost" is ignored for a reward with this flag set - see
+# ws_redeem_reward in storage.py. Existing rewards that already had
+# screen_time_minutes set are migrated to this flag on first load after the
+# upgrade (see _async_migrate_screen_time_investable in storage.py), so a
+# household's existing Handyzeit rewards switch to the new dynamic flow
+# automatically instead of silently keeping the old fixed-minutes behavior.
+CONF_REWARD_SCREEN_TIME_INVESTABLE: Final = "screen_time_investable"
+
 # Fired on hass.bus the moment a redemption is created (end of ws_redeem_reward
 # in storage.py), carrying member_id/member_name/reward_id/reward_name/
 # points_cost/screen_time_minutes. This - not a hardcoded call into a specific
@@ -276,6 +342,17 @@ CONF_REWARD_AUTO_FULFILL: Final = "auto_fulfill"
 # firing a plain event keeps the coupling one-directional and lets more than
 # one automation react to the same redemption if needed.
 EVENT_REWARD_REDEEMED: Final = f"{DOMAIN}_reward_redeemed"
+
+# v0.14: fired whenever a new task is created/raised with a member assigned
+# to it (member_id/member_name/task_id/task_name) - covers a task an admin
+# creates by hand as well as an auto-generated one (parent-confirmation,
+# battery alert). Same extension-point pattern as EVENT_REWARD_REDEEMED: the
+# integration itself only ever raises a plain persistent_notification (see
+# CONF_MEMBER_NOTIFY_SERVICE above) and fires this event - a household's own
+# automation can additionally react to it however it likes (a different
+# notify target, a TTS announcement, etc.) without the integration having to
+# know about any of that.
+EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
 
 # --- Coordinator --------------------------------------------------------------
 
