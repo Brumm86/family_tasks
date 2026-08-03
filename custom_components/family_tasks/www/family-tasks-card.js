@@ -52,13 +52,22 @@
  *                               as above). That section is configuration-only
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
+ *   hide_favorites_section: false - initial value for the "Favoriten"
+ *                               visibility toggle (v0.19, same first-run-only
+ *                               rule as above, same v0.11-style default-true
+ *                               flip - see below). Parent-only, like the
+ *                               section itself: never rendered for a child
+ *                               (see the Favoriten note further down), so
+ *                               this option has no effect for them either.
  *
  * v0.11 default flip: hide_members_list, hide_battery_section and
  * only_own_tasks now default to *true* (compact, own-tasks-only) the very
  * first time the card runs on a device and no persisted localStorage state
  * exists yet, instead of *false* (everything shown) - set any of them to
  * `false` explicitly in the card config to keep the pre-v0.11 "show
- * everything" first-run behavior. This also softens a real-world failure
+ * everything" first-run behavior. hide_favorites_section (v0.19) joined this
+ * same group when the "Favoriten" section became collapsible. This also
+ * softens a real-world failure
  * mode: on some devices/browsers (observed on a Samsung Galaxy S24, likely a
  * webview/private-mode storage restriction) window.localStorage silently
  * throws on every read/write, so the toggle state never persists at all and
@@ -213,6 +222,9 @@
  * times. Parent-only end to end, same rule as member/reward-catalog
  * management (isAdmin && !isChildUser) - a child never sees the "Favoriten"
  * section, its "+ Favorit hinzufügen" button, or any favorite at all.
+ * Collapsible like "Familienmitglieder"/"Batterien" (v0.19, see
+ * hide_favorites_section above) since a household with several favorites
+ * would otherwise permanently push the task list further down the card.
  *
  * Checklist display (v0.12): a checklist task's sub-items are now sorted
  * alphabetically for display - open items first (alphabetically among
@@ -542,6 +554,9 @@
       this._favoriteFormOpen = false;
       this._editingFavoriteId = null;
       this._favoriteForm = emptyFavoriteForm();
+      // Whether the "Favoriten" section is collapsed (v0.19) - same
+      // show/hide-toggle pattern as _hideMembers/_hideBattery.
+      this._hideFavorites = undefined;
     }
 
     setConfig(config) {
@@ -578,6 +593,10 @@
         // Erledigte Einlösungen sind standardmäßig ausgeblendet, wie schon in
         // der ehemals eigenständigen Bestenlisten-Karte.
         this._hideFulfilled = saved?.hideFulfilled ?? true;
+        // v0.19: gleicher Erststart-Default wie hide_members_list/
+        // hide_battery_section (kompakt, sofern nicht per Config explizit
+        // auf `false` gesetzt).
+        this._hideFavorites = saved?.hideFavorites ?? this._config.hide_favorites_section !== false;
       }
     }
 
@@ -611,6 +630,7 @@
             controlsHidden: this._controlsHidden,
             taskMemberFilter: this._taskMemberFilter,
             hideFulfilled: this._hideFulfilled,
+            hideFavorites: this._hideFavorites,
           })
         );
       } catch (err) {
@@ -1376,7 +1396,7 @@
                 </div>`}
             </div>
             ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
-            ${this._renderFavoritesSection(canManageFavorites)}
+            ${this._renderFavoritesSection(canManageFavorites, controlsHidden)}
             ${this._renderTaskList(isAdmin)}
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
             ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
@@ -1637,8 +1657,19 @@
     // false) - unlike the reward catalog, there is nothing here for a child
     // to see or use, so the whole section (including the ability to
     // instantiate) is admin/parent-only, not just management.
-    _renderFavoritesSection(canManageFavorites) {
+    //
+    // v0.19: collapsible via _hideFavorites, same "Ausblenden"/"anzeigen"
+    // toggle pattern as _renderBatterySection - a household with several
+    // favorites otherwise permanently pushes the task list further down the
+    // card. controlsHidden (compact mode) additionally hides the toggle
+    // button itself, same as elsewhere.
+    _renderFavoritesSection(canManageFavorites, controlsHidden) {
       if (!canManageFavorites) return "";
+      if (this._hideFavorites) {
+        return controlsHidden
+          ? ""
+          : `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-favorites">Favoriten anzeigen</button></div>`;
+      }
       const favoriteIds = Object.keys(this._favorites).sort((a, b) =>
         (this._favorites[a].name ?? "").localeCompare(this._favorites[b].name ?? "", "de", { sensitivity: "base" })
       );
@@ -1667,7 +1698,10 @@
             .join("")}</div>`
         : `<p class="muted">Noch keine Favoriten angelegt.</p>`;
       return `
-        <div class="section-header"><h4>Favoriten</h4></div>
+        <div class="section-header">
+          <h4>Favoriten</h4>
+          ${controlsHidden ? "" : `<button class="link" data-action="toggle-hide-favorites">Ausblenden</button>`}
+        </div>
         ${list}
         <button class="add" data-action="new-favorite">+ Favorit hinzufügen</button>`;
     }
@@ -1898,6 +1932,9 @@
     // _formSpec/_applyFieldChange.
     _renderFavoriteForm() {
       const f = this._favoriteForm;
+      // v0.18: multi-select checkboxes for the fixed assignee(s)
+      // (f.member_ids), mirroring the task form's rotation checkboxes -
+      // originally (v0.17) a single optional <select> (f.member_id).
       const memberCheckboxes = Object.keys(this._members)
         .map((id) => {
           const checked = f.member_ids.includes(id) ? "checked" : "";
@@ -2436,6 +2473,10 @@
           if (this._isAdmin() && !this._isChildUser()) this._deleteFavorite(el.dataset.favoriteId)?.catch(() => {});
         } else if (action === "instantiate-favorite") {
           if (this._isAdmin() && !this._isChildUser()) this._instantiateFavorite(el.dataset.favoriteId)?.catch(() => {});
+        } else if (action === "toggle-hide-favorites") {
+          this._hideFavorites = !this._hideFavorites;
+          this._saveUiState();
+          this._render();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.

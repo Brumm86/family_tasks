@@ -425,7 +425,9 @@ FAVORITE_CREATE_SCHEMA: collection.VolDictType = {
     # checked (shared, all simultaneously assigned - see the "Aufgaben-Filter
     # nach Familienmitglied" note in family-tasks-card.js). An empty list
     # means "no fixed assignee", same as an admin-created task with nobody
-    # checked under "Rotation".
+    # checked under "Rotation". v0.18: a list, not a single optional
+    # "member_id" as originally shipped in v0.17 - a favorite can now carry
+    # more than one fixed assignee, same as a normal task.
     vol.Optional("member_ids", default=list): [str],
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
