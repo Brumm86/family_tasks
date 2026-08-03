@@ -34,7 +34,6 @@ from .const import (
     CONF_REWARD_SCREEN_TIME_INVESTABLE,
     CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
-    CONF_TASK_FAVORITE,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
@@ -54,6 +53,7 @@ from .const import (
     STORAGE_KEY_BATTERY_OVERRIDES,
     STORAGE_KEY_CHECKLIST_STATE,
     STORAGE_KEY_COMPLETIONS,
+    STORAGE_KEY_FAVORITES,
     STORAGE_KEY_MEMBERS,
     STORAGE_KEY_REWARD_REDEMPTIONS,
     STORAGE_KEY_REWARDS,
@@ -68,7 +68,9 @@ from .const import (
     TASK_TRIGGER_KINDS,
     TASK_TRIGGER_NUMERIC_STATE,
     TASK_TRIGGER_STATE,
+    WS_API_FAVORITE_INSTANTIATE,
     WS_API_PREFIX_BATTERY_OVERRIDES,
+    WS_API_PREFIX_FAVORITES,
     WS_API_PREFIX_MEMBERS,
     WS_API_PREFIX_REWARD_REDEMPTIONS,
     WS_API_PREFIX_REWARDS,
@@ -214,8 +216,6 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     # See TASK_KIND_CHECKLIST in const.py.
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
-    # See CONF_TASK_FAVORITE in const.py.
-    vol.Optional(CONF_TASK_FAVORITE, default=False): bool,
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -234,7 +234,6 @@ TASK_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_COMPLETION_BUTTON_ENTITY_ID): vol.Any(None, cv.entity_id),
     vol.Optional("kind"): vol.In(TASK_KINDS),
     vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
-    vol.Optional(CONF_TASK_FAVORITE): bool,
 }
 
 MEMBER_CREATE_SCHEMA: collection.VolDictType = {
@@ -403,6 +402,133 @@ class BatteryOverrideStorageCollection(collection.DictStorageCollection):
             # check symmetric with an override that never set one.
             updated.pop("threshold", None)
         return updated
+
+
+# --- Favorites (v0.17) -------------------------------------------------------
+#
+# See WS_API_PREFIX_FAVORITES in const.py: a "Favorit" is a reusable task
+# *template* a parent maintains (name, points, optional fixed assignee, task
+# kind) - independent of the tasks collection itself. Clicking one
+# (ws_instantiate_favorite below) creates a brand new, independent
+# RECURRENCE_ONCE task from it; the template is untouched and can be reused
+# any number of times. Structurally this mirrors the reward catalog just
+# below (a small parent-maintained list of reusable items), not the tasks
+# collection - there is no recurrence/rotation here, just the handful of
+# fields a new task needs at creation time.
+FAVORITE_CREATE_SCHEMA: collection.VolDictType = {
+    vol.Required("name"): str,
+    vol.Optional("icon"): str,
+    vol.Optional("points", default=0): vol.All(int, vol.Range(min=0)),
+    # Fixed assignee every task created from this favorite gets (rotation
+    # forced to a single fixed member, mirroring ws_create_own_task's
+    # "rotation" below) - absent means "no fixed assignee", same as an
+    # admin-created task with nobody checked under "Rotation".
+    vol.Optional("member_id"): str,
+    vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
+    vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+}
+
+FAVORITE_UPDATE_SCHEMA: collection.VolDictType = {
+    vol.Optional("name"): str,
+    vol.Optional("icon"): str,
+    vol.Optional("points"): vol.All(int, vol.Range(min=0)),
+    # Explicitly setting this to null clears a previously set fixed assignee -
+    # same "clear via null" pattern used elsewhere in this module (see
+    # BatteryOverrideStorageCollection's "threshold").
+    vol.Optional("member_id"): vol.Any(None, str),
+    vol.Optional("kind"): vol.In(TASK_KINDS),
+    vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+}
+
+
+class FavoriteStorageCollection(collection.DictStorageCollection):
+    """Storage collection for reusable Favoriten task templates."""
+
+    CREATE_SCHEMA = vol.Schema(FAVORITE_CREATE_SCHEMA)
+    UPDATE_SCHEMA = vol.Schema(FAVORITE_UPDATE_SCHEMA)
+
+    async def _process_create_data(self, data: dict) -> dict:
+        validated: dict = self.CREATE_SCHEMA(data)
+        if validated.get("kind") == TASK_KIND_CHECKLIST and not validated.get("subtasks"):
+            raise vol.Invalid(
+                "Eine Checklisten-Favoriten-Vorlage braucht mindestens eine Unteraufgabe."
+            )
+        return validated
+
+    @callback
+    def _get_suggested_id(self, info: dict) -> str:
+        return info["name"]
+
+    async def _update_data(self, item: dict, update_data: dict) -> dict:
+        validated = self.UPDATE_SCHEMA(update_data)
+        updated = {**item, **validated}
+        if "member_id" in validated and validated["member_id"] is None:
+            updated.pop("member_id", None)
+        if updated.get("kind") == TASK_KIND_CHECKLIST and not updated.get("subtasks"):
+            raise vol.Invalid(
+                "Eine Checklisten-Favoriten-Vorlage braucht mindestens eine Unteraufgabe."
+            )
+        return updated
+
+
+class FavoriteStorageCollectionWebsocket(collection.DictStorageCollectionWebsocket):
+    """Favorite CRUD over websocket, parent-only like member management.
+
+    Home Assistant's storage-collection websocket API already requires an
+    administrator account for create/update/delete (see
+    websocket_api.require_admin in the base class). On top of that, same as
+    MemberStorageCollectionWebsocket/RewardRedemptionStorageCollectionWebsocket,
+    a user linked to a "child" member is rejected outright regardless of
+    their HA admin flag - Favoriten management (and instantiating one, see
+    ws_instantiate_favorite below) is a parent-only concept end to end.
+    """
+
+    def __init__(
+        self,
+        storage_collection: FavoriteStorageCollection,
+        api_prefix: str,
+        model_name: str,
+        create_schema: collection.VolDictType,
+        update_schema: collection.VolDictType,
+        members: MemberStorageCollection,
+    ) -> None:
+        super().__init__(storage_collection, api_prefix, model_name, create_schema, update_schema)
+        self._members = members
+
+    def _reject_if_child(
+        self, connection: websocket_api.ActiveConnection, msg_id: int
+    ) -> bool:
+        role = _member_role_for_user(self._members.hass, self._members, connection.user)
+        if role == MEMBER_ROLE_CHILD:
+            connection.send_error(
+                msg_id,
+                websocket_api.ERR_UNAUTHORIZED,
+                "Mitglieder mit der Rolle 'Kind' dürfen Favoriten nicht anlegen, "
+                "bearbeiten oder löschen.",
+            )
+            return True
+        return False
+
+    async def ws_create_item(
+        self, hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        if self._reject_if_child(connection, msg["id"]):
+            return
+        await super().ws_create_item(hass, connection, msg)
+
+    async def ws_update_item(
+        self, hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        if self._reject_if_child(connection, msg["id"]):
+            return
+        await super().ws_update_item(hass, connection, msg)
+
+    async def ws_delete_item(
+        self, hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        if self._reject_if_child(connection, msg["id"]):
+            return
+        await super().ws_delete_item(hass, connection, msg)
 
 
 # --- Rewards (v0.9) ------------------------------------------------------------
@@ -830,6 +956,7 @@ def async_setup_websocket_api(
     rewards: RewardStorageCollection,
     reward_redemptions: RewardRedemptionStorageCollection,
     completions: CompletionLogStore,
+    favorites: FavoriteStorageCollection,
 ) -> None:
     """Expose the storage collections over the websocket API for the frontend.
 
@@ -879,6 +1006,17 @@ def async_setup_websocket_api(
         "reward_redemption",
         REWARD_REDEMPTION_CREATE_SCHEMA,
         REWARD_REDEMPTION_UPDATE_SCHEMA,
+        members,
+    ).async_setup(hass)
+    # Favoriten CRUD needs the same "no child, regardless of HA admin flag"
+    # guard as members/reward-catalog management - see
+    # FavoriteStorageCollectionWebsocket above.
+    FavoriteStorageCollectionWebsocket(
+        favorites,
+        WS_API_PREFIX_FAVORITES,
+        "favorite",
+        FAVORITE_CREATE_SCHEMA,
+        FAVORITE_UPDATE_SCHEMA,
         members,
     ).async_setup(hass)
 
@@ -1067,6 +1205,80 @@ def async_setup_websocket_api(
         hass, WS_API_TASK_CREATE_OWN, ws_create_own_task, CREATE_OWN_TASK_SCHEMA
     )
 
+    @websocket_api.require_admin
+    @websocket_api.async_response
+    async def ws_instantiate_favorite(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Create a new, independent RECURRENCE_ONCE task from a Favorit template.
+
+        Parent-only, same as favorite CRUD itself (FavoriteStorageCollectionWebsocket)
+        - @require_admin covers the HA-admin part, the role check below adds
+        the same "not a child, regardless of HA admin flag" restriction used
+        throughout this module. The favorite template itself is never
+        modified by this - it stays exactly as configured and can be clicked
+        again to create another, independent task.
+        """
+        role = _member_role_for_user(hass, members, connection.user)
+        if role == MEMBER_ROLE_CHILD:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Mitglieder mit der Rolle 'Kind' dürfen keine Aufgaben aus "
+                "Favoriten erstellen.",
+            )
+            return
+
+        favorite = favorites.data.get(msg["favorite_id"])
+        if favorite is None:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Favorit nicht gefunden."
+            )
+            return
+
+        member_id = favorite.get("member_id")
+        task_data: dict[str, Any] = {
+            "name": favorite["name"],
+            "points": favorite.get("points", 0),
+            "enabled": True,
+            # Always a single, never-repeating occurrence - see RECURRENCE_ONCE
+            # in const.py. TaskStorageCollection._process_create_data fills in
+            # "anchor_date" (today) since it's absent here.
+            "recurrence": {"type": RECURRENCE_ONCE},
+            "rotation": {
+                "member_ids": [member_id] if member_id else [],
+                "strategy": ROTATION_STRATEGY_FIXED,
+            },
+            "kind": favorite.get("kind", TASK_KIND_STANDARD),
+        }
+        if favorite.get("icon"):
+            task_data["icon"] = favorite["icon"]
+        if favorite.get("kind") == TASK_KIND_CHECKLIST:
+            # Fresh copy, not a shared reference - each instantiated task owns
+            # its own subtask list from here on, editable independently of the
+            # favorite it was created from.
+            task_data["subtasks"] = [dict(s) for s in favorite.get("subtasks", [])]
+
+        try:
+            item = await tasks.async_create_item(task_data)
+            connection.send_result(msg["id"], item)
+        except vol.Invalid as err:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(task_data, err)
+            )
+
+    websocket_api.async_register_command(
+        hass,
+        WS_API_FAVORITE_INSTANTIATE,
+        ws_instantiate_favorite,
+        websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+            {
+                vol.Required("type"): WS_API_FAVORITE_INSTANTIATE,
+                vol.Required("favorite_id"): str,
+            }
+        ),
+    )
+
 
 async def async_create_tasks_collection(hass: HomeAssistant) -> TaskStorageCollection:
     """Create and load the tasks storage collection."""
@@ -1104,6 +1316,17 @@ async def async_create_battery_overrides_collection(
     battery_overrides = BatteryOverrideStorageCollection(store, id_manager)
     await battery_overrides.async_load()
     return battery_overrides
+
+
+async def async_create_favorites_collection(hass: HomeAssistant) -> FavoriteStorageCollection:
+    """Create and load the Favoriten template storage collection."""
+    store: Store = Store(
+        hass, STORAGE_VERSION, STORAGE_KEY_FAVORITES, minor_version=STORAGE_VERSION_MINOR
+    )
+    id_manager = collection.IDManager()
+    favorites = FavoriteStorageCollection(store, id_manager)
+    await favorites.async_load()
+    return favorites
 
 
 async def _async_migrate_reward_catalog(rewards: RewardStorageCollection) -> None:

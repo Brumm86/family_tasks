@@ -39,6 +39,7 @@ from .storage import (
     BatteryOverrideStorageCollection,
     ChecklistStateStore,
     CompletionLogStore,
+    FavoriteStorageCollection,
     MemberStorageCollection,
     RewardRedemptionStorageCollection,
     RewardStorageCollection,
@@ -47,6 +48,7 @@ from .storage import (
     WeeklyBonusStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
+    async_create_favorites_collection,
     async_create_members_collection,
     async_create_reward_redemptions_collection,
     async_create_rewards_collection,
@@ -89,6 +91,7 @@ class FamilyTasksRuntimeData:
     rewards: RewardStorageCollection
     reward_redemptions: RewardRedemptionStorageCollection
     weekly_bonus_state: WeeklyBonusStateStore
+    favorites: FavoriteStorageCollection
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -101,6 +104,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     battery_overrides = await async_create_battery_overrides_collection(hass)
     rewards = await async_create_rewards_collection(hass)
     reward_redemptions = await async_create_reward_redemptions_collection(hass)
+    favorites = await async_create_favorites_collection(hass)
 
     # Created before the websocket API is set up below - the reward-redeem
     # command needs the completion log to work out a member's current
@@ -112,7 +116,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     # but harmless/no-ops for a second entry since single_config_entry=True
     # in the manifest already prevents that from happening in practice.
     async_setup_websocket_api(
-        hass, entry, tasks, members, battery_overrides, rewards, reward_redemptions, completions
+        hass,
+        entry,
+        tasks,
+        members,
+        battery_overrides,
+        rewards,
+        reward_redemptions,
+        completions,
+        favorites,
     )
 
     trigger_state = await async_create_trigger_state_store(hass)
@@ -143,6 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         rewards=rewards,
         reward_redemptions=reward_redemptions,
         weekly_bonus_state=weekly_bonus_state,
+        favorites=favorites,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence

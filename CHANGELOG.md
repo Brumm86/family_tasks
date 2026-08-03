@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.17.0] - 2026-08-03
+
+### Changed
+- **Favoriten neu konzipiert**: die v0.16-Variante (Stern-Toggle an einer bestehenden Aufgabe, der sie in eine für alle - auch Kinder - sichtbare Ein-Tipp-"Erledigt"-Leiste aufnahm) ist vollständig ersetzt. Ein Favorit ist jetzt eine eigenständige, wiederverwendbare Aufgaben-Vorlage (Name, Punkte, optionaler fester Zuständiger, Aufgabentyp inkl. Checkliste/Pflichtaufgabe) in einer eigenen Storage Collection (`FavoriteStorageCollection`, `family_tasks/favorite/*`) - unabhängig von der Aufgabenliste selbst. Gedacht für Aufgaben, die unregelmäßig anfallen (z. B. "Auto waschen", "Keller aufräumen") und für die eine echte Wiederholung/Rotation deshalb keinen Sinn ergibt. Ein Klick auf "Aufgabe erstellen" (`family_tasks/favorite/instantiate`, admin/parent-only, prüft serverseitig erneut die Rolle des Aufrufers) legt daraus eine neue, unabhängige, offene Aufgabe mit Wiederholung "Einmalig" an (`recurrence.type: once`) - nicht bereits erledigt, sonst identisch zu einer von Hand angelegten Aufgabe. Die Vorlage selbst bleibt dabei unverändert und lässt sich beliebig oft erneut anklicken, um weitere unabhängige Aufgaben daraus zu erzeugen. Der gesamte Abschnitt "Favoriten" (Ansicht, Erstellen-Button, Verwaltung) ist ausschließlich für Eltern sichtbar - dieselbe `isAdmin && !isChildUser`-Regel wie bei Mitglieder-/Belohnungs-Verwaltung, serverseitig zusätzlich über `FavoriteStorageCollectionWebsocket` (CRUD) und `ws_instantiate_favorite` (Erstellen) erzwungen. Das frühere `favorite`-Feld auf der Aufgabe selbst (`CONF_TASK_FAVORITE`) entfällt vollständig.
+
 ## [0.16.0] - 2026-08-03
 
 ### Fixed

@@ -197,15 +197,23 @@ CONF_TASK_REQUIRES_CONFIRMATION: Final = "requires_confirmation"
 # FamilyTasksCoordinator._async_press_completion_button in coordinator.py.
 CONF_COMPLETION_BUTTON_ENTITY_ID: Final = "completion_button_entity_id"
 
-# v0.16: whether a task is pinned to the card's "Favoriten" quick-select bar
-# (family-tasks-card.js) - a plain per-task bool, toggled the same way any
-# other task field is (family_tasks/task/update), no separate storage
-# collection needed. Purely a display/shortcut concern, doesn't affect
-# rotation, points, or due-state - a favorited task still follows its normal
-# recurrence/rotation, it's just additionally reachable via the quick-select
-# bar without scrolling the full task list. Defaults to False so every
-# existing task keeps behaving exactly as before this field was introduced.
-CONF_TASK_FAVORITE: Final = "favorite"
+# v0.17: replaces the v0.16 "pin an existing task" star toggle entirely (that
+# field, CONF_TASK_FAVORITE, is gone). A "Favorit" is now an independent,
+# reusable *template* (see FavoriteStorageCollection in storage.py) a parent
+# maintains - name, points, optional fixed assignee, task kind - separate
+# from the tasks collection itself. It exists for chores that recur
+# irregularly (e.g. "Auto waschen", "Keller aufräumen"): setting one up as a
+# real recurring task makes no sense (there is no fixed schedule to hang a
+# RECURRENCE_* type off of), but retyping the same name/points every time is
+# tedious. Clicking a favorite (WS_API_FAVORITE_INSTANTIATE below) creates a
+# brand new, independent RECURRENCE_ONCE task from it - open, not
+# pre-completed - that behaves exactly like one an admin created by hand; the
+# template itself is untouched and can be clicked again any number of times.
+# Parent-only end to end: only a "parent" (HA admin, not linked to a "child"
+# member - same rule as member/reward-catalog management) may see, manage, or
+# instantiate favorites at all - see FavoriteStorageCollectionWebsocket.
+WS_API_PREFIX_FAVORITES: Final = f"{DOMAIN}/favorite"
+WS_API_FAVORITE_INSTANTIATE: Final = f"{WS_API_PREFIX_FAVORITES}/instantiate"
 
 # --- Task kinds / checklists --------------------------------------------------
 #
@@ -272,6 +280,9 @@ STORAGE_KEY_REWARD_REDEMPTIONS: Final = f"{DOMAIN}.rewards"
 # once per week, regardless of how often the coordinator refreshes. See
 # storage.WeeklyBonusStateStore.
 STORAGE_KEY_WEEKLY_BONUS_STATE: Final = f"{DOMAIN}.weekly_bonus_state"
+# v0.17: the parent-maintained Favoriten template catalog - see
+# WS_API_PREFIX_FAVORITES above.
+STORAGE_KEY_FAVORITES: Final = f"{DOMAIN}.favorites"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 

@@ -198,20 +198,21 @@
  * regardless - see _effectiveTaskMemberFilterId). Persisted per device like
  * the other toggles.
  *
- * Aufgaben-Favoriten (v0.16): any task can be pinned via a small star toggle
- * (☆/★) next to its "Erledigt"/"Bearbeiten" buttons - admin-only, like
- * editing/deleting a task, since it's a shared household setting rather than
- * a personal one (CONF_TASK_FAVORITE in const.py, plain bool on the task
- * item, toggled through the normal family_tasks/task/update command). Every
- * favorited task additionally shows up in a compact "Favoriten" quick-select
- * bar just above the full task list - visible to everyone, including a
- * "child" user - where a single tap completes it directly (reuses the exact
- * same "complete-task" action/service call as the full list's own
- * "Erledigt" button), without having to find it in a potentially long,
- * filtered task list first. A favorite that's already resolved (done/idle/
- * awaiting confirmation) or is a checklist task (which can only be completed
- * by checking off its sub-items) is left out of the quick-select bar, since
- * there's nothing useful to one-tap-complete for either.
+ * Favoriten (v0.17, replaces the v0.16 star-toggle/quick-complete bar
+ * entirely): a "Favorit" is a reusable task *template* a parent maintains -
+ * name, points, optional fixed assignee, task type (incl. Checkliste/
+ * Pflichtaufgabe) - independent of the tasks collection itself
+ * (family_tasks/favorite/*, FavoriteStorageCollection in storage.py). It's
+ * meant for chores that come up irregularly (e.g. "Auto waschen", "Keller
+ * aufräumen"): not worth setting up as a real recurring task (there's no
+ * fixed schedule to hang a Wiederholung off of), but tedious to retype every
+ * time. Clicking "Aufgabe erstellen" on a favorite (family_tasks/favorite/
+ * instantiate) creates a brand new, independent, open "Einmalig" task from
+ * it - not pre-completed - that behaves exactly like one created by hand;
+ * the template itself is untouched and can be clicked again any number of
+ * times. Parent-only end to end, same rule as member/reward-catalog
+ * management (isAdmin && !isChildUser) - a child never sees the "Favoriten"
+ * section, its "+ Favorit hinzufügen" button, or any favorite at all.
  *
  * Checklist display (v0.12): a checklist task's sub-items are now sorted
  * alphabetically for display - open items first (alphabetically among
@@ -474,6 +475,21 @@
     };
   }
 
+  function emptyFavoriteForm() {
+    return { name: "", points: 0, icon: "", member_id: "", kind: "standard", subtasks: [] };
+  }
+
+  function favoriteToForm(favorite) {
+    return {
+      name: favorite?.name ?? "",
+      points: favorite?.points ?? 0,
+      icon: favorite?.icon ?? "",
+      member_id: favorite?.member_id ?? "",
+      kind: favorite?.kind ?? "standard",
+      subtasks: (favorite?.subtasks ?? []).map((s) => ({ ...s })),
+    };
+  }
+
   class FamilyTasksCard extends HTMLElement {
     constructor() {
       super();
@@ -483,6 +499,7 @@
       this._batteryOverrides = {};
       this._rewards = {};
       this._redemptions = {};
+      this._favorites = {};
       this._hass = null;
       this._subscribed = false;
       this._listenersAttached = false;
@@ -520,6 +537,11 @@
       // ausgeblendet sind - siehe setConfig für die Default-an/persistierte
       // First-Run-Regel, gleiches Muster wie die übrigen Karten-Toggles.
       this._hideFulfilled = undefined;
+      // Favoriten (v0.17) - task-template CRUD, mirrors the reward-form state
+      // just above (_rewardFormOpen/_editingRewardId/_rewardForm).
+      this._favoriteFormOpen = false;
+      this._editingFavoriteId = null;
+      this._favoriteForm = emptyFavoriteForm();
     }
 
     setConfig(config) {
@@ -738,6 +760,10 @@
       this._unsubRedemptions = await this._hass.connection.subscribeMessage(
         handle(this._redemptions, "reward_redemption_id"),
         { type: "family_tasks/reward_redemption/subscribe" }
+      );
+      this._unsubFavorites = await this._hass.connection.subscribeMessage(
+        handle(this._favorites, "favorite_id"),
+        { type: "family_tasks/favorite/subscribe" }
       );
     }
 
@@ -1223,6 +1249,75 @@
       });
     }
 
+    // --- Favoriten actions (v0.17) ---------------------------------------
+
+    _openFavoriteForm(favoriteId) {
+      this._editingFavoriteId = favoriteId;
+      this._favoriteForm = favoriteId ? favoriteToForm(this._favorites[favoriteId]) : emptyFavoriteForm();
+      this._favoriteFormOpen = true;
+      this._render();
+    }
+
+    _closeFavoriteForm() {
+      this._favoriteFormOpen = false;
+      this._editingFavoriteId = null;
+      this._render();
+    }
+
+    async _saveFavorite() {
+      const f = this._favoriteForm;
+      if (!f.name.trim()) return;
+      if (f.kind === "checklist") {
+        const names = f.subtasks.map((s) => s.name.trim()).filter(Boolean);
+        if (!names.length) {
+          alert("Bitte mindestens eine Unteraufgabe für die Checkliste angeben.");
+          return;
+        }
+      }
+      const payload = {
+        name: f.name.trim(),
+        points: Math.max(0, Number(f.points) || 0),
+        kind: f.kind === "checklist" || f.kind === "mandatory" ? f.kind : "standard",
+      };
+      if (f.icon) payload.icon = f.icon.trim();
+      if (f.kind === "checklist") {
+        payload.subtasks = f.subtasks.map((s) => ({ id: s.id, name: s.name.trim() })).filter((s) => s.name);
+      }
+      // Kein fester Zuständiger ausgewählt -> beim Bearbeiten muss ein zuvor
+      // gesetzter Wert per explizitem null gelöscht werden (siehe "member_id"
+      // in FAVORITE_UPDATE_SCHEMA, storage.py); beim Neuanlegen reicht das
+      // Weglassen des Felds.
+      if (f.member_id) {
+        payload.member_id = f.member_id;
+      } else if (this._editingFavoriteId) {
+        payload.member_id = null;
+      }
+      if (this._editingFavoriteId) {
+        await this._callWS({
+          type: "family_tasks/favorite/update",
+          favorite_id: this._editingFavoriteId,
+          ...payload,
+        });
+      } else {
+        await this._callWS({ type: "family_tasks/favorite/create", ...payload });
+      }
+      this._closeFavoriteForm();
+    }
+
+    async _deleteFavorite(favoriteId) {
+      const name = this._favorites[favoriteId]?.name ?? favoriteId;
+      if (!confirm(`Favorit "${name}" wirklich löschen?`)) return;
+      await this._callWS({ type: "family_tasks/favorite/delete", favorite_id: favoriteId });
+    }
+
+    // Erzeugt sofort eine neue, offene, einmalige Aufgabe aus der Vorlage -
+    // keine Rückfrage, da genau das der Sinn des Ein-Klick-Konzepts ist (siehe
+    // die Favoriten-Notiz im Datei-Header oben). Die Vorlage selbst bleibt
+    // dabei unverändert und lässt sich beliebig oft erneut anklicken.
+    async _instantiateFavorite(favoriteId) {
+      await this._callWS({ type: "family_tasks/favorite/instantiate", favorite_id: favoriteId });
+    }
+
     // --- rendering -------------------------------------------------------
 
     _render() {
@@ -1237,6 +1332,11 @@
       // MemberStorageCollectionWebsocket in storage.py); this just keeps the
       // buttons from showing up for them in the first place.
       const canManageMembers = isAdmin && !isChildUser;
+      // Same rule, same reasoning - see the Favoriten note in the file header
+      // comment above. Also gates *seeing*/using the section at all, not
+      // just editing it (unlike canManageMembers, where a non-admin can
+      // still see the member list itself).
+      const canManageFavorites = canManageMembers;
       // Visibility settings (v0.8) are admin/parent-only: a child's task list
       // is always filtered to their own tasks, with no toggle to change that
       // or any of the other display preferences - there's nothing for them
@@ -1284,7 +1384,7 @@
                 </div>`}
             </div>
             ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
-            ${this._renderFavoritesQuickBar()}
+            ${this._renderFavoritesSection(canManageFavorites)}
             ${this._renderTaskList(isAdmin)}
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
             ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
@@ -1316,6 +1416,11 @@
             <h3>${this._editingRewardId ? "Belohnung bearbeiten" : "Belohnung hinzufügen"}</h3>
             ${this._renderRewardForm()}
           </dialog>` : ""}
+          ${this._favoriteFormOpen ? `
+          <dialog class="dialog" data-dialog="favorite">
+            <h3>${this._editingFavoriteId ? "Favorit bearbeiten" : "Favorit hinzufügen"}</h3>
+            ${this._renderFavoriteForm()}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
@@ -1334,6 +1439,7 @@
         ["own-task", () => this._ownTaskFormOpen, () => this._closeOwnTaskForm()],
         ["member", () => this._memberFormOpen, () => this._closeMemberForm()],
         ["reward", () => this._rewardFormOpen, () => this._closeRewardForm()],
+        ["favorite", () => this._favoriteFormOpen, () => this._closeFavoriteForm()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -1488,14 +1594,6 @@
                   <span class="muted">${detail}</span>
                 </div>
                 <div class="row-actions">
-                  ${isConfirmation || !isAdmin ? "" : `
-                  <button
-                    class="favorite-toggle ${task.favorite ? "is-favorite" : ""}"
-                    data-action="toggle-favorite"
-                    data-task-id="${id}"
-                    title="${task.favorite ? "Aus Favoriten entfernen" : "Als Favorit markieren"}"
-                    aria-label="${task.favorite ? "Aus Favoriten entfernen" : "Als Favorit markieren"}"
-                  >${task.favorite ? "★" : "☆"}</button>`}
                   <button data-action="complete-task" data-task-id="${id}" ${disableComplete ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
                   ${showSkip ? `<button data-action="skip-task" data-task-id="${id}" ${resolved ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>` : ""}
                   ${isConfirmation || !isAdmin ? "" : `
@@ -1536,38 +1634,50 @@
         </div>`;
     }
 
-    // v0.16: "Schnellauswahl" - a compact one-tap "Erledigt" bar for tasks
-    // marked as favorites (see CONF_TASK_FAVORITE in const.py, and the star
-    // toggle on each task row above), so the household's most-used chores
-    // don't need to be found/scrolled to in the full list every time. Reuses
-    // the same "complete-task" action as the full list's "Erledigt" button -
-    // it's the exact same completion, just reachable in one tap - so no new
-    // service call or permission rule is needed here. Shown to every user,
-    // including a "child" (same as the full task list's own "Erledigt"
-    // button), independent of the member-filter chips above, which only
-    // affect the full list below.  A favorite that's already resolved (done/
-    // idle/awaiting a parent's confirmation) or is a checklist (which can
-    // only be completed by checking off its sub-items, see the disabled
-    // "Erledigt" button in _renderTaskList) is skipped - there's nothing
-    // useful to quick-complete for either.
-    _renderFavoritesQuickBar() {
-      const favoriteIds = Object.keys(this._tasks).filter((id) => this._tasks[id].favorite);
-      if (!favoriteIds.length) return "";
-      const chips = favoriteIds
-        .map((id) => {
-          const task = this._tasks[id];
-          const status = this._statusStateForTask(id)?.state ?? "pending";
-          const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
-          const isChecklist = task.kind === "checklist";
-          return `
-            <button class="favorite-chip" data-action="complete-task" data-task-id="${id}" ${resolved || isChecklist ? "disabled" : ""}>
-              ${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon>` : "★"} ${esc(task.name)}
-            </button>`;
-        })
-        .join("");
+    // v0.17: parent-only "Favoriten" section - a reusable task-template
+    // catalog (family_tasks/favorite/*, see the file header comment above
+    // and FavoriteStorageCollection in storage.py). Structurally mirrors
+    // _renderRewardsSection below (a small parent-maintained list with
+    // Bearbeiten/Löschen, plus a "+ ... hinzufügen" button), not the old
+    // v0.16 quick-complete bar this replaces - the primary action per row is
+    // "Aufgabe erstellen" (family_tasks/favorite/instantiate), not
+    // "Erledigt". Never rendered at all for a non-parent (canManageFavorites
+    // false) - unlike the reward catalog, there is nothing here for a child
+    // to see or use, so the whole section (including the ability to
+    // instantiate) is admin/parent-only, not just management.
+    _renderFavoritesSection(canManageFavorites) {
+      if (!canManageFavorites) return "";
+      const favoriteIds = Object.keys(this._favorites).sort((a, b) =>
+        (this._favorites[a].name ?? "").localeCompare(this._favorites[b].name ?? "", "de", { sensitivity: "base" })
+      );
+      const list = favoriteIds.length
+        ? `<div class="list">${favoriteIds
+            .map((id) => {
+              const f = this._favorites[id];
+              const memberName = f.member_id ? this._memberName(f.member_id) : null;
+              const detailParts = [pointsLabel(f.points ?? 0)];
+              if (memberName) detailParts.push(memberName);
+              if (f.kind === "checklist") detailParts.push("Checkliste");
+              if (f.kind === "mandatory") detailParts.push("Pflichtaufgabe");
+              return `
+                <div class="row">
+                  <div class="row-main">
+                    <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}</span>
+                    <span class="muted">${esc(detailParts.join(" · "))}</span>
+                  </div>
+                  <div class="row-actions">
+                    <button data-action="instantiate-favorite" data-favorite-id="${id}">Aufgabe erstellen</button>
+                    <button data-action="edit-favorite" data-favorite-id="${id}">Bearbeiten</button>
+                    <button data-action="delete-favorite" data-favorite-id="${id}" class="danger">Löschen</button>
+                  </div>
+                </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="muted">Noch keine Favoriten angelegt.</p>`;
       return `
         <div class="section-header"><h4>Favoriten</h4></div>
-        <div class="favorites-bar">${chips}</div>`;
+        ${list}
+        <button class="add" data-action="new-favorite">+ Favorit hinzufügen</button>`;
     }
 
     _renderMemberList(canManageMembers) {
@@ -1785,6 +1895,45 @@
           <div class="form-actions">
             <button type="submit" data-action="save-reward">Speichern</button>
             <button type="button" data-action="cancel-reward-form">Abbrechen</button>
+          </div>
+        </form>`;
+    }
+
+    // Nutzt den generischen data-field/_formSpec-Mechanismus (wie das
+    // Aufgaben-Formular), nicht das data-reward-field-Muster des
+    // Belohnungs-Formulars direkt oberhalb - dadurch funktionieren
+    // add-subtask/remove-subtask (Checkliste) hier ohne eigenen Code, siehe
+    // _formSpec/_applyFieldChange.
+    _renderFavoriteForm() {
+      const f = this._favoriteForm;
+      const memberOptions = Object.keys(this._members)
+        .map((id) => `<option value="${id}" ${f.member_id === id ? "selected" : ""}>${esc(this._members[id].name)}</option>`)
+        .join("");
+      return `
+        <form class="form" data-form="favorite">
+          <label>Name<input type="text" data-field="name" placeholder="z. B. Auto waschen" value="${esc(f.name)}" required></label>
+          <div class="grid2">
+            <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
+            <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:car-wash" value="${esc(f.icon)}"></label>
+          </div>
+          <label>Fester Zuständiger (optional)
+            <select data-field="member_id">
+              <option value="">Kein fester Zuständiger</option>
+              ${memberOptions}
+            </select>
+          </label>
+          <label>Aufgabentyp
+            <select data-field="kind">
+              <option value="standard" ${f.kind !== "checklist" && f.kind !== "mandatory" ? "selected" : ""}>Standard</option>
+              <option value="checklist" ${f.kind === "checklist" ? "selected" : ""}>Checkliste</option>
+              <option value="mandatory" ${f.kind === "mandatory" ? "selected" : ""}>Pflichtaufgabe</option>
+            </select>
+          </label>
+          ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
+          <p class="muted">Jede daraus erstellte Aufgabe ist immer einmalig (keine Wiederholung, keine Rotation) und offen, nicht bereits erledigt.</p>
+          <div class="form-actions">
+            <button type="submit" data-action="save-favorite">Speichern</button>
+            <button type="button" data-action="cancel-favorite-form">Abbrechen</button>
           </div>
         </form>`;
     }
@@ -2165,14 +2314,6 @@
                background: var(--secondary-background-color, #f2f2f2); color: var(--secondary-text-color);
                cursor: pointer; }
         .chip-filter.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
-        /* Favoriten-Schnellauswahl (v0.16): kompakte Ein-Tipp-"Erledigt"-Leiste
-           über der vollen Aufgabenliste, siehe _renderFavoritesQuickBar. */
-        .favorites-bar { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 12px; }
-        .favorite-chip { display: inline-flex; align-items: center; gap: 4px; border-radius: 14px;
-               padding: 6px 12px; font-size: 0.85em; }
-        .favorite-chip ha-icon { --mdc-icon-size: 16px; }
-        .favorite-toggle { background: none; padding: 2px 4px; color: var(--secondary-text-color); }
-        .favorite-toggle.is-favorite { color: var(--warning-color, #ff9800); }
         .rank { width: 22px; text-align: center; font-weight: 500; color: var(--secondary-text-color); flex-shrink: 0; }
         .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
         .points { font-size: 0.85em; color: var(--secondary-text-color); flex-shrink: 0; }
@@ -2213,6 +2354,7 @@
           member: () => this._saveMember(),
           "own-task": () => this._saveOwnTask(),
           reward: () => this._saveReward(),
+          favorite: () => this._saveFavorite(),
         };
         // .catch(() => {}) (v0.16): the alert() feedback for a rejected
         // callWS already happens inside _callWS/_saveXxx - this just keeps a
@@ -2237,16 +2379,6 @@
         else if (action === "cancel-task-form") this._closeTaskForm();
         else if (action === "edit-task") { if (this._isAdmin()) this._openTaskForm(el.dataset.taskId); }
         else if (action === "delete-task") { if (this._isAdmin()) this._deleteTask(el.dataset.taskId)?.catch(() => {}); }
-        else if (action === "toggle-favorite") {
-          if (this._isAdmin()) {
-            const task = this._tasks[el.dataset.taskId];
-            this._callWS({
-              type: "family_tasks/task/update",
-              task_id: el.dataset.taskId,
-              favorite: !task?.favorite,
-            })?.catch(() => {});
-          }
-        }
         else if (action === "complete-task")
           this._hass.callService("family_tasks", "complete_task", { task_id: el.dataset.taskId });
         else if (action === "skip-task")
@@ -2300,6 +2432,19 @@
           this._hideFulfilled = !this._hideFulfilled;
           this._saveUiState();
           this._render();
+        } else if (action === "new-favorite") {
+          // Defense-in-depth, same reasoning as new-reward/new-member above -
+          // the backend enforces this too regardless (see
+          // FavoriteStorageCollectionWebsocket in storage.py).
+          if (this._isAdmin() && !this._isChildUser()) this._openFavoriteForm(null);
+        } else if (action === "edit-favorite") {
+          if (this._isAdmin() && !this._isChildUser()) this._openFavoriteForm(el.dataset.favoriteId);
+        } else if (action === "cancel-favorite-form") {
+          this._closeFavoriteForm();
+        } else if (action === "delete-favorite") {
+          if (this._isAdmin() && !this._isChildUser()) this._deleteFavorite(el.dataset.favoriteId)?.catch(() => {});
+        } else if (action === "instantiate-favorite") {
+          if (this._isAdmin() && !this._isChildUser()) this._instantiateFavorite(el.dataset.favoriteId)?.catch(() => {});
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.
@@ -2389,6 +2534,7 @@
         task: { target: this._taskForm, render: () => this._renderTaskForm() },
         member: { target: this._memberForm, render: () => this._renderMemberForm() },
         "own-task": { target: this._ownTaskForm, render: () => this._renderOwnTaskForm() },
+        favorite: { target: this._favoriteForm, render: () => this._renderFavoriteForm() },
       };
       return specs[name];
     }
