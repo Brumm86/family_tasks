@@ -200,7 +200,7 @@ CONF_COMPLETION_BUTTON_ENTITY_ID: Final = "completion_button_entity_id"
 # v0.17: replaces the v0.16 "pin an existing task" star toggle entirely (that
 # field, CONF_TASK_FAVORITE, is gone). A "Favorit" is now an independent,
 # reusable *template* (see FavoriteStorageCollection in storage.py) a parent
-# maintains - name, points, optional fixed assignee, task kind - separate
+# maintains - name, points, optional fixed assignee(s), task kind - separate
 # from the tasks collection itself. It exists for chores that recur
 # irregularly (e.g. "Auto waschen", "Keller aufräumen"): setting one up as a
 # real recurring task makes no sense (there is no fixed schedule to hang a

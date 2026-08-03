@@ -419,11 +419,14 @@ FAVORITE_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
     vol.Optional("points", default=0): vol.All(int, vol.Range(min=0)),
-    # Fixed assignee every task created from this favorite gets (rotation
-    # forced to a single fixed member, mirroring ws_create_own_task's
-    # "rotation" below) - absent means "no fixed assignee", same as an
-    # admin-created task with nobody checked under "Rotation".
-    vol.Optional("member_id"): str,
+    # Fixed assignee(s) every task created from this favorite gets - rotation
+    # forced to ROTATION_STRATEGY_FIXED with these members, exactly like an
+    # admin-created task with "Fest zugewiesen" and more than one member
+    # checked (shared, all simultaneously assigned - see the "Aufgaben-Filter
+    # nach Familienmitglied" note in family-tasks-card.js). An empty list
+    # means "no fixed assignee", same as an admin-created task with nobody
+    # checked under "Rotation".
+    vol.Optional("member_ids", default=list): [str],
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
 }
@@ -432,10 +435,7 @@ FAVORITE_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("name"): str,
     vol.Optional("icon"): str,
     vol.Optional("points"): vol.All(int, vol.Range(min=0)),
-    # Explicitly setting this to null clears a previously set fixed assignee -
-    # same "clear via null" pattern used elsewhere in this module (see
-    # BatteryOverrideStorageCollection's "threshold").
-    vol.Optional("member_id"): vol.Any(None, str),
+    vol.Optional("member_ids"): [str],
     vol.Optional("kind"): vol.In(TASK_KINDS),
     vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
 }
@@ -461,9 +461,12 @@ class FavoriteStorageCollection(collection.DictStorageCollection):
 
     async def _update_data(self, item: dict, update_data: dict) -> dict:
         validated = self.UPDATE_SCHEMA(update_data)
+        # "member_ids" is a plain list field (unlike e.g. a nested
+        # recurrence/rotation dict elsewhere in this module) - a full replace
+        # via the dict spread is exactly right here: sending an empty list
+        # clears all fixed assignees, same as unchecking every member in the
+        # card's favorite form.
         updated = {**item, **validated}
-        if "member_id" in validated and validated["member_id"] is None:
-            updated.pop("member_id", None)
         if updated.get("kind") == TASK_KIND_CHECKLIST and not updated.get("subtasks"):
             raise vol.Invalid(
                 "Eine Checklisten-Favoriten-Vorlage braucht mindestens eine Unteraufgabe."
@@ -1236,7 +1239,6 @@ def async_setup_websocket_api(
             )
             return
 
-        member_id = favorite.get("member_id")
         task_data: dict[str, Any] = {
             "name": favorite["name"],
             "points": favorite.get("points", 0),
@@ -1245,8 +1247,12 @@ def async_setup_websocket_api(
             # in const.py. TaskStorageCollection._process_create_data fills in
             # "anchor_date" (today) since it's absent here.
             "recurrence": {"type": RECURRENCE_ONCE},
+            # ROTATION_STRATEGY_FIXED with the favorite's member_ids as-is -
+            # zero, one, or several members, exactly like an admin-created
+            # task's own "Fest zugewiesen" rotation (several means shared,
+            # all simultaneously assigned, not "pick one").
             "rotation": {
-                "member_ids": [member_id] if member_id else [],
+                "member_ids": list(favorite.get("member_ids") or []),
                 "strategy": ROTATION_STRATEGY_FIXED,
             },
             "kind": favorite.get("kind", TASK_KIND_STANDARD),

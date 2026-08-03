@@ -476,7 +476,7 @@
   }
 
   function emptyFavoriteForm() {
-    return { name: "", points: 0, icon: "", member_id: "", kind: "standard", subtasks: [] };
+    return { name: "", points: 0, icon: "", member_ids: [], kind: "standard", subtasks: [] };
   }
 
   function favoriteToForm(favorite) {
@@ -484,7 +484,7 @@
       name: favorite?.name ?? "",
       points: favorite?.points ?? 0,
       icon: favorite?.icon ?? "",
-      member_id: favorite?.member_id ?? "",
+      member_ids: [...(favorite?.member_ids ?? [])],
       kind: favorite?.kind ?? "standard",
       subtasks: (favorite?.subtasks ?? []).map((s) => ({ ...s })),
     };
@@ -1278,19 +1278,11 @@
         name: f.name.trim(),
         points: Math.max(0, Number(f.points) || 0),
         kind: f.kind === "checklist" || f.kind === "mandatory" ? f.kind : "standard",
+        member_ids: [...f.member_ids],
       };
       if (f.icon) payload.icon = f.icon.trim();
       if (f.kind === "checklist") {
         payload.subtasks = f.subtasks.map((s) => ({ id: s.id, name: s.name.trim() })).filter((s) => s.name);
-      }
-      // Kein fester Zuständiger ausgewählt -> beim Bearbeiten muss ein zuvor
-      // gesetzter Wert per explizitem null gelöscht werden (siehe "member_id"
-      // in FAVORITE_UPDATE_SCHEMA, storage.py); beim Neuanlegen reicht das
-      // Weglassen des Felds.
-      if (f.member_id) {
-        payload.member_id = f.member_id;
-      } else if (this._editingFavoriteId) {
-        payload.member_id = null;
       }
       if (this._editingFavoriteId) {
         await this._callWS({
@@ -1654,9 +1646,9 @@
         ? `<div class="list">${favoriteIds
             .map((id) => {
               const f = this._favorites[id];
-              const memberName = f.member_id ? this._memberName(f.member_id) : null;
+              const memberNames = (f.member_ids ?? []).map((mid) => this._memberName(mid)).join(", ");
               const detailParts = [pointsLabel(f.points ?? 0)];
-              if (memberName) detailParts.push(memberName);
+              if (memberNames) detailParts.push(memberNames);
               if (f.kind === "checklist") detailParts.push("Checkliste");
               if (f.kind === "mandatory") detailParts.push("Pflichtaufgabe");
               return `
@@ -1906,9 +1898,12 @@
     // _formSpec/_applyFieldChange.
     _renderFavoriteForm() {
       const f = this._favoriteForm;
-      const memberOptions = Object.keys(this._members)
-        .map((id) => `<option value="${id}" ${f.member_id === id ? "selected" : ""}>${esc(this._members[id].name)}</option>`)
-        .join("");
+      const memberCheckboxes = Object.keys(this._members)
+        .map((id) => {
+          const checked = f.member_ids.includes(id) ? "checked" : "";
+          return `<label class="chip"><input type="checkbox" data-field="member_ids" value="${id}" ${checked}> ${esc(this._members[id].name)}</label>`;
+        })
+        .join("") || `<p class="muted">Erst Familienmitglieder anlegen.</p>`;
       return `
         <form class="form" data-form="favorite">
           <label>Name<input type="text" data-field="name" placeholder="z. B. Auto waschen" value="${esc(f.name)}" required></label>
@@ -1916,12 +1911,8 @@
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
             <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:car-wash" value="${esc(f.icon)}"></label>
           </div>
-          <label>Fester Zuständiger (optional)
-            <select data-field="member_id">
-              <option value="">Kein fester Zuständiger</option>
-              ${memberOptions}
-            </select>
-          </label>
+          <label>Fest zugewiesen an (optional, mehrere möglich)</label>
+          <div class="chips">${memberCheckboxes}</div>
           <label>Aufgabentyp
             <select data-field="kind">
               <option value="standard" ${f.kind !== "checklist" && f.kind !== "mandatory" ? "selected" : ""}>Standard</option>
@@ -1930,7 +1921,7 @@
             </select>
           </label>
           ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
-          <p class="muted">Jede daraus erstellte Aufgabe ist immer einmalig (keine Wiederholung, keine Rotation) und offen, nicht bereits erledigt.</p>
+          <p class="muted">Jede daraus erstellte Aufgabe ist immer einmalig (keine Wiederholung) und offen, nicht bereits erledigt.</p>
           <div class="form-actions">
             <button type="submit" data-action="save-favorite">Speichern</button>
             <button type="button" data-action="cancel-favorite-form">Abbrechen</button>
@@ -2552,7 +2543,12 @@
         return;
       }
       if (leaf === "member_ids") {
-        const list = target.rotation.member_ids;
+        // Generic parent lookup (not hardcoded to target.rotation) so this
+        // works both for the task form's "rotation.member_ids" and the
+        // favorite form's flat "member_ids" (see _renderFavoriteForm).
+        let parent = target;
+        for (let i = 0; i < path.length - 1; i++) parent = parent[path[i]];
+        const list = parent.member_ids;
         const pos = list.indexOf(el.value);
         if (el.checked && pos === -1) list.push(el.value);
         if (!el.checked && pos !== -1) list.splice(pos, 1);
