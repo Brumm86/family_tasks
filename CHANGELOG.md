@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.20.0] - 2026-08-03
+
+### Fixed
+- **Aufgaben-Buttons überlagerten auf schmalen Bildschirmen den Aufgabennamen**: `.row-actions` (Erledigt/Überspringen/Bearbeiten/Löschen) brach zwar per `flex-wrap` intern um, blieb dabei aber in derselben Zeile wie `.row-main` - auf einem Handy reichte die Zeilenbreite dafür nicht, wodurch die umgebrochenen Buttons direkt über Name/Details zu liegen kamen. Unterhalb von 480px Breite bricht `.row` jetzt komplett um: `.row-main` nimmt die volle Zeile ein, `.row-actions` rutscht in eine eigene Zeile darunter und stellt ihre Buttons zusätzlich untereinander (volle Breite, eine Spalte) statt nebeneinander dar.
+
 ## [0.19.0] - 2026-08-03
 
 ### Added

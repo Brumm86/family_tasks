@@ -2297,6 +2297,23 @@
            space-between consistent across every row. */
         .row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
         .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+        /* v0.20: auf schmalen (Handy-)Bildschirmen reichte die Zeilenbreite
+           nicht für Name/Details UND alle Aktions-Buttons nebeneinander -
+           .row-actions brach zwar selbst per flex-wrap um, blieb dabei aber
+           in derselben Zeile wie .row-main, wodurch die umgebrochenen
+           Buttons direkt über dem Namen/den Details saßen und die Schrift
+           überlagerten. Unterhalb von 480px bricht .row deshalb komplett um:
+           .row-main nimmt die volle Zeilenbreite ein, .row-actions rutscht
+           in eine eigene Zeile darunter und ordnet ihre Buttons zusätzlich
+           untereinander (statt nebeneinander) an, damit auch vier Buttons
+           (Erledigt/Überspringen/Bearbeiten/Löschen) nie wieder über den
+           Text ragen. */
+        @media (max-width: 480px) {
+          .row { flex-wrap: wrap; }
+          .row-main { flex-basis: 100%; }
+          .row-actions { flex-basis: 100%; flex-direction: column; align-items: stretch; justify-content: flex-start; }
+          .row-actions button { width: 100%; }
+        }
         .subtask-list { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 4px 24px; }
         .subtask-item { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 0.9em; }
         .subtask-item.checked .subtask-name { text-decoration: line-through; opacity: 0.6; }
