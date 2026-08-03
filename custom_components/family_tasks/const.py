@@ -169,12 +169,16 @@ CONF_MEMBER_REWARDS_OPT_IN: Final = "participates_in_rewards"
 
 # v0.14: optional notify.* service (just the part after "notify.", e.g.
 # "mobile_app_pixel_8") this member's phone actually reads pushes from. See
-# EVENT_TASK_ASSIGNED below - a plain persistent_notification.create is always
-# raised too, but that only ever shows up inside Home Assistant's own
-# frontend/companion-app notification panel, not as a real push notification
-# on the phone's lock screen; only calling this member's own notify.* service
-# does that, which needs the Home Assistant Companion App set up on their
-# phone and its notify service name filled in here.
+# EVENT_TASK_ASSIGNED below - a plain persistent_notification.create is
+# raised as a fallback whenever this is *not* set, since that's the only
+# notification channel available then, but it only ever shows up inside Home
+# Assistant's own frontend/companion-app notification panel, not as a real
+# push notification on the phone's lock screen. Once this is set, the
+# integration calls this member's own notify.* service instead (needs the
+# Home Assistant Companion App set up on their phone and its notify service
+# name filled in here) and no longer also raises the persistent_notification
+# for them (v0.16 - it used to fire unconditionally alongside notify.*,
+# duplicating every notification once real push was configured).
 CONF_MEMBER_NOTIFY_SERVICE: Final = "notify_service"
 
 # Per-task override of whether a child's completion needs parental sign-off
@@ -192,6 +196,16 @@ CONF_TASK_REQUIRES_CONFIRMATION: Final = "requires_confirmation"
 # case the card currently offers it for. See
 # FamilyTasksCoordinator._async_press_completion_button in coordinator.py.
 CONF_COMPLETION_BUTTON_ENTITY_ID: Final = "completion_button_entity_id"
+
+# v0.16: whether a task is pinned to the card's "Favoriten" quick-select bar
+# (family-tasks-card.js) - a plain per-task bool, toggled the same way any
+# other task field is (family_tasks/task/update), no separate storage
+# collection needed. Purely a display/shortcut concern, doesn't affect
+# rotation, points, or due-state - a favorited task still follows its normal
+# recurrence/rotation, it's just additionally reachable via the quick-select
+# bar without scrolling the full task list. Defaults to False so every
+# existing task keeps behaving exactly as before this field was introduced.
+CONF_TASK_FAVORITE: Final = "favorite"
 
 # --- Task kinds / checklists --------------------------------------------------
 #
@@ -347,11 +361,11 @@ EVENT_REWARD_REDEEMED: Final = f"{DOMAIN}_reward_redeemed"
 # to it (member_id/member_name/task_id/task_name) - covers a task an admin
 # creates by hand as well as an auto-generated one (parent-confirmation,
 # battery alert). Same extension-point pattern as EVENT_REWARD_REDEEMED: the
-# integration itself only ever raises a plain persistent_notification (see
-# CONF_MEMBER_NOTIFY_SERVICE above) and fires this event - a household's own
-# automation can additionally react to it however it likes (a different
-# notify target, a TTS announcement, etc.) without the integration having to
-# know about any of that.
+# integration itself only ever raises a persistent_notification or calls the
+# member's notify.* service (see CONF_MEMBER_NOTIFY_SERVICE above) and fires
+# this event - a household's own automation can additionally react to it
+# however it likes (a different notify target, a TTS announcement, etc.)
+# without the integration having to know about any of that.
 EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
 
 # --- Coordinator --------------------------------------------------------------

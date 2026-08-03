@@ -34,6 +34,7 @@ from .const import (
     CONF_REWARD_SCREEN_TIME_INVESTABLE,
     CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_TASK_FAVORITE,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
@@ -213,6 +214,8 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     # See TASK_KIND_CHECKLIST in const.py.
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+    # See CONF_TASK_FAVORITE in const.py.
+    vol.Optional(CONF_TASK_FAVORITE, default=False): bool,
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -231,6 +234,7 @@ TASK_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_COMPLETION_BUTTON_ENTITY_ID): vol.Any(None, cv.entity_id),
     vol.Optional("kind"): vol.In(TASK_KINDS),
     vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+    vol.Optional(CONF_TASK_FAVORITE): bool,
 }
 
 MEMBER_CREATE_SCHEMA: collection.VolDictType = {
@@ -429,7 +433,7 @@ REWARD_UPDATE_SCHEMA: collection.VolDictType = {
     # "clear via null" pattern as BatteryOverrideStorageCollection's
     # "threshold" below.
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.Any(
-        None, vol.All(int, vol.Range(min=1))
+        None, vol.All(vol.Coerce(int), vol.Range(min=1))
     ),
     vol.Optional(CONF_REWARD_AUTO_FULFILL): bool,
     vol.Optional(CONF_REWARD_SCREEN_TIME_INVESTABLE): bool,
@@ -494,7 +498,22 @@ REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("reward_name"): str,
     vol.Required("points_cost"): vol.All(int, vol.Range(min=0)),
     vol.Optional("fulfilled", default=False): bool,
-    vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
+    # vol.Coerce(int), not a bare int (v0.16 fix): for a
+    # CONF_REWARD_SCREEN_TIME_INVESTABLE redemption this value is computed
+    # below as points_invested * the household's "Handyzeit-Minuten pro
+    # investiertem Punkt" bonus factor (CONF_SCREEN_TIME_MINUTES_PER_POINT) -
+    # and that factor comes back from the Options flow's NumberSelector as a
+    # Python float (e.g. 2.0), even when the admin only ever typed a whole
+    # number. A bare `int` schema entry does an isinstance() check, not a
+    # conversion, so it rejected that float outright with ERR_INVALID_FORMAT -
+    # silently, since the card's _confirmRedeem never surfaces a failed
+    # callWS to the user (see the confirm-redeem fix in
+    # family-tasks-card.js), so redeeming an investable Handyzeit reward
+    # looked like the "Bestätigen" button simply did nothing. See
+    # ws_redeem_reward below, which now also explicitly casts to int as the
+    # actual fix; Coerce here is defense in depth so a future numeric drift
+    # like this fails obviously instead of silently again.
+    vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(vol.Coerce(int), vol.Range(min=1)),
     # v0.14: how many points the member chose to invest, only present for a
     # CONF_REWARD_SCREEN_TIME_INVESTABLE redemption - see ws_redeem_reward.
     # For that kind of redemption this is the same number as "points_cost"
@@ -931,7 +950,16 @@ def async_setup_websocket_api(
                 if entry is not None
                 else DEFAULT_SCREEN_TIME_MINUTES_PER_POINT
             )
-            screen_time_minutes = points_invested * bonus_per_point
+            # int(), not just the raw product (v0.16 fix): the Options flow's
+            # NumberSelector always returns bonus_per_point as a Python float
+            # (e.g. 2.0) once an admin has ever saved the integration's
+            # options, even for a whole number - so this product came out as
+            # a float too, which REWARD_REDEMPTION_CREATE_SCHEMA's
+            # screen_time_minutes field then rejected (see the schema
+            # comment above), making every investable-reward redemption fail
+            # silently. Rounding first avoids truncating down on a
+            # non-integer bonus factor (e.g. 1.5 min/point).
+            screen_time_minutes = int(round(points_invested * bonus_per_point))
         else:
             points_cost = reward.get("points_cost", 0)
 

@@ -214,25 +214,25 @@ async def _async_notify_member(
 ) -> None:
     """Best-effort notify one member that a new task now involves them.
 
-    Two channels, same reasoning as CONF_MEMBER_NOTIFY_SERVICE in const.py:
-    a persistent_notification is always raised (visible inside Home
-    Assistant's own frontend/companion-app notification panel), but that
-    alone never reaches the phone as an actual push notification - only
-    calling the member's own configured notify.* service (Home Assistant
-    Companion App) does that, so it's used in addition whenever set.
-    EVENT_TASK_ASSIGNED fires unconditionally on top, for a household that
-    wants to react some other way entirely (same extension-point pattern as
+    Two channels, same reasoning as CONF_MEMBER_NOTIFY_SERVICE in const.py -
+    but only one of them ever fires for a given member (v0.16 change): a
+    persistent_notification is only raised as a *fallback* now, for a member
+    with no notify_service configured, instead of unconditionally. Calling
+    the member's own configured notify.* service (Home Assistant Companion
+    App) is what actually reaches their phone as a real push notification;
+    additionally raising a persistent_notification for that same member just
+    duplicated it a second time inside Home Assistant's own frontend/
+    companion-app notification panel, which is exactly the "shows up twice"
+    complaint this fixes - once push is set up for someone, Home Assistant's
+    own notification list should stay quiet for them. A member with no
+    notify_service still gets the persistent_notification as before, since
+    that's the only channel they have. EVENT_TASK_ASSIGNED fires
+    unconditionally on top either way, for a household that wants to react
+    some other way entirely (same extension-point pattern as
     EVENT_REWARD_REDEEMED).
     """
     title = "Family Tasks"
     message = f"Neue Aufgabe: {task_name}"
-
-    try:
-        persistent_notification.async_create(
-            hass, message, title=title, notification_id=f"{DOMAIN}_task_{task_id}_{member_id}"
-        )
-    except Exception as err:  # noqa: BLE001 - best-effort, must never block task creation
-        _LOGGER.warning("Failed to raise persistent notification for %s: %s", member_id, err)
 
     notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
     if notify_service:
@@ -242,6 +242,13 @@ async def _async_notify_member(
             )
         except HomeAssistantError as err:
             _LOGGER.warning("Failed to call notify.%s for %s: %s", notify_service, member_id, err)
+    else:
+        try:
+            persistent_notification.async_create(
+                hass, message, title=title, notification_id=f"{DOMAIN}_task_{task_id}_{member_id}"
+            )
+        except Exception as err:  # noqa: BLE001 - best-effort, must never block task creation
+            _LOGGER.warning("Failed to raise persistent notification for %s: %s", member_id, err)
 
     hass.bus.async_fire(
         EVENT_TASK_ASSIGNED,

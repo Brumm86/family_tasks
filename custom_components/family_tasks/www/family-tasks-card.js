@@ -30,19 +30,23 @@
  *                               section - heading, list, and the "+
  *                               Mitglied hinzufügen" button - is hidden, not
  *                               just the list.
- *   only_own_tasks: false    - initial value for the "Nur eigene Aufgaben"
- *                               toggle (same first-run-only rule as above).
- *                               Filters the task list down to occurrences
- *                               assigned to whichever family member is
- *                               linked (via the "person" integration) to the
- *                               logged-in HA user - plus, for a task whose
- *                               rotation is "fest zugewiesen" (fixed) with
- *                               more than one member selected, every one of
- *                               those members (a fixed multi-assignee task
- *                               never rotates, so it's shared rather than
- *                               "currently belonging" to just one of them).
- *                               Any other rotation option only ever shows
- *                               the task to whoever is currently responsible.
+ *   only_own_tasks: false    - initial value for the member-filter chips atop
+ *                               the "Aufgaben" section (same first-run-only
+ *                               rule as above) - `false` starts on the "Alle"
+ *                               chip, anything else starts on whichever chip
+ *                               matches the logged-in user's own linked
+ *                               family member (see the "Aufgaben-Filter nach
+ *                               Familienmitglied" note below for how that
+ *                               resolves and how a manual chip pick differs).
+ *                               For a task whose rotation is "fest
+ *                               zugewiesen" (fixed) with more than one member
+ *                               selected, "own tasks" additionally includes
+ *                               every one of those members (a fixed
+ *                               multi-assignee task never rotates, so it's
+ *                               shared rather than "currently belonging" to
+ *                               just one of them). Any other rotation option
+ *                               only ever shows the task to whoever is
+ *                               currently responsible.
  *   hide_battery_section: false - initial value for the "Batterien"
  *                               visibility toggle (same first-run-only rule
  *                               as above). That section is configuration-only
@@ -167,17 +171,47 @@
  * so a dashboard needed two cards to get the full picture. Folded back into
  * this single card so only one Lovelace card type exists - a new "Bestenliste"
  * section (below the task list, above "Batterien"/"Familienmitglieder") shows
- * the points ranking with switchable "Woche"/"Monat" tabs plus the reward
- * catalog, redeem flow, and redemption history, unchanged in behavior from
- * the old standalone card: every family member's points_week/points_month
- * sensor attribute drives the ranking, points_available drives the reward
- * balance/affordability, and CRUD on the catalog
+ * the points ranking plus the reward catalog, redeem flow, and redemption
+ * history, unchanged in behavior from the old standalone card: every family
+ * member's points_week sensor attribute drives the ranking, points_available
+ * drives the reward balance/affordability, and CRUD on the catalog
  * (family_tasks/reward/*)/redemptions (family_tasks/reward_redemption/*)
  * follows the exact same admin/child rules as tasks and members elsewhere in
  * this card. This section is always visible to everyone, including a "Kind"-
  * linked user (who needs to see and redeem rewards, not just configure
  * something) - unlike "Familienmitglieder"/"Batterien" it has no
- * show/hide toggle of its own.
+ * show/hide toggle of its own. v0.16 removes the "Woche"/"Monat" tab switcher
+ * that used to sit above the ranking - it always ranks by points_week now,
+ * so points_month is no longer read by this card at all (the sensor
+ * attribute itself is untouched, just unused here).
+ *
+ * Aufgaben-Filter nach Familienmitglied (v0.16): the "Aufgaben" section's
+ * header now shows a row of filter chips - "Alle" plus one per family
+ * member - replacing the old plain "Nur eigene Aufgaben"/"Alle Aufgaben
+ * anzeigen" toggle button. Clicking a member's chip narrows the task list to
+ * occurrences currently assigned to them (see only_own_tasks above for the
+ * exact "currently assigned" rule, including the fixed-multi-assignee
+ * carve-out); "Alle" clears the filter. Same first-run default as before
+ * (whichever member is linked to the logged-in user, unless only_own_tasks
+ * is explicitly `false`), same admin/parent-only visibility (never rendered
+ * for a "child" user, whose list is always forced to their own tasks
+ * regardless - see _effectiveTaskMemberFilterId). Persisted per device like
+ * the other toggles.
+ *
+ * Aufgaben-Favoriten (v0.16): any task can be pinned via a small star toggle
+ * (☆/★) next to its "Erledigt"/"Bearbeiten" buttons - admin-only, like
+ * editing/deleting a task, since it's a shared household setting rather than
+ * a personal one (CONF_TASK_FAVORITE in const.py, plain bool on the task
+ * item, toggled through the normal family_tasks/task/update command). Every
+ * favorited task additionally shows up in a compact "Favoriten" quick-select
+ * bar just above the full task list - visible to everyone, including a
+ * "child" user - where a single tap completes it directly (reuses the exact
+ * same "complete-task" action/service call as the full list's own
+ * "Erledigt" button), without having to find it in a potentially long,
+ * filtered task list first. A favorite that's already resolved (done/idle/
+ * awaiting confirmation) or is a checklist task (which can only be completed
+ * by checking off its sub-items) is left out of the quick-select bar, since
+ * there's nothing useful to one-tap-complete for either.
  *
  * Checklist display (v0.12): a checklist task's sub-items are now sorted
  * alphabetically for display - open items first (alphabetically among
@@ -192,6 +226,17 @@
  * checklist task in quick succession could leave some of them showing as
  * still unchecked even after things had settled - see the last_updated vs.
  * last_changed note on _relevantStatesSignature below.
+ *
+ * Also v0.16: fixed the Bestenliste's name/points columns not lining up
+ * between rows (a name-length-dependent misalignment caused by .row-main not
+ * filling the row - see the flex: 1 comment on that CSS rule in _styles);
+ * fixed redeeming an investable Handyzeit reward's "Bestätigen" button
+ * silently doing nothing (a backend schema/type bug - see the
+ * screen_time_minutes comments in storage.py's REWARD_REDEMPTION_CREATE_SCHEMA
+ * and ws_redeem_reward); and every backend-mutating action in this card
+ * (task/member/reward/battery-override CRUD, redeeming, marking a redemption
+ * fulfilled) now surfaces a rejected call via alert() instead of failing
+ * silently - see _callWS.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -250,13 +295,6 @@
   const MEMBER_ROLE_LABELS = {
     parent: "Elternteil",
     child: "Kind (Aufgaben brauchen Eltern-Bestätigung)",
-  };
-
-  // Bestenliste/Belohnungen (v0.15, gemerged aus family-tasks-leaderboard-card.js
-  // - siehe den "Bestenliste & Belohnungen" Abschnitt im Datei-Header oben).
-  const VIEWS = {
-    week: { label: "Woche", attr: "points_week" },
-    month: { label: "Monat", attr: "points_month" },
   };
 
   function esc(value) {
@@ -461,10 +499,13 @@
       this._hideMembers = undefined;
       this._hideBattery = undefined;
       this._controlsHidden = undefined;
-      this._onlyOwnTasks = undefined;
-      // Bestenliste/Belohnungen state (v0.15, gemerged aus
-      // family-tasks-leaderboard-card.js).
-      this._view = undefined;
+      // Aufgaben-Filter nach Familienmitglied (v0.16, ersetzt das frühere
+      // reine An/Aus von "Nur eigene Aufgaben"): null = "Alle", "own" =
+      // Sentinel für "wer auch immer gerade eingeloggt ist" (der Default,
+      // löst sich bei jedem Rendern neu über _currentMemberId() auf, siehe
+      // _renderTaskList), oder eine konkrete Mitglieds-ID, sobald jemand
+      // gezielt einen der Filter-Chips oben in der Aufgaben-Karte anklickt.
+      this._taskMemberFilter = undefined;
       this._rewardFormOpen = false;
       this._editingRewardId = null;
       this._rewardForm = emptyRewardForm();
@@ -500,14 +541,18 @@
         this._hideMembers = saved?.hideMembers ?? this._config.hide_members_list !== false;
         this._hideBattery = saved?.hideBattery ?? this._config.hide_battery_section !== false;
         this._controlsHidden = saved?.controlsHidden ?? false;
-        this._onlyOwnTasks = saved?.onlyOwnTasks ?? this._config.only_own_tasks !== false;
-        // Bestenliste/Belohnungen (v0.15): "Woche"/"Monat" defaults to "week"
-        // like the old standalone leaderboard card did (default_view config
-        // option is intentionally not carried over - both cards' configs
-        // used to be independent, this one just reuses the same first-run/
-        // persisted pattern the other toggles above already follow).
-        const initialView = saved?.view ?? "week";
-        this._view = VIEWS[initialView] ? initialView : "week";
+        // v0.16: replaces the old plain "Nur eigene Aufgaben"/"Alle Aufgaben
+        // anzeigen" toggle button with per-member filter chips (see
+        // _renderMemberFilterChips) - same first-run default as before
+        // (only_own_tasks !== false), just expressed as the "own" sentinel
+        // instead of a boolean, since a chip has to point at *someone*
+        // rather than just being on/off.
+        this._taskMemberFilter =
+          saved?.taskMemberFilter !== undefined
+            ? saved.taskMemberFilter
+            : this._config.only_own_tasks === false
+            ? null
+            : "own";
         // Erledigte Einlösungen sind standardmäßig ausgeblendet, wie schon in
         // der ehemals eigenständigen Bestenlisten-Karte.
         this._hideFulfilled = saved?.hideFulfilled ?? true;
@@ -542,8 +587,7 @@
             hideMembers: this._hideMembers,
             hideBattery: this._hideBattery,
             controlsHidden: this._controlsHidden,
-            onlyOwnTasks: this._onlyOwnTasks,
-            view: this._view,
+            taskMemberFilter: this._taskMemberFilter,
             hideFulfilled: this._hideFulfilled,
           })
         );
@@ -780,13 +824,15 @@
       return Number(this._pointsSensorForMember(memberId)?.attributes?.points_available ?? 0);
     }
 
+    // v0.16: always ranks by points_week now - the "Woche"/"Monat" tab
+    // switcher (and points_month) is gone, see the file header note on the
+    // Bestenliste section for why.
     _rankedMembers() {
-      const attr = VIEWS[this._view].attr;
       return Object.keys(this._members)
         .map((id) => {
           const member = this._members[id];
           const sensor = this._pointsSensorForMember(id);
-          const points = Number(sensor?.attributes?.[attr] ?? 0);
+          const points = Number(sensor?.attributes?.points_week ?? 0);
           return { id, member, points };
         })
         .filter((entry) => entry.member.active !== false)
@@ -798,6 +844,30 @@
     }
 
     // --- actions -------------------------------------------------------
+
+    // Every backend-mutating websocket call in this card goes through here
+    // (v0.16 fix) instead of calling this._hass.callWS(...) directly. Home
+    // Assistant rejects the returned promise when the backend refuses a
+    // command (bad input, insufficient permissions, a business-rule check
+    // like "not enough points") - previously nothing here ever caught that,
+    // so a rejection just aborted whichever async method was mid-flight
+    // (e.g. _confirmRedeem never reached the code that clears
+    // _pendingRedeemId and re-renders) with no feedback at all. From the
+    // user's side that looked exactly like the button they clicked - most
+    // notably "Bestätigen" on an investable Handyzeit reward, see
+    // ws_redeem_reward's screen_time_minutes computation in storage.py for
+    // the actual bug that used to trigger this - had simply done nothing.
+    // Surfacing the message via alert() at least tells the user why, and
+    // re-throwing keeps every caller's existing "stop here, don't clear
+    // form/pending state" behavior on failure.
+    async _callWS(msg) {
+      try {
+        return await this._hass.callWS(msg);
+      } catch (err) {
+        alert(err?.message || "Die Aktion konnte nicht ausgeführt werden.");
+        throw err;
+      }
+    }
 
     _openTaskForm(taskId) {
       this._editingTaskId = taskId;
@@ -914,9 +984,9 @@
       }
 
       if (this._editingTaskId) {
-        await this._hass.callWS({ type: "family_tasks/task/update", task_id: this._editingTaskId, ...payload });
+        await this._callWS({ type: "family_tasks/task/update", task_id: this._editingTaskId, ...payload });
       } else {
-        await this._hass.callWS({ type: "family_tasks/task/create", ...payload });
+        await this._callWS({ type: "family_tasks/task/create", ...payload });
       }
       this._closeTaskForm();
     }
@@ -966,14 +1036,14 @@
         payload.overdue_after_minutes = Math.max(0, Number(form.overdue_after_minutes) || 0);
       }
 
-      await this._hass.callWS({ type: "family_tasks/task/create_own", ...payload });
+      await this._callWS({ type: "family_tasks/task/create_own", ...payload });
       this._closeOwnTaskForm();
     }
 
     async _deleteTask(taskId) {
       const name = this._tasks[taskId]?.name ?? taskId;
       if (!confirm(`Aufgabe "${name}" wirklich löschen?`)) return;
-      await this._hass.callWS({ type: "family_tasks/task/delete", task_id: taskId });
+      await this._callWS({ type: "family_tasks/task/delete", task_id: taskId });
     }
 
     async _saveMember() {
@@ -998,9 +1068,9 @@
       }
 
       if (this._editingMemberId) {
-        await this._hass.callWS({ type: "family_tasks/member/update", member_id: this._editingMemberId, ...payload });
+        await this._callWS({ type: "family_tasks/member/update", member_id: this._editingMemberId, ...payload });
       } else {
-        await this._hass.callWS({ type: "family_tasks/member/create", ...payload });
+        await this._callWS({ type: "family_tasks/member/create", ...payload });
       }
       this._closeMemberForm();
     }
@@ -1008,7 +1078,7 @@
     async _deleteMember(memberId) {
       const name = this._members[memberId]?.name ?? memberId;
       if (!confirm(`Mitglied "${name}" wirklich löschen?`)) return;
-      await this._hass.callWS({ type: "family_tasks/member/delete", member_id: memberId });
+      await this._callWS({ type: "family_tasks/member/delete", member_id: memberId });
     }
 
     // Per-battery override editing ("Batterien" section): items are created
@@ -1032,12 +1102,12 @@
 
       if (existing) {
         if (isDefault) {
-          await this._hass.callWS({
+          await this._callWS({
             type: "family_tasks/battery_override/delete",
             battery_override_id: existing.id,
           });
         } else {
-          await this._hass.callWS({
+          await this._callWS({
             type: "family_tasks/battery_override/update",
             battery_override_id: existing.id,
             excluded,
@@ -1047,7 +1117,7 @@
       } else if (!isDefault) {
         const payload = { entity_id: entityId, excluded };
         if (threshold !== null) payload.threshold = threshold;
-        await this._hass.callWS({ type: "family_tasks/battery_override/create", ...payload });
+        await this._callWS({ type: "family_tasks/battery_override/create", ...payload });
       }
     }
 
@@ -1099,13 +1169,13 @@
         payload.screen_time_minutes = null;
       }
       if (this._editingRewardId) {
-        await this._hass.callWS({
+        await this._callWS({
           type: "family_tasks/reward/update",
           reward_id: this._editingRewardId,
           ...payload,
         });
       } else {
-        await this._hass.callWS({ type: "family_tasks/reward/create", ...payload });
+        await this._callWS({ type: "family_tasks/reward/create", ...payload });
       }
       this._closeRewardForm();
     }
@@ -1113,7 +1183,7 @@
     async _deleteReward(rewardId) {
       const name = this._rewards[rewardId]?.name ?? rewardId;
       if (!confirm(`Belohnung "${name}" wirklich löschen?`)) return;
-      await this._hass.callWS({ type: "family_tasks/reward/delete", reward_id: rewardId });
+      await this._callWS({ type: "family_tasks/reward/delete", reward_id: rewardId });
     }
 
     _selectReward(rewardId) {
@@ -1139,14 +1209,14 @@
       if (reward?.screen_time_investable) {
         msg.points_spent = Math.max(1, Number(this._pendingInvestPoints) || 1);
       }
-      await this._hass.callWS(msg);
+      await this._callWS(msg);
       this._pendingRedeemId = null;
       this._pendingInvestPoints = 1;
       this._render();
     }
 
     async _fulfillRedemption(redemptionId) {
-      await this._hass.callWS({
+      await this._callWS({
         type: "family_tasks/reward_redemption/update",
         reward_redemption_id: redemptionId,
         fulfilled: true,
@@ -1211,9 +1281,10 @@
               ${!showVisibilityControls || controlsHidden ? "" : `
                 <div class="header-actions">
                   <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
-                  <button class="link" data-action="toggle-only-own-tasks">${this._onlyOwnTasks ? "Alle Aufgaben anzeigen" : "Nur eigene Aufgaben"}</button>
                 </div>`}
             </div>
+            ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
+            ${this._renderFavoritesQuickBar()}
             ${this._renderTaskList(isAdmin)}
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
             ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
@@ -1282,20 +1353,29 @@
       }
     }
 
+    // v0.16: resolves this._taskMemberFilter to either null ("Alle", no
+    // filtering) or a concrete member id - a "child" user always gets forced
+    // to their own tasks regardless of the persisted filter, same rule as
+    // the old onlyOwnTasks toggle enforced (children can't access these
+    // controls at all, see _renderMemberFilterChips), and the "own" sentinel
+    // (the first-run default) resolves freshly against whoever is currently
+    // logged in rather than a member id baked in at setConfig time.
+    _effectiveTaskMemberFilterId() {
+      const filter = this._isChildUser() ? "own" : this._taskMemberFilter;
+      if (filter === null || filter === undefined) return null;
+      return filter === "own" ? this._currentMemberId() : filter;
+    }
+
     _renderTaskList(isAdmin) {
       let ids = Object.keys(this._tasks);
       const totalCount = ids.length;
       if (this._hideNotDue) {
         ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
       }
-      // A "child" member's task list is always filtered to their own tasks -
-      // forced on (not just defaulted), regardless of the persisted toggle,
-      // since children can't access visibility settings at all (v0.8).
-      const onlyOwnTasks = this._isChildUser() || this._onlyOwnTasks;
-      if (onlyOwnTasks) {
-        const currentMemberId = this._currentMemberId();
+      const filterMemberId = this._effectiveTaskMemberFilterId();
+      if (filterMemberId !== null) {
         ids = ids.filter((id) => {
-          if (!currentMemberId) return false;
+          if (!filterMemberId) return false;
           // assigned_member_ids already lists every member currently
           // responsible - just [assigned_member_id] for most rotation
           // strategies, but every selected member for a "fixed" rotation
@@ -1303,7 +1383,7 @@
           // FamilyTasksCoordinator._assigned_member_ids in coordinator.py) -
           // so a single membership check covers both cases.
           const assignedIds = this._statusStateForTask(id)?.attributes?.assigned_member_ids ?? [];
-          return assignedIds.includes(currentMemberId);
+          return assignedIds.includes(filterMemberId);
         });
       }
       if (!ids.length) {
@@ -1408,6 +1488,14 @@
                   <span class="muted">${detail}</span>
                 </div>
                 <div class="row-actions">
+                  ${isConfirmation || !isAdmin ? "" : `
+                  <button
+                    class="favorite-toggle ${task.favorite ? "is-favorite" : ""}"
+                    data-action="toggle-favorite"
+                    data-task-id="${id}"
+                    title="${task.favorite ? "Aus Favoriten entfernen" : "Als Favorit markieren"}"
+                    aria-label="${task.favorite ? "Aus Favoriten entfernen" : "Als Favorit markieren"}"
+                  >${task.favorite ? "★" : "☆"}</button>`}
                   <button data-action="complete-task" data-task-id="${id}" ${disableComplete ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
                   ${showSkip ? `<button data-action="skip-task" data-task-id="${id}" ${resolved ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>` : ""}
                   ${isConfirmation || !isAdmin ? "" : `
@@ -1419,6 +1507,67 @@
             </div>`;
         })
         .join("")}</div>`;
+    }
+
+    // v0.16: filter chips at the top of the "Aufgaben" section, replacing
+    // the old plain "Nur eigene Aufgaben"/"Alle Aufgaben anzeigen" toggle
+    // button - "Alle" plus one chip per family member, so a parent can just
+    // as easily narrow the list down to one specific child's tasks instead
+    // of only being able to pick between "everything" and "just me". Never
+    // rendered for a "child" user (see the call site in _render, same
+    // showVisibilityControls gating as the other visibility toggles) since
+    // their list is always forced to their own tasks regardless.
+    _renderMemberFilterChips() {
+      const activeFilterId = this._effectiveTaskMemberFilterId();
+      const memberChips = Object.keys(this._members)
+        .map((id) => {
+          const member = this._members[id];
+          const active = activeFilterId === id;
+          return `
+            <button class="chip-filter ${active ? "active" : ""}" data-action="filter-member" data-member-id="${id}">
+              ${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}
+            </button>`;
+        })
+        .join("");
+      return `
+        <div class="member-filter-row">
+          <button class="chip-filter ${activeFilterId === null ? "active" : ""}" data-action="filter-member" data-member-id="">Alle</button>
+          ${memberChips}
+        </div>`;
+    }
+
+    // v0.16: "Schnellauswahl" - a compact one-tap "Erledigt" bar for tasks
+    // marked as favorites (see CONF_TASK_FAVORITE in const.py, and the star
+    // toggle on each task row above), so the household's most-used chores
+    // don't need to be found/scrolled to in the full list every time. Reuses
+    // the same "complete-task" action as the full list's "Erledigt" button -
+    // it's the exact same completion, just reachable in one tap - so no new
+    // service call or permission rule is needed here. Shown to every user,
+    // including a "child" (same as the full task list's own "Erledigt"
+    // button), independent of the member-filter chips above, which only
+    // affect the full list below.  A favorite that's already resolved (done/
+    // idle/awaiting a parent's confirmation) or is a checklist (which can
+    // only be completed by checking off its sub-items, see the disabled
+    // "Erledigt" button in _renderTaskList) is skipped - there's nothing
+    // useful to quick-complete for either.
+    _renderFavoritesQuickBar() {
+      const favoriteIds = Object.keys(this._tasks).filter((id) => this._tasks[id].favorite);
+      if (!favoriteIds.length) return "";
+      const chips = favoriteIds
+        .map((id) => {
+          const task = this._tasks[id];
+          const status = this._statusStateForTask(id)?.state ?? "pending";
+          const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
+          const isChecklist = task.kind === "checklist";
+          return `
+            <button class="favorite-chip" data-action="complete-task" data-task-id="${id}" ${resolved || isChecklist ? "disabled" : ""}>
+              ${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon>` : "★"} ${esc(task.name)}
+            </button>`;
+        })
+        .join("");
+      return `
+        <div class="section-header"><h4>Favoriten</h4></div>
+        <div class="favorites-bar">${chips}</div>`;
     }
 
     _renderMemberList(canManageMembers) {
@@ -1493,18 +1642,6 @@
       return `
         <div class="section-header">
           <h3>Bestenliste</h3>
-        </div>
-        <div class="tabs">
-          ${Object.entries(VIEWS)
-            .map(
-              ([value, view]) => `
-            <button
-              class="tab ${this._view === value ? "active" : ""}"
-              data-action="select-view"
-              data-view="${value}"
-            >${esc(view.label)}</button>`
-            )
-            .join("")}
         </div>
         ${rankingList}
         ${this._renderRewardsSection(canManageRewards, currentMemberId)}
@@ -1969,7 +2106,19 @@
         .row-wrap { display: flex; flex-direction: column; gap: 4px; }
         .row { display: flex; align-items: center; justify-content: space-between; gap: 8px;
                padding: 8px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); }
-        .row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        /* flex: 1 (v0.16 fix): without it, .row-main only ever sized itself to
+           its own content width - and since .row uses justify-content:
+           space-between with just two children (.rank/.row-actions and
+           .row-main), that content-sized box got pushed flush to the row's
+           right edge instead of stretching to fill the space after .rank.
+           The Bestenliste's .row-top (name/points, itself space-between)
+           then had a different-width box to work with on every row - a
+           short name gave it a narrow box hugging the right edge, a long
+           name a wide one starting further left - so the "Pkt." column
+           never lined up between rows despite looking like it should.
+           Letting .row-main actually fill the row makes its inner
+           space-between consistent across every row. */
+        .row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
         .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
         .subtask-list { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 4px 24px; }
         .subtask-item { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 0.9em; }
@@ -2009,12 +2158,21 @@
         .form label.checkbox-label { flex-direction: row; align-items: center; gap: 8px; }
         .form input[type="checkbox"] { width: auto; }
         h4 { margin: 12px 0 8px; font-size: 0.95em; color: var(--secondary-text-color); }
-        /* Bestenliste (v0.15, gemerged aus family-tasks-leaderboard-card.js). */
-        .tabs { display: flex; gap: 4px; margin: 8px 0 12px; }
-        .tab { border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.85em;
+        /* Aufgaben-Filter nach Familienmitglied (v0.16) - dieselbe Chip-Optik
+           wie die Bestenliste einst für ihre Woche/Monat-Tabs verwendet hat. */
+        .member-filter-row { display: flex; gap: 4px; margin: 4px 0 12px; flex-wrap: wrap; }
+        .chip-filter { border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.85em;
                background: var(--secondary-background-color, #f2f2f2); color: var(--secondary-text-color);
                cursor: pointer; }
-        .tab.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+        .chip-filter.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+        /* Favoriten-Schnellauswahl (v0.16): kompakte Ein-Tipp-"Erledigt"-Leiste
+           über der vollen Aufgabenliste, siehe _renderFavoritesQuickBar. */
+        .favorites-bar { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 12px; }
+        .favorite-chip { display: inline-flex; align-items: center; gap: 4px; border-radius: 14px;
+               padding: 6px 12px; font-size: 0.85em; }
+        .favorite-chip ha-icon { --mdc-icon-size: 16px; }
+        .favorite-toggle { background: none; padding: 2px 4px; color: var(--secondary-text-color); }
+        .favorite-toggle.is-favorite { color: var(--warning-color, #ff9800); }
         .rank { width: 22px; text-align: center; font-weight: 500; color: var(--secondary-text-color); flex-shrink: 0; }
         .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
         .points { font-size: 0.85em; color: var(--secondary-text-color); flex-shrink: 0; }
@@ -2056,7 +2214,11 @@
           "own-task": () => this._saveOwnTask(),
           reward: () => this._saveReward(),
         };
-        saveHandlers[form.dataset.form]?.();
+        // .catch(() => {}) (v0.16): the alert() feedback for a rejected
+        // callWS already happens inside _callWS/_saveXxx - this just keeps a
+        // failed save from also logging an "unhandled promise rejection" to
+        // the console on top of that, since nothing here awaits the result.
+        saveHandlers[form.dataset.form]?.()?.catch(() => {});
       });
 
       this.shadowRoot.addEventListener("click", (ev) => {
@@ -2074,7 +2236,17 @@
         if (action === "new-task") { if (this._isAdmin()) this._openTaskForm(null); }
         else if (action === "cancel-task-form") this._closeTaskForm();
         else if (action === "edit-task") { if (this._isAdmin()) this._openTaskForm(el.dataset.taskId); }
-        else if (action === "delete-task") { if (this._isAdmin()) this._deleteTask(el.dataset.taskId); }
+        else if (action === "delete-task") { if (this._isAdmin()) this._deleteTask(el.dataset.taskId)?.catch(() => {}); }
+        else if (action === "toggle-favorite") {
+          if (this._isAdmin()) {
+            const task = this._tasks[el.dataset.taskId];
+            this._callWS({
+              type: "family_tasks/task/update",
+              task_id: el.dataset.taskId,
+              favorite: !task?.favorite,
+            })?.catch(() => {});
+          }
+        }
         else if (action === "complete-task")
           this._hass.callService("family_tasks", "complete_task", { task_id: el.dataset.taskId });
         else if (action === "skip-task")
@@ -2084,7 +2256,7 @@
         else if (action === "new-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(null); }
         else if (action === "cancel-member-form") this._closeMemberForm();
         else if (action === "edit-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(el.dataset.memberId); }
-        else if (action === "delete-member") { if (this._isAdmin() && !this._isChildUser()) this._deleteMember(el.dataset.memberId); }
+        else if (action === "delete-member") { if (this._isAdmin() && !this._isChildUser()) this._deleteMember(el.dataset.memberId)?.catch(() => {}); }
         else if (action === "toggle-hide-not-due") {
           this._hideNotDue = !this._hideNotDue;
           this._saveUiState();
@@ -2097,16 +2269,12 @@
           this._hideBattery = !this._hideBattery;
           this._saveUiState();
           this._render();
-        } else if (action === "toggle-only-own-tasks") {
-          this._onlyOwnTasks = !this._onlyOwnTasks;
+        } else if (action === "filter-member") {
+          this._taskMemberFilter = el.dataset.memberId || null;
           this._saveUiState();
           this._render();
         } else if (action === "toggle-controls") {
           this._controlsHidden = !this._controlsHidden;
-          this._saveUiState();
-          this._render();
-        } else if (action === "select-view") {
-          this._view = el.dataset.view;
           this._saveUiState();
           this._render();
         } else if (action === "select-reward") {
@@ -2114,7 +2282,7 @@
         } else if (action === "cancel-redeem") {
           this._cancelRedeem();
         } else if (action === "confirm-redeem") {
-          this._confirmRedeem(el.dataset.rewardId);
+          this._confirmRedeem(el.dataset.rewardId)?.catch(() => {});
         } else if (action === "new-reward") {
           // Defense-in-depth, same reasoning as the edit/delete gating above -
           // the backend enforces this too regardless (see
@@ -2125,9 +2293,9 @@
         } else if (action === "cancel-reward-form") {
           this._closeRewardForm();
         } else if (action === "delete-reward") {
-          if (this._isAdmin() && !this._isChildUser()) this._deleteReward(el.dataset.rewardId);
+          if (this._isAdmin() && !this._isChildUser()) this._deleteReward(el.dataset.rewardId)?.catch(() => {});
         } else if (action === "fulfill-redemption") {
-          if (this._isAdmin() && !this._isChildUser()) this._fulfillRedemption(el.dataset.redemptionId);
+          if (this._isAdmin() && !this._isChildUser()) this._fulfillRedemption(el.dataset.redemptionId)?.catch(() => {});
         } else if (action === "toggle-hide-fulfilled") {
           this._hideFulfilled = !this._hideFulfilled;
           this._saveUiState();
@@ -2158,7 +2326,7 @@
         // going through the form-draft/save flow the other forms use.
         const batteryEl = ev.target.closest("[data-battery-entity]");
         if (batteryEl) {
-          this._saveBatteryOverrideField(batteryEl);
+          this._saveBatteryOverrideField(batteryEl)?.catch(() => {});
           return;
         }
 
