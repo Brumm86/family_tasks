@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.0] - 2026-08-03
+
+### Changed
+- **Nur noch eine Lovelace-Karte**: die separate „Family Tasks Leaderboard"-Karte (`family-tasks-leaderboard-card.js`, seit v0.4) ist entfernt - Bestenliste (Woche/Monat) und das komplette Belohnungssystem (Katalog, Einlösen, Verlauf) sitzen jetzt als neuer Abschnitt „Bestenliste" innerhalb von `family-tasks-card.js`, direkt unter der Aufgabenliste. Funktional unverändert gegenüber der alten Karte: dieselben Websocket-Befehle (`family_tasks/reward/*`, `family_tasks/reward_redemption/*`), dieselben Sensor-Attribute (`points_week`/`points_month`/`points_available`), dieselben Eltern-/Kind-Regeln für Katalog-Verwaltung vs. Einlösen. Der Abschnitt ist - anders als „Familienmitglieder"/„Batterien" - nicht ausblendbar, da auch ein „Kind"-Konto ihn sehen und Belohnungen einlösen können muss. Ein Dashboard, das noch die alte `type: custom:family-tasks-leaderboard-card`-Karte enthält, muss diese entfernen (die Karte selbst lädt nicht mehr, das zugehörige Custom-Element wird nicht mehr registriert) - alle bisherigen Daten (Belohnungen, Einlösungen, Punktestände) bleiben unverändert in der Storage Collection erhalten und erscheinen automatisch im neuen Abschnitt.
+
 ## [0.14.0] - 2026-08-02
 
 ### Added

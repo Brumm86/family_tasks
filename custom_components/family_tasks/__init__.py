@@ -28,8 +28,6 @@ from .const import (
     CONF_MEMBER_NOTIFY_SERVICE,
     DOMAIN,
     EVENT_TASK_ASSIGNED,
-    LEADERBOARD_CARD_FILENAME,
-    LEADERBOARD_CARD_URL_PATH,
     PLATFORMS,
     SERVICE_COMPLETE_TASK,
     SERVICE_SKIP_TASK,
@@ -287,13 +285,22 @@ def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStora
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
-    """Serve the bundled Lovelace cards and auto-inject them on every dashboard.
+    """Serve the bundled Lovelace card and auto-inject it on every dashboard.
 
-    Uses add_extra_js_url so the cards are available without the user having
+    Uses add_extra_js_url so the card is available without the user having
     to add a Lovelace resource manually.
 
-    The injected URLs carry a "?v=<integration version>" cache-buster. Static
-    paths are registered with cache_headers=False, but that alone doesn't
+    Up to v0.14 this registered a second file (family-tasks-leaderboard-card.js)
+    alongside this one - the leaderboard/rewards UI has been folded into the
+    single family-tasks-card.js in v0.15 (see that file's header comment), so
+    only one static path/JS URL is registered now. A household upgrading from
+    an older version that still has a "type: custom:family-tasks-leaderboard-card"
+    card on a dashboard will see that card fail to load (the custom element
+    never gets defined again) - it should be removed from the dashboard, its
+    former content now lives in the "Bestenliste" section of family-tasks-card.
+
+    The injected URL carries a "?v=<integration version>" cache-buster. The
+    static path is registered with cache_headers=False, but that alone doesn't
     stop every client from caching the file: browsers may still apply
     heuristic caching, and Home Assistant's installed-PWA/companion-app
     service worker in particular caches same-URL requests aggressively
@@ -314,17 +321,9 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 
     www_dir = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths(
-        [
-            StaticPathConfig(CARD_URL_PATH, str(www_dir / CARD_FILENAME), cache_headers=False),
-            StaticPathConfig(
-                LEADERBOARD_CARD_URL_PATH,
-                str(www_dir / LEADERBOARD_CARD_FILENAME),
-                cache_headers=False,
-            ),
-        ]
+        [StaticPathConfig(CARD_URL_PATH, str(www_dir / CARD_FILENAME), cache_headers=False)]
     )
     add_extra_js_url(hass, f"{CARD_URL_PATH}?{cache_buster}")
-    add_extra_js_url(hass, f"{LEADERBOARD_CARD_URL_PATH}?{cache_buster}")
 
 
 def _async_register_services(hass: HomeAssistant) -> None:

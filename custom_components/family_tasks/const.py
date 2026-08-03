@@ -377,9 +377,6 @@ ATTR_SUBTASK_ID: Final = "subtask_id"
 CARD_FILENAME: Final = "family-tasks-card.js"
 CARD_URL_PATH: Final = f"/family_tasks_static/{CARD_FILENAME}"
 
-LEADERBOARD_CARD_FILENAME: Final = "family-tasks-leaderboard-card.js"
-LEADERBOARD_CARD_URL_PATH: Final = f"/family_tasks_static/{LEADERBOARD_CARD_FILENAME}"
-
 # --- Misc -----------------------------------------------------------------
 
 MANUFACTURER: Final = "Family Tasks"

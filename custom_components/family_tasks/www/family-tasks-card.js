@@ -155,14 +155,29 @@
  * household that already set one up, but is no longer offered when creating
  * a new task.)
  *
- * Rewards (v0.9): the reward catalog, each participating member's point
- * balance, and the redeem/purchase flow all moved to the separate
- * "family-tasks-leaderboard-card" (see family-tasks-leaderboard-card.js) -
- * this card no longer shows or manages any of that. A member's participation
- * in the reward system (whether they show up on the leaderboard at all, and
- * whether they may redeem a catalog reward) is set per-member via the
- * "Nimmt am Belohnungssystem teil" checkbox in the Familienmitglieder
- * section below (CONF_MEMBER_REWARDS_OPT_IN in const.py).
+ * Rewards (v0.9, re-merged into this card in v0.15 - see the "Bestenliste &
+ * Belohnungen" note below): a member's participation in the reward system
+ * (whether they show up on the leaderboard at all, and whether they may
+ * redeem a catalog reward) is set per-member via the "Nimmt am
+ * Belohnungssystem teil" checkbox in the Familienmitglieder section below
+ * (CONF_MEMBER_REWARDS_OPT_IN in const.py).
+ *
+ * Bestenliste & Belohnungen (v0.15): previously a separate Lovelace card
+ * ("family-tasks-leaderboard-card", v0.4-v0.14, see this file's git history)
+ * so a dashboard needed two cards to get the full picture. Folded back into
+ * this single card so only one Lovelace card type exists - a new "Bestenliste"
+ * section (below the task list, above "Batterien"/"Familienmitglieder") shows
+ * the points ranking with switchable "Woche"/"Monat" tabs plus the reward
+ * catalog, redeem flow, and redemption history, unchanged in behavior from
+ * the old standalone card: every family member's points_week/points_month
+ * sensor attribute drives the ranking, points_available drives the reward
+ * balance/affordability, and CRUD on the catalog
+ * (family_tasks/reward/*)/redemptions (family_tasks/reward_redemption/*)
+ * follows the exact same admin/child rules as tasks and members elsewhere in
+ * this card. This section is always visible to everyone, including a "Kind"-
+ * linked user (who needs to see and redeem rewards, not just configure
+ * something) - unlike "Familienmitglieder"/"Batterien" it has no
+ * show/hide toggle of its own.
  *
  * Checklist display (v0.12): a checklist task's sub-items are now sorted
  * alphabetically for display - open items first (alphabetically among
@@ -237,11 +252,34 @@
     child: "Kind (Aufgaben brauchen Eltern-Bestätigung)",
   };
 
+  // Bestenliste/Belohnungen (v0.15, gemerged aus family-tasks-leaderboard-card.js
+  // - siehe den "Bestenliste & Belohnungen" Abschnitt im Datei-Header oben).
+  const VIEWS = {
+    week: { label: "Woche", attr: "points_week" },
+    month: { label: "Monat", attr: "points_month" },
+  };
+
   function esc(value) {
     return String(value ?? "").replace(
       /[&<>"']/g,
       (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
     );
+  }
+
+  // "1 Punkt" vs. "2 Punkte" - jede Stelle, an der ein Belohnungspreis oder ein
+  // Punkte-Guthaben als das Wort "Punkte" (nicht die anderswo verwendete
+  // Abkürzung "Pkt.") dargestellt wird, geht hierüber, damit der Singular
+  // korrekt gelesen wird.
+  function pointsLabel(value) {
+    const n = Number(value) || 0;
+    return `${esc(n)} ${n === 1 ? "Punkt" : "Punkte"}`;
+  }
+
+  // Kleiner "· +30 Min. Bildschirmzeit"-Zusatz, gemeinsam genutzt vom
+  // Belohnungs-Katalog und dem Einlöse-Verlauf - undefined/null/"" bedeuten
+  // alle "nicht gesetzt".
+  function screenTimeSuffix(minutes) {
+    return minutes ? ` · +${esc(minutes)} Min. Bildschirmzeit` : "";
   }
 
   function emptyTriggerForm() {
@@ -363,6 +401,41 @@
     };
   }
 
+  function emptyRewardForm() {
+    return {
+      name: "",
+      icon: "",
+      points_cost: 0,
+      reward_type: "custom",
+      screen_time_minutes: "",
+      auto_fulfill: false,
+      screen_time_investable: false,
+    };
+  }
+
+  function rewardToForm(reward) {
+    return {
+      name: reward?.name ?? "",
+      icon: reward?.icon ?? "",
+      points_cost: reward?.points_cost ?? 0,
+      // "Belohnungstyp" ist ein reines Formular-Konzept, kein eigenes
+      // gespeichertes Feld - abgeleitet davon, ob ein Bildschirmzeit-Wert
+      // gesetzt ist (siehe _renderRewardForm). Zurückschalten auf "Sonstige"
+      // löscht den Wert beim Speichern (_saveReward).
+      reward_type: reward?.screen_time_minutes || reward?.screen_time_investable ? "screen_time" : "custom",
+      // Leer (nicht 0), wenn nicht gesetzt, damit das Feld als "keine
+      // Handyzeit-Belohnung" statt "0 Minuten" gelesen wird - siehe
+      // CONF_REWARD_SCREEN_TIME_MINUTES in const.py.
+      screen_time_minutes: reward?.screen_time_minutes ?? "",
+      // Siehe CONF_REWARD_AUTO_FULFILL in const.py.
+      auto_fulfill: reward?.auto_fulfill ?? false,
+      // v0.14 - siehe CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py: lässt
+      // das einlösende Mitglied selbst wählen, wie viele Punkte investiert
+      // werden, statt eines festen Preis-/Minuten-Paars.
+      screen_time_investable: reward?.screen_time_investable ?? false,
+    };
+  }
+
   class FamilyTasksCard extends HTMLElement {
     constructor() {
       super();
@@ -370,6 +443,8 @@
       this._tasks = {};
       this._members = {};
       this._batteryOverrides = {};
+      this._rewards = {};
+      this._redemptions = {};
       this._hass = null;
       this._subscribed = false;
       this._listenersAttached = false;
@@ -387,6 +462,23 @@
       this._hideBattery = undefined;
       this._controlsHidden = undefined;
       this._onlyOwnTasks = undefined;
+      // Bestenliste/Belohnungen state (v0.15, gemerged aus
+      // family-tasks-leaderboard-card.js).
+      this._view = undefined;
+      this._rewardFormOpen = false;
+      this._editingRewardId = null;
+      this._rewardForm = emptyRewardForm();
+      // Welche Katalog-Belohnung gerade ihren "wirklich einlösen?"-
+      // Bestätigungsschritt für den aktuellen Nutzer zeigt - immer nur eine.
+      this._pendingRedeemId = null;
+      // Wie viele Punkte der aktuelle Nutzer in das "Punkte investieren"-Feld
+      // für die anstehende investierbare (Handyzeit-)Einlösung eingetragen
+      // hat - siehe CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py.
+      this._pendingInvestPoints = 1;
+      // Ob bereits erledigte Einlösungen in "Bisherige Einlösungen"
+      // ausgeblendet sind - siehe setConfig für die Default-an/persistierte
+      // First-Run-Regel, gleiches Muster wie die übrigen Karten-Toggles.
+      this._hideFulfilled = undefined;
     }
 
     setConfig(config) {
@@ -409,6 +501,16 @@
         this._hideBattery = saved?.hideBattery ?? this._config.hide_battery_section !== false;
         this._controlsHidden = saved?.controlsHidden ?? false;
         this._onlyOwnTasks = saved?.onlyOwnTasks ?? this._config.only_own_tasks !== false;
+        // Bestenliste/Belohnungen (v0.15): "Woche"/"Monat" defaults to "week"
+        // like the old standalone leaderboard card did (default_view config
+        // option is intentionally not carried over - both cards' configs
+        // used to be independent, this one just reuses the same first-run/
+        // persisted pattern the other toggles above already follow).
+        const initialView = saved?.view ?? "week";
+        this._view = VIEWS[initialView] ? initialView : "week";
+        // Erledigte Einlösungen sind standardmäßig ausgeblendet, wie schon in
+        // der ehemals eigenständigen Bestenlisten-Karte.
+        this._hideFulfilled = saved?.hideFulfilled ?? true;
       }
     }
 
@@ -441,6 +543,8 @@
             hideBattery: this._hideBattery,
             controlsHidden: this._controlsHidden,
             onlyOwnTasks: this._onlyOwnTasks,
+            view: this._view,
+            hideFulfilled: this._hideFulfilled,
           })
         );
       } catch (err) {
@@ -491,7 +595,13 @@
     }
 
     getCardSize() {
-      return 4 + Object.keys(this._tasks).length + Object.keys(this._members).length;
+      return (
+        4 +
+        Object.keys(this._tasks).length +
+        Object.keys(this._members).length +
+        Object.keys(this._rewards).length +
+        Object.keys(this._redemptions).length
+      );
     }
 
     set hass(hass) {
@@ -512,6 +622,8 @@
       if (this._unsubTasks) this._unsubTasks();
       if (this._unsubMembers) this._unsubMembers();
       if (this._unsubBatteryOverrides) this._unsubBatteryOverrides();
+      if (this._unsubRewards) this._unsubRewards();
+      if (this._unsubRedemptions) this._unsubRedemptions();
       // Reset so a later reconnect actually resubscribes (v0.11 fix): Lovelace
       // can detach and reattach the very same element instance - e.g.
       // reordering/editing a dashboard, or switching between views that reuse
@@ -574,6 +686,14 @@
       this._unsubBatteryOverrides = await this._hass.connection.subscribeMessage(
         handle(this._batteryOverrides, "battery_override_id"),
         { type: "family_tasks/battery_override/subscribe" }
+      );
+      this._unsubRewards = await this._hass.connection.subscribeMessage(
+        handle(this._rewards, "reward_id"),
+        { type: "family_tasks/reward/subscribe" }
+      );
+      this._unsubRedemptions = await this._hass.connection.subscribeMessage(
+        handle(this._redemptions, "reward_redemption_id"),
+        { type: "family_tasks/reward_redemption/subscribe" }
       );
     }
 
@@ -640,6 +760,41 @@
 
     _batteryOverrideFor(entityId) {
       return Object.values(this._batteryOverrides).find((o) => o.entity_id === entityId) ?? null;
+    }
+
+    // --- Bestenliste/Belohnungen helpers (v0.15) ------------------------
+
+    _pointsSensorForMember(memberId) {
+      if (!this._hass) return null;
+      return Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.member_id === memberId
+      );
+    }
+
+    // Aktuelles einlösbares Guthaben: Gesamtpunkte abzüglich aller bereits
+    // eingelösten Belohnungen - siehe MemberSummaryData.points_available in
+    // coordinator.py. Wird unabhängig von der Woche/Monat-Ansicht immer
+    // angezeigt, da es die tatsächliche Währung des Belohnungs-Katalogs
+    // unten ist, keine periodenbezogene Rangliste-Kennzahl.
+    _availablePointsFor(memberId) {
+      return Number(this._pointsSensorForMember(memberId)?.attributes?.points_available ?? 0);
+    }
+
+    _rankedMembers() {
+      const attr = VIEWS[this._view].attr;
+      return Object.keys(this._members)
+        .map((id) => {
+          const member = this._members[id];
+          const sensor = this._pointsSensorForMember(id);
+          const points = Number(sensor?.attributes?.[attr] ?? 0);
+          return { id, member, points };
+        })
+        .filter((entry) => entry.member.active !== false)
+        // Nur Mitglieder, die am Belohnungssystem teilnehmen, tauchen hier
+        // überhaupt auf - ein Haushalt kann z. B. nur die Kinder um Punkte
+        // konkurrieren lassen.
+        .filter((entry) => entry.member.participates_in_rewards !== false)
+        .sort((a, b) => b.points - a.points);
     }
 
     // --- actions -------------------------------------------------------
@@ -896,6 +1051,108 @@
       }
     }
 
+    // --- Bestenliste/Belohnungen actions (v0.15) ------------------------
+
+    _openRewardForm(rewardId) {
+      this._editingRewardId = rewardId;
+      this._rewardForm = rewardToForm(rewardId ? this._rewards[rewardId] : null);
+      this._rewardFormOpen = true;
+      this._render();
+    }
+
+    _closeRewardForm() {
+      this._rewardFormOpen = false;
+      this._editingRewardId = null;
+      this._render();
+    }
+
+    async _saveReward() {
+      const f = this._rewardForm;
+      if (!f.name.trim()) return;
+      // "Belohnungstyp" entscheidet, ob das Minuten-Feld überhaupt gilt
+      // (siehe _renderRewardForm/rewardToForm) - "Sonstige" löscht einen
+      // zuvor gesetzten Wert immer, unabhängig davon, was noch im
+      // (versteckten) Minuten-Feld steht.
+      const isScreenTime = f.reward_type === "screen_time";
+      const isInvestable = isScreenTime && !!f.screen_time_investable;
+      if (isScreenTime && !isInvestable && (f.screen_time_minutes === "" || f.screen_time_minutes == null)) {
+        alert("Bitte die Bildschirmzeit in Minuten angeben (oder \"Punkte investieren lassen\" aktivieren).");
+        return;
+      }
+      const payload = {
+        name: f.name.trim(),
+        points_cost: Math.max(0, Number(f.points_cost) || 0),
+        auto_fulfill: !!f.auto_fulfill,
+        screen_time_investable: isInvestable,
+      };
+      if (f.icon) payload.icon = f.icon.trim();
+      // Keine Handyzeit-Belohnung -> nicht gesetzt. Beim Bearbeiten muss das
+      // als explizites null gesendet werden, damit der Backend einen zuvor
+      // gesetzten Wert löscht (siehe CONF_REWARD_SCREEN_TIME_MINUTES in
+      // const.py); beim Neuanlegen reicht das Weglassen des Felds. Eine
+      // investierbare Handyzeit-Belohnung (v0.14) hat ebenfalls keine feste
+      // Minutenzahl - das Mitglied wählt beim Einlösen - wird also genauso
+      // gelöscht wie eine Nicht-Handyzeit-Belohnung.
+      if (isScreenTime && !isInvestable) {
+        payload.screen_time_minutes = Math.max(1, Number(f.screen_time_minutes) || 1);
+      } else if (this._editingRewardId) {
+        payload.screen_time_minutes = null;
+      }
+      if (this._editingRewardId) {
+        await this._hass.callWS({
+          type: "family_tasks/reward/update",
+          reward_id: this._editingRewardId,
+          ...payload,
+        });
+      } else {
+        await this._hass.callWS({ type: "family_tasks/reward/create", ...payload });
+      }
+      this._closeRewardForm();
+    }
+
+    async _deleteReward(rewardId) {
+      const name = this._rewards[rewardId]?.name ?? rewardId;
+      if (!confirm(`Belohnung "${name}" wirklich löschen?`)) return;
+      await this._hass.callWS({ type: "family_tasks/reward/delete", reward_id: rewardId });
+    }
+
+    _selectReward(rewardId) {
+      this._pendingRedeemId = rewardId;
+      this._pendingInvestPoints = 1;
+      this._render();
+    }
+
+    _cancelRedeem() {
+      this._pendingRedeemId = null;
+      this._render();
+    }
+
+    // Nicht-admin Einlösen: das Backend prüft unabhängig noch einmal, ob der
+    // Aufrufer am Belohnungssystem teilnimmt und sich die Belohnung wirklich
+    // leisten kann (siehe ws_redeem_reward in storage.py) - der clientseitige
+    // "disabled"-Zustand der "Auswählen"/"Bestätigen"-Buttons sorgt nur
+    // dafür, dass es gar nicht erst angeboten wird, ist aber nicht die
+    // eigentliche Absicherung.
+    async _confirmRedeem(rewardId) {
+      const reward = this._rewards[rewardId];
+      const msg = { type: "family_tasks/reward_redemption/redeem", reward_id: rewardId };
+      if (reward?.screen_time_investable) {
+        msg.points_spent = Math.max(1, Number(this._pendingInvestPoints) || 1);
+      }
+      await this._hass.callWS(msg);
+      this._pendingRedeemId = null;
+      this._pendingInvestPoints = 1;
+      this._render();
+    }
+
+    async _fulfillRedemption(redemptionId) {
+      await this._hass.callWS({
+        type: "family_tasks/reward_redemption/update",
+        reward_redemption_id: redemptionId,
+        fulfilled: true,
+      });
+    }
+
     // --- rendering -------------------------------------------------------
 
     _render() {
@@ -961,6 +1218,8 @@
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
             ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
 
+            ${this._renderLeaderboardSection(isAdmin, isChildUser)}
+
             ${isAdmin ? this._renderBatterySection(controlsHidden, showVisibilityControls) : ""}
 
             ${membersSection}
@@ -981,6 +1240,11 @@
             <h3>${this._editingMemberId ? "Mitglied bearbeiten" : "Mitglied hinzufügen"}</h3>
             ${this._renderMemberForm()}
           </dialog>` : ""}
+          ${this._rewardFormOpen ? `
+          <dialog class="dialog" data-dialog="reward">
+            <h3>${this._editingRewardId ? "Belohnung bearbeiten" : "Belohnung hinzufügen"}</h3>
+            ${this._renderRewardForm()}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
@@ -998,6 +1262,7 @@
         ["task", () => this._taskFormOpen, () => this._closeTaskForm()],
         ["own-task", () => this._ownTaskFormOpen, () => this._closeOwnTaskForm()],
         ["member", () => this._memberFormOpen, () => this._closeMemberForm()],
+        ["reward", () => this._rewardFormOpen, () => this._closeRewardForm()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -1185,6 +1450,206 @@
             </div>`;
         })
         .join("")}</div>`;
+    }
+
+    // Bestenliste + Belohnungen (v0.15, gemerged aus der ehemals
+    // eigenständigen family-tasks-leaderboard-card.js - siehe Datei-Header).
+    // Anders als "Familienmitglieder"/"Batterien" nicht über
+    // hideMembers/hideBattery ausblendbar: die Rangliste und der
+    // Belohnungs-Katalog sind für jeden - auch ein "Kind"-Konto - immer
+    // sichtbar, da ein Kind hier auswählen/einlösen können muss, nicht nur
+    // Eltern etwas zu konfigurieren haben.
+    _renderLeaderboardSection(isAdmin, isChildUser) {
+      const ranked = this._rankedMembers();
+      const maxPoints = ranked.length ? Math.max(...ranked.map((r) => r.points), 1) : 1;
+      // Gleiche Regel wie canManageMembers oben - ein "Kind"-verknüpfter
+      // Nutzer bekommt keine Katalog-/Einlösungs-Verwaltung, unabhängig vom
+      // HA-Admin-Flag (serverseitig ebenfalls erzwungen, siehe
+      // RewardRedemptionStorageCollectionWebsocket in storage.py).
+      const canManageRewards = isAdmin && !isChildUser;
+      const currentMemberId = this._currentMemberId();
+
+      const rankingList = ranked.length
+        ? `<div class="list">${ranked
+            .map((entry, index) => {
+              const pct = Math.round((entry.points / maxPoints) * 100);
+              const available = this._availablePointsFor(entry.id);
+              return `
+                <div class="row">
+                  <div class="rank">${index + 1}</div>
+                  <div class="row-main">
+                    <div class="row-top">
+                      <span class="name">${entry.member.icon ? `<ha-icon icon="${esc(entry.member.icon)}"></ha-icon> ` : ""}${esc(entry.member.name)}</span>
+                      <span class="points">${esc(entry.points)} Pkt.</span>
+                    </div>
+                    <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+                    <div class="balance">${esc(entry.member.name)}: ${pointsLabel(available)} verfügbar</div>
+                  </div>
+                </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="muted">Noch keine teilnehmenden Familienmitglieder.</p>`;
+
+      return `
+        <div class="section-header">
+          <h3>Bestenliste</h3>
+        </div>
+        <div class="tabs">
+          ${Object.entries(VIEWS)
+            .map(
+              ([value, view]) => `
+            <button
+              class="tab ${this._view === value ? "active" : ""}"
+              data-action="select-view"
+              data-view="${value}"
+            >${esc(view.label)}</button>`
+            )
+            .join("")}
+        </div>
+        ${rankingList}
+        ${this._renderRewardsSection(canManageRewards, currentMemberId)}
+      `;
+    }
+
+    _renderRewardsSection(canManageRewards, currentMemberId) {
+      const currentMember = currentMemberId ? this._members[currentMemberId] : null;
+      const currentParticipates = !!currentMember && currentMember.participates_in_rewards !== false;
+      const availablePoints = currentMemberId ? this._availablePointsFor(currentMemberId) : 0;
+
+      const rewardIds = Object.keys(this._rewards).sort(
+        (a, b) => (this._rewards[a].points_cost ?? 0) - (this._rewards[b].points_cost ?? 0)
+      );
+      // Jede Katalog-Belohnung samt Preis ist für jeden immer sichtbar - auch
+      // für ein Kind, das sehen soll was verfügbar ist und was es kostet,
+      // selbst wenn es sich das gerade nicht leisten kann. Nur "Auswählen"
+      // ist an Teilnahme+Leistbarkeit gebunden, "Bearbeiten"/"Löschen" an
+      // canManageRewards.
+      const catalogList = rewardIds.length
+        ? `<div class="list">${rewardIds
+            .map((id) => {
+              const r = this._rewards[id];
+              const isInvestable = !!r.screen_time_investable;
+              const cost = r.points_cost ?? 0;
+              // Eine investierbare Handyzeit-Belohnung (v0.14) hat keinen
+              // festen Preis - das Mitglied wählt beim Einlösen, wie viele
+              // Punkte investiert werden - daher genügt für Leistbarkeit
+              // mindestens 1 verfügbarer Punkt statt eines konkreten Preises.
+              const affordable = currentParticipates && (isInvestable ? availablePoints >= 1 : availablePoints >= cost);
+              const isPending = this._pendingRedeemId === id;
+              const priceLabel = isInvestable ? "Punkte frei wählbar" : `${pointsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}`;
+              return `
+                <div class="row-wrap">
+                  <div class="row">
+                    <div class="row-main">
+                      <span class="name">${r.icon ? `<ha-icon icon="${esc(r.icon)}"></ha-icon> ` : ""}${esc(r.name)}</span>
+                      <span class="muted">${priceLabel}</span>
+                    </div>
+                    <div class="row-actions">
+                      ${currentMemberId && currentParticipates ? `<button data-action="select-reward" data-reward-id="${id}" ${affordable ? "" : "disabled"}>Auswählen</button>` : ""}
+                      ${canManageRewards ? `
+                      <button data-action="edit-reward" data-reward-id="${id}">Bearbeiten</button>
+                      <button data-action="delete-reward" data-reward-id="${id}" class="danger">Löschen</button>` : ""}
+                    </div>
+                  </div>
+                  ${isPending && isInvestable ? `
+                  <div class="confirm-row">
+                    <label>Punkte investieren
+                      <input type="number" min="1" max="${availablePoints}" data-action="invest-points" data-reward-id="${id}" value="${esc(this._pendingInvestPoints ?? 1)}">
+                    </label>
+                    <button data-action="confirm-redeem" data-reward-id="${id}" ${this._pendingInvestPoints >= 1 && this._pendingInvestPoints <= availablePoints ? "" : "disabled"}>Bestätigen</button>
+                    <button type="button" class="link" data-action="cancel-redeem">Abbrechen</button>
+                  </div>` : ""}
+                  ${isPending && !isInvestable ? `
+                  <div class="confirm-row">
+                    <span>„${esc(r.name)}" für ${pointsLabel(cost)} einlösen?</span>
+                    <button data-action="confirm-redeem" data-reward-id="${id}">Bestätigen</button>
+                    <button type="button" class="link" data-action="cancel-redeem">Abbrechen</button>
+                  </div>` : ""}
+                </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="muted">Noch keine Belohnungen angelegt.</p>`;
+
+      // Erledigte Einlösungen sind standardmäßig ausgeblendet - siehe
+      // _hideFulfilled in setConfig - da ein Haushalt, der regelmäßig
+      // einlöst, sonst schnell eine größtenteils erledigte Liste ansammelt.
+      const allRedemptionIds = Object.keys(this._redemptions).sort((a, b) =>
+        (this._redemptions[b].redeemed_at ?? "").localeCompare(this._redemptions[a].redeemed_at ?? "")
+      );
+      const redemptionIds = this._hideFulfilled
+        ? allRedemptionIds.filter((id) => !this._redemptions[id].fulfilled)
+        : allRedemptionIds;
+      const historyList = redemptionIds.length
+        ? `<div class="list">${redemptionIds
+            .map((id) => {
+              const r = this._redemptions[id];
+              return `
+                <div class="row">
+                  <div class="row-main">
+                    <span class="name">${esc(r.member_name)} · ${esc(r.reward_name)}</span>
+                    <span class="muted">${pointsLabel(r.points_cost ?? 0)}${screenTimeSuffix(r.screen_time_minutes)}${r.fulfilled ? " · erledigt" : ""}</span>
+                  </div>
+                  ${!r.fulfilled && canManageRewards ? `
+                  <div class="row-actions">
+                    <button data-action="fulfill-redemption" data-redemption-id="${id}">Als erledigt markieren</button>
+                  </div>` : ""}
+                </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="muted">${
+            allRedemptionIds.length ? "Keine offenen Einlösungen." : "Noch keine Belohnungen eingelöst."
+          }</p>`;
+
+      return `
+        <div class="section-header">
+          <h4>Belohnungen</h4>
+        </div>
+        ${currentMemberId ? `<p class="muted">Dein Guthaben: ${pointsLabel(availablePoints)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
+        ${catalogList}
+        ${canManageRewards ? `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>` : ""}
+        <div class="section-header">
+          <h4>Bisherige Einlösungen</h4>
+          ${allRedemptionIds.length ? `<button class="link" data-action="toggle-hide-fulfilled">${this._hideFulfilled ? "Erledigte anzeigen" : "Erledigte ausblenden"}</button>` : ""}
+        </div>
+        ${historyList}
+      `;
+    }
+
+    _renderRewardForm() {
+      const f = this._rewardForm;
+      const isScreenTime = f.reward_type === "screen_time";
+      const isInvestable = isScreenTime && !!f.screen_time_investable;
+      return `
+        <form class="form" data-form="reward">
+          <label>Name<input type="text" data-reward-field="name" placeholder="z. B. Filmabend aussuchen" value="${esc(f.name)}" required></label>
+          <label>Icon (optional)<input type="text" data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></label>
+          ${isInvestable ? "" : `
+          <label>Preis (Punkte)<input type="number" min="0" data-reward-field="points_cost" value="${esc(f.points_cost)}"></label>
+          `}
+          <label>Belohnungstyp
+            <select data-reward-field="reward_type">
+              <option value="custom" ${!isScreenTime ? "selected" : ""}>Sonstige</option>
+              <option value="screen_time" ${isScreenTime ? "selected" : ""}>Handyzeit</option>
+            </select>
+          </label>
+          ${isScreenTime ? `
+          <label class="checkbox-label">
+            <input type="checkbox" data-reward-field="screen_time_investable" ${isInvestable ? "checked" : ""}>
+            Kind wählt Punkte selbst aus (Minuten = investierte Punkte × Bonusfaktor aus den Integrations-Optionen)
+          </label>
+          ` : ""}
+          ${isScreenTime && !isInvestable ? `
+          <label>Bildschirmzeit in Minuten<input type="number" min="1" data-reward-field="screen_time_minutes" placeholder="z. B. 30" value="${esc(f.screen_time_minutes)}" required></label>
+          ` : ""}
+          <label class="checkbox-label">
+            <input type="checkbox" data-reward-field="auto_fulfill" ${f.auto_fulfill ? "checked" : ""}>
+            Gilt mit der Einlösung sofort als erledigt${isScreenTime ? " (bei Handyzeit meist sinnvoll, da automatisch gewährt)" : ""}
+          </label>
+          <div class="form-actions">
+            <button type="submit" data-action="save-reward">Speichern</button>
+            <button type="button" data-action="cancel-reward-form">Abbrechen</button>
+          </div>
+        </form>`;
     }
 
     // Admin-only, configuration-only section: which battery-level entities
@@ -1541,7 +2006,23 @@
         .chip { flex-direction: row !important; align-items: center; gap: 4px !important; background: var(--secondary-background-color, #f2f2f2);
                 border-radius: 12px; padding: 4px 8px; }
         .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .form label.checkbox-label { flex-direction: row; align-items: center; gap: 8px; }
+        .form input[type="checkbox"] { width: auto; }
         h4 { margin: 12px 0 8px; font-size: 0.95em; color: var(--secondary-text-color); }
+        /* Bestenliste (v0.15, gemerged aus family-tasks-leaderboard-card.js). */
+        .tabs { display: flex; gap: 4px; margin: 8px 0 12px; }
+        .tab { border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.85em;
+               background: var(--secondary-background-color, #f2f2f2); color: var(--secondary-text-color);
+               cursor: pointer; }
+        .tab.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+        .rank { width: 22px; text-align: center; font-weight: 500; color: var(--secondary-text-color); flex-shrink: 0; }
+        .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+        .points { font-size: 0.85em; color: var(--secondary-text-color); flex-shrink: 0; }
+        .balance { font-size: 0.8em; color: var(--secondary-text-color); }
+        .bar-track { height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
+        .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
+        .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
+                       border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
         /* Each collapsed-section "... anzeigen" button gets its own block-
            level row (v0.9) - without this, two adjacent buttons with no
            wrapping element between them would sit side by side. */
@@ -1573,6 +2054,7 @@
           task: () => this._saveTask(),
           member: () => this._saveMember(),
           "own-task": () => this._saveOwnTask(),
+          reward: () => this._saveReward(),
         };
         saveHandlers[form.dataset.form]?.();
       });
@@ -1623,6 +2105,33 @@
           this._controlsHidden = !this._controlsHidden;
           this._saveUiState();
           this._render();
+        } else if (action === "select-view") {
+          this._view = el.dataset.view;
+          this._saveUiState();
+          this._render();
+        } else if (action === "select-reward") {
+          this._selectReward(el.dataset.rewardId);
+        } else if (action === "cancel-redeem") {
+          this._cancelRedeem();
+        } else if (action === "confirm-redeem") {
+          this._confirmRedeem(el.dataset.rewardId);
+        } else if (action === "new-reward") {
+          // Defense-in-depth, same reasoning as the edit/delete gating above -
+          // the backend enforces this too regardless (see
+          // RewardRedemptionStorageCollectionWebsocket in storage.py).
+          if (this._isAdmin() && !this._isChildUser()) this._openRewardForm(null);
+        } else if (action === "edit-reward") {
+          if (this._isAdmin() && !this._isChildUser()) this._openRewardForm(el.dataset.rewardId);
+        } else if (action === "cancel-reward-form") {
+          this._closeRewardForm();
+        } else if (action === "delete-reward") {
+          if (this._isAdmin() && !this._isChildUser()) this._deleteReward(el.dataset.rewardId);
+        } else if (action === "fulfill-redemption") {
+          if (this._isAdmin() && !this._isChildUser()) this._fulfillRedemption(el.dataset.redemptionId);
+        } else if (action === "toggle-hide-fulfilled") {
+          this._hideFulfilled = !this._hideFulfilled;
+          this._saveUiState();
+          this._render();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.
@@ -1663,6 +2172,30 @@
             task_id: subtaskEl.dataset.taskId,
             subtask_id: subtaskEl.dataset.subtaskId,
           });
+          return;
+        }
+
+        // Points-to-invest field for an investable Handyzeit redemption
+        // (v0.14) - not part of the reward-catalog form itself, just the
+        // pending-redeem confirm row, so it's handled separately from the
+        // data-reward-field inputs below.
+        const investEl = ev.target.closest('[data-action="invest-points"]');
+        if (investEl) {
+          this._pendingInvestPoints = Math.max(1, Number(investEl.value) || 1);
+          this._render();
+          return;
+        }
+
+        // The reward-catalog form uses its own data-reward-field mechanism
+        // (not the generic data-field/_formSpec one below) so that switching
+        // "Belohnungstyp" can redraw just the <form> in place, same reasoning
+        // as the other forms' data-field handling.
+        const rewardFieldEl = ev.target.closest("[data-reward-field]");
+        if (rewardFieldEl) {
+          this._rewardForm[rewardFieldEl.dataset.rewardField] =
+            rewardFieldEl.type === "checkbox" ? rewardFieldEl.checked : rewardFieldEl.value;
+          const rewardForm = ev.target.closest('[data-form="reward"]');
+          if (rewardForm) rewardForm.outerHTML = this._renderRewardForm();
           return;
         }
 
@@ -1729,6 +2262,6 @@
   window.customCards.push({
     type: "family-tasks-card",
     name: "Family Tasks",
-    description: "Aufgaben, Rotation und Punkte für die Familie verwalten.",
+    description: "Aufgaben, Rotation, Bestenliste und Belohnungen für die Familie verwalten.",
   });
 })();
