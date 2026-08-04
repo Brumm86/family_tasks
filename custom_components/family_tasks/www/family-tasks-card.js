@@ -293,6 +293,50 @@
  * Belohnungen" note further up for the other two v0.21 changes (Favoriten
  * moved into its own dialog; Bestenliste/Belohnungen each independently
  * collapsible).
+ *
+ * v0.22: several changes across the whole card.
+ * - "Erledigt"/"Bestätigen" only renders for whoever a task occurrence is
+ *   actually assigned to right now (assigned_member_ids, the same list the
+ *   member-filter chips use) - see the `canAct` check in _renderTaskList.
+ *   Previously anyone with access to the card could mark any task done for
+ *   anyone. The plain "Überspringen" button (skip a recurring task to its
+ *   next occurrence) is removed entirely; the parent-confirmation flow's
+ *   "Ablehnen" (reject a child's completion claim) is a distinct action that
+ *   reuses the same skip-task service call under a different label and
+ *   stays available, gated by the same `canAct` check.
+ * - "Erledigt"/"Bearbeiten"/"Löschen" - and the equivalent actions elsewhere
+ *   on the card ("Bestätigen"/"Ablehnen", a favorite's "Aufgabe erstellen",
+ *   a redemption's "Als erledigt markieren") - are now small round icon
+ *   buttons (see iconActionButton/.icon-action-btn) instead of large text
+ *   buttons, everywhere the card uses them (Aufgaben, Favoriten,
+ *   Familienmitglieder, Bestenliste/Belohnungen). They fit next to a row's
+ *   content in the same line even on narrow screens, so the v0.20 mobile
+ *   media query that stacked .row-main/.row-actions into two rows and
+ *   buttons onto full-width lines of their own is simplified back down.
+ * - "+ Aufgabe hinzufügen"/"+ Eigene Aufgabe hinzufügen" and the "Favoriten"
+ *   launcher sit in a shared .task-actions-row now, left- and right-aligned
+ *   respectively (space-between), instead of just one after another on the
+ *   left.
+ * - A task a "child" member created for themselves (family_tasks/task/
+ *   create_own, see CONF_TASK_CREATED_BY_MEMBER_ID in const.py) is now
+ *   visible only to whoever created it - not other children (already mostly
+ *   excluded by their own forced "own tasks" filter) and, new in v0.22, not
+ *   parents/admins either, whose view previously showed every task
+ *   regardless. See the creator-only filter at the top of _renderTaskList.
+ *   The coordinator-generated parent-confirmation task raised once such a
+ *   task is completed (if it requires confirmation) is a separate task
+ *   entity without this field, so it's unaffected and still shows up for
+ *   parents as before.
+ * - Clicking a Bestenliste row (or pressing Enter/Space on it) opens a
+ *   dialog listing exactly which tasks that member completed during the
+ *   current calendar week, via the new family_tasks/member/
+ *   weekly_completions command - see _openMemberCompletions/
+ *   _renderMemberCompletionsList.
+ * - The Bestenliste shows "Wochensieger-Bonus: N Punkte" above the ranking
+ *   whenever the household has the weekly-winner-bonus feature (v0.14)
+ *   turned on - see _weeklyWinnerBonus, which reads it off a
+ *   weekly_winner_bonus_enabled/...points attribute now carried by every
+ *   member's points sensor (FamilyTasksData in coordinator.py).
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -374,6 +418,20 @@
   // alle "nicht gesetzt".
   function screenTimeSuffix(minutes) {
     return minutes ? ` · +${esc(minutes)} Min. Bildschirmzeit` : "";
+  }
+
+  // Kompakter Icon-Button (v0.22) für Zeilen-Aktionen wie "Erledigt"/
+  // "Bearbeiten"/"Löschen" - ersetzt die bisherigen großen Text-Buttons in
+  // .row-actions überall auf der Karte (Aufgaben, Favoriten,
+  // Familienmitglieder, Belohnungen, Einlösungen), damit mehrere Aktionen
+  // nebeneinander in einer Zeile neben der jeweiligen Zeile Platz finden,
+  // statt die Zeile unnötig hoch zu machen. `extraClass` steuert nur die
+  // Icon-Farbe (success/danger), Größe/Form sind für jeden Icon-Button
+  // gleich (siehe .icon-action-btn in _styles). `dataset` ist ein bereits
+  // fertig formatierter String mit den data-*-Attributen, die der jeweilige
+  // Klick-Handler in _attachListenersOnce braucht (z. B. data-task-id).
+  function iconActionButton(action, icon, title, { dataset = "", extraClass = "", disabled = false } = {}) {
+    return `<button type="button" class="icon-action-btn ${extraClass}" data-action="${action}" ${dataset} title="${esc(title)}" aria-label="${esc(title)}" ${disabled ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon></button>`;
   }
 
   function emptyTriggerForm() {
@@ -610,6 +668,14 @@
       // not just parents configuring something.
       this._hideLeaderboard = undefined;
       this._hideRewards = undefined;
+      // v0.22: "welche Aufgaben hat dieses Mitglied diese Woche erledigt"-
+      // Dialog, geöffnet per Klick auf eine Bestenlisten-Zeile (siehe
+      // _openMemberCompletions/_renderRankingSection). Nicht persistiert -
+      // startet wie jedes andere Dialog-Flag immer geschlossen.
+      this._memberCompletionsDialogOpen = false;
+      this._memberCompletionsMemberId = null;
+      this._memberCompletions = [];
+      this._memberCompletionsLoading = false;
     }
 
     setConfig(config) {
@@ -925,6 +991,24 @@
     // unten ist, keine periodenbezogene Rangliste-Kennzahl.
     _availablePointsFor(memberId) {
       return Number(this._pointsSensorForMember(memberId)?.attributes?.points_available ?? 0);
+    }
+
+    // v0.22: household-wide weekly-winner-bonus settings (see
+    // CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py) - rides along
+    // as an attribute on every member's points sensor (identical on all of
+    // them, see FamilyTasksMemberPointsSensor in sensor.py), so any one of
+    // them will do; "points_week" is a unique-enough discriminator to find a
+    // points sensor specifically (the open-tasks sensor also carries a bare
+    // "member_id" attribute but not this one).
+    _weeklyWinnerBonus() {
+      if (!this._hass) return { enabled: false, points: 0 };
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      return {
+        enabled: !!sensor?.attributes?.weekly_winner_bonus_enabled,
+        points: Number(sensor?.attributes?.weekly_winner_bonus_points ?? 0),
+      };
     }
 
     // v0.16: always ranks by points_week now - the "Woche"/"Monat" tab
@@ -1326,6 +1410,40 @@
       });
     }
 
+    // v0.22: opened by clicking a Bestenliste row - fetches which tasks that
+    // member completed *this* calendar week (family_tasks/member/
+    // weekly_completions, see ws_list_member_weekly_completions in
+    // storage.py, which computes the same Monday-00:00-local week boundary
+    // the points_week figure already shown on the row is based on). Loads on
+    // open rather than being derived from anything the card already has
+    // locally - there is no per-completion detail (task name/timestamp)
+    // subscribed to client-side, only the aggregate points_week total.
+    async _openMemberCompletions(memberId) {
+      this._memberCompletionsMemberId = memberId;
+      this._memberCompletionsDialogOpen = true;
+      this._memberCompletions = [];
+      this._memberCompletionsLoading = true;
+      this._render();
+      try {
+        const result = await this._callWS({
+          type: "family_tasks/member/weekly_completions",
+          member_id: memberId,
+        });
+        this._memberCompletions = result?.completions ?? [];
+      } catch (err) {
+        // _callWS already alerted the user - just leave the list empty.
+      } finally {
+        this._memberCompletionsLoading = false;
+        this._render();
+      }
+    }
+
+    _closeMemberCompletions() {
+      this._memberCompletionsDialogOpen = false;
+      this._memberCompletionsMemberId = null;
+      this._render();
+    }
+
     // --- Favoriten actions (v0.17) ---------------------------------------
 
     _openFavoriteForm(favoriteId) {
@@ -1455,9 +1573,13 @@
         </div>
         ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
         ${this._renderTaskList(isAdmin)}
-        ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
-        ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
-        ${this._renderFavoritesLauncher(canManageFavorites)}
+        <div class="task-actions-row">
+          <div>
+            ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
+            ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
+          </div>
+          <div>${this._renderFavoritesLauncher(canManageFavorites)}</div>
+        </div>
       `;
 
       // v0.21: die großen Kartenbereiche (Aufgaben inkl. "hinzufügen"/
@@ -1525,6 +1647,14 @@
             </div>
             ${this._renderFavoritesSection(canManageFavorites)}
           </dialog>` : ""}
+          ${this._memberCompletionsDialogOpen ? `
+          <dialog class="dialog" data-dialog="member-completions">
+            <div class="section-header">
+              <h3>${esc(this._memberName(this._memberCompletionsMemberId))}: diese Woche erledigt</h3>
+              <button type="button" class="link" data-action="close-member-completions">Schließen</button>
+            </div>
+            ${this._renderMemberCompletionsList()}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
@@ -1545,6 +1675,7 @@
         ["reward", () => this._rewardFormOpen, () => this._closeRewardForm()],
         ["favorite", () => this._favoriteFormOpen, () => this._closeFavoriteForm()],
         ["favorites-list", () => this._favoritesDialogOpen, () => this._closeFavoritesDialog()],
+        ["member-completions", () => this._memberCompletionsDialogOpen, () => this._closeMemberCompletions()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -1579,6 +1710,21 @@
 
     _renderTaskList(isAdmin) {
       let ids = Object.keys(this._tasks);
+      const currentMemberId = this._currentMemberId();
+      // v0.22: a task a "child" member created for themselves (see
+      // "created_by_member_id" / CONF_TASK_CREATED_BY_MEMBER_ID in const.py,
+      // set by ws_create_own_task in storage.py) is only ever visible to
+      // whoever created it - not even a parent/admin sees it in the normal
+      // task list, so a child's casual self-reminder doesn't clutter
+      // everyone else's view. The coordinator-generated parent-confirmation
+      // task raised once such a task is actually completed (if
+      // requires_confirmation is set) is a *separate* task entity with no
+      // created_by_member_id of its own, so it's unaffected and still shows
+      // up for parents as normal.
+      ids = ids.filter((id) => {
+        const createdBy = this._tasks[id].created_by_member_id;
+        return !createdBy || createdBy === currentMemberId;
+      });
       const totalCount = ids.length;
       if (this._hideNotDue) {
         ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
@@ -1619,7 +1765,7 @@
           const isMandatory = task.kind === "mandatory";
           // Auto-generated by the coordinator when a child's task needs
           // parental sign-off (see async_complete_task in coordinator.py) -
-          // read-only row, and "Erledigt"/"Überspringen" mean confirm/reject.
+          // read-only row, and "Bestätigen"/"Ablehnen" mean confirm/reject.
           const isConfirmation = !!task.confirms;
           const batteryEntities = statusState?.attributes?.battery_entities ?? [];
           const subtasks = statusState?.attributes?.subtasks ?? [];
@@ -1649,21 +1795,25 @@
               : "Keine Batterie niedrig"
             : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.`;
           const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
-          // "Überspringen" only makes sense for a task that recurs on a
-          // schedule (daily/weekly/interval_days) - skipping a "once" task,
-          // a sensor-bound "trigger" task, or the legacy aggregate "battery"
-          // task doesn't have the same "move on to next occurrence"
-          // semantics, so the button is hidden for those (v0.10). The
-          // parent-confirmation flow reuses the same button as "Ablehnen"
-          // (reject the child's claim) and stays available regardless of the
-          // original task's recurrence type.
-          const isRecurring = ["daily", "weekly", "interval_days"].includes(task.recurrence?.type);
-          const showSkip = isConfirmation || isRecurring;
+          // v0.22: the plain "Überspringen" button (skip to the next
+          // occurrence of a recurring task) is removed entirely. The
+          // parent-confirmation flow's "Ablehnen" (reject the child's claim)
+          // is a distinct action - reusing the same skip-task service call
+          // under a different label - and stays available, since a parent
+          // still needs a way to reject a child's completion claim.
+          const showReject = isConfirmation;
+          // v0.22: "Erledigt"/"Bestätigen" only renders for whoever the
+          // occurrence is actually assigned to (or, for a parent-
+          // confirmation task, one of the household's parents) - see the
+          // file header/CHANGELOG note. A user with no linked family member
+          // (currentMemberId null) never matches any assignedIds, so they
+          // simply never see the button, same as before this member never
+          // being one of the assignees.
+          const canAct = assignedIds.includes(currentMemberId);
           // A checklist task only becomes "done" once every sub-item is
           // checked (see async_toggle_subtask in coordinator.py) - the
           // manual "Erledigt" button is disabled for it so completion always
-          // goes through the checklist itself; "Überspringen" still works
-          // like on any other task.
+          // goes through the checklist itself.
           const disableComplete = resolved || isChecklist;
           // Alphabetical, unchecked items first (v0.12): a checklist can grow
           // to a couple dozen items (e.g. a packing list) and the backend
@@ -1699,11 +1849,11 @@
                   <span class="muted">${detail}</span>
                 </div>
                 <div class="row-actions">
-                  <button data-action="complete-task" data-task-id="${id}" ${disableComplete ? "disabled" : ""}>${isConfirmation ? "Bestätigen" : "Erledigt"}</button>
-                  ${showSkip ? `<button data-action="skip-task" data-task-id="${id}" ${resolved ? "disabled" : ""}>${isConfirmation ? "Ablehnen" : "Überspringen"}</button>` : ""}
+                  ${canAct ? iconActionButton("complete-task", isConfirmation ? "mdi:check-bold" : "mdi:check", isConfirmation ? "Bestätigen" : "Erledigt", { dataset: `data-task-id="${id}"`, extraClass: "success", disabled: disableComplete }) : ""}
+                  ${showReject && canAct ? iconActionButton("skip-task", "mdi:close", "Ablehnen", { dataset: `data-task-id="${id}"`, extraClass: "danger", disabled: resolved }) : ""}
                   ${isConfirmation || !isAdmin ? "" : `
-                  <button data-action="edit-task" data-task-id="${id}">Bearbeiten</button>
-                  <button data-action="delete-task" data-task-id="${id}" class="danger">Löschen</button>`}
+                  ${iconActionButton("edit-task", "mdi:pencil", "Bearbeiten", { dataset: `data-task-id="${id}"` })}
+                  ${iconActionButton("delete-task", "mdi:delete", "Löschen", { dataset: `data-task-id="${id}"`, extraClass: "danger" })}`}
                 </div>
               </div>
               ${subtaskList}
@@ -1778,9 +1928,9 @@
                     <span class="muted">${esc(detailParts.join(" · "))}</span>
                   </div>
                   <div class="row-actions">
-                    <button data-action="instantiate-favorite" data-favorite-id="${id}">Aufgabe erstellen</button>
-                    <button data-action="edit-favorite" data-favorite-id="${id}">Bearbeiten</button>
-                    <button data-action="delete-favorite" data-favorite-id="${id}" class="danger">Löschen</button>
+                    ${iconActionButton("instantiate-favorite", "mdi:playlist-plus", "Aufgabe erstellen", { dataset: `data-favorite-id="${id}"`, extraClass: "success" })}
+                    ${iconActionButton("edit-favorite", "mdi:pencil", "Bearbeiten", { dataset: `data-favorite-id="${id}"` })}
+                    ${iconActionButton("delete-favorite", "mdi:delete", "Löschen", { dataset: `data-favorite-id="${id}"`, extraClass: "danger" })}
                   </div>
                 </div>`;
             })
@@ -1827,8 +1977,8 @@
               </div>
               ${canManageMembers ? `
               <div class="row-actions">
-                <button data-action="edit-member" data-member-id="${id}">Bearbeiten</button>
-                <button data-action="delete-member" data-member-id="${id}" class="danger">Löschen</button>
+                ${iconActionButton("edit-member", "mdi:pencil", "Bearbeiten", { dataset: `data-member-id="${id}"` })}
+                ${iconActionButton("delete-member", "mdi:delete", "Löschen", { dataset: `data-member-id="${id}"`, extraClass: "danger" })}
               </div>` : ""}
             </div>`;
         })
@@ -1875,13 +2025,18 @@
       }
       const ranked = this._rankedMembers();
       const maxPoints = ranked.length ? Math.max(...ranked.map((r) => r.points), 1) : 1;
+      // v0.22: jede Zeile öffnet per Klick einen Dialog mit den diese Woche
+      // von diesem Mitglied erledigten Aufgaben - siehe
+      // _openMemberCompletions. role="button"/tabindex sorgen zusammen mit
+      // dem Enter/Leertaste-Handler in _attachListenersOnce für einfache
+      // Tastaturbedienbarkeit.
       const rankingList = ranked.length
         ? `<div class="list">${ranked
             .map((entry, index) => {
               const pct = Math.round((entry.points / maxPoints) * 100);
               const available = this._availablePointsFor(entry.id);
               return `
-                <div class="row">
+                <div class="row clickable" data-action="open-member-completions" data-member-id="${entry.id}" role="button" tabindex="0">
                   <div class="rank">${index + 1}</div>
                   <div class="row-main">
                     <div class="row-top">
@@ -1896,13 +2051,48 @@
             .join("")}</div>`
         : `<p class="muted">Noch keine teilnehmenden Familienmitglieder.</p>`;
 
+      // v0.22: Bonuspunkte für den Wochensieger (siehe
+      // CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py) oben in der
+      // Bestenliste anzeigen, sofern der Haushalt die Funktion aktiviert hat
+      // - reine Anzeige, die eigentliche Vergabe übernimmt weiterhin
+      // FamilyTasksCoordinator._async_process_weekly_winner_bonus.
+      const bonus = this._weeklyWinnerBonus();
+
       return `
         <div class="section-header">
           <h3>Bestenliste</h3>
           <button class="link" data-action="toggle-hide-leaderboard">Ausblenden</button>
         </div>
+        ${bonus.enabled && bonus.points > 0 ? `<p class="muted">Wochensieger-Bonus: ${pointsLabel(bonus.points)}</p>` : ""}
         ${rankingList}
       `;
+    }
+
+    // v0.22: Inhalt des "diese Woche erledigt"-Dialogs, geöffnet per Klick
+    // auf eine Bestenlisten-Zeile - siehe _openMemberCompletions.
+    _renderMemberCompletionsList() {
+      if (this._memberCompletionsLoading) return `<p class="muted">Lädt…</p>`;
+      if (!this._memberCompletions.length) {
+        return `<p class="muted">Diese Woche noch keine Aufgabe erledigt.</p>`;
+      }
+      return `<div class="list">${this._memberCompletions
+        .map((c) => {
+          const when = c.completed_at
+            ? new Date(c.completed_at).toLocaleString("de-DE", {
+                weekday: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "";
+          return `
+            <div class="row">
+              <div class="row-main">
+                <span class="name">${esc(c.task_name)}</span>
+                <span class="muted">${esc(when)}${c.points_awarded ? ` · ${pointsLabel(c.points_awarded)}` : ""}</span>
+              </div>
+            </div>`;
+        })
+        .join("")}</div>`;
     }
 
     // v0.21: "Belohnungen" ausblendbar - gleiches Muster/gleiche Begründung
@@ -1954,8 +2144,8 @@
                     <div class="row-actions">
                       ${currentMemberId && currentParticipates ? `<button data-action="select-reward" data-reward-id="${id}" ${affordable ? "" : "disabled"}>Auswählen</button>` : ""}
                       ${canManageRewards ? `
-                      <button data-action="edit-reward" data-reward-id="${id}">Bearbeiten</button>
-                      <button data-action="delete-reward" data-reward-id="${id}" class="danger">Löschen</button>` : ""}
+                      ${iconActionButton("edit-reward", "mdi:pencil", "Bearbeiten", { dataset: `data-reward-id="${id}"` })}
+                      ${iconActionButton("delete-reward", "mdi:delete", "Löschen", { dataset: `data-reward-id="${id}"`, extraClass: "danger" })}` : ""}
                     </div>
                   </div>
                   ${isPending && isInvestable ? `
@@ -1998,7 +2188,7 @@
                   </div>
                   ${!r.fulfilled && canManageRewards ? `
                   <div class="row-actions">
-                    <button data-action="fulfill-redemption" data-redemption-id="${id}">Als erledigt markieren</button>
+                    ${iconActionButton("fulfill-redemption", "mdi:check", "Als erledigt markieren", { dataset: `data-redemption-id="${id}"`, extraClass: "success" })}
                   </div>` : ""}
                 </div>`;
             })
@@ -2431,23 +2621,42 @@
            Letting .row-main actually fill the row makes its inner
            space-between consistent across every row. */
         .row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-        .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
-        /* v0.20: auf schmalen (Handy-)Bildschirmen reichte die Zeilenbreite
-           nicht für Name/Details UND alle Aktions-Buttons nebeneinander -
-           .row-actions brach zwar selbst per flex-wrap um, blieb dabei aber
-           in derselben Zeile wie .row-main, wodurch die umgebrochenen
-           Buttons direkt über dem Namen/den Details saßen und die Schrift
-           überlagerten. Unterhalb von 480px bricht .row deshalb komplett um:
-           .row-main nimmt die volle Zeilenbreite ein, .row-actions rutscht
-           in eine eigene Zeile darunter und ordnet ihre Buttons zusätzlich
-           untereinander (statt nebeneinander) an, damit auch vier Buttons
-           (Erledigt/Überspringen/Bearbeiten/Löschen) nie wieder über den
-           Text ragen. */
+        .row-actions { display: flex; gap: 2px; flex-wrap: nowrap; justify-content: flex-end; flex-shrink: 0; }
+        /* v0.22: Erledigt/Bearbeiten/Löschen (und die entsprechenden
+           Aktionen anderswo auf der Karte - Favoriten, Belohnungen,
+           Einlösungen) sind jetzt kleine runde Icon-Buttons statt großer
+           Text-Buttons (.icon-action-btn) - dadurch passen sie auch auf
+           schmalen (Handy-)Bildschirmen ohne Weiteres neben .row-main in
+           dieselbe Zeile, ohne sie zu überlagern. Ersetzt die bis v0.21
+           nötige Sonderbehandlung unterhalb von 480px (.row-main/.row-actions
+           komplett untereinander, Buttons einzeln auf voller Breite) - die
+           ist mit den kompakten Icon-Buttons nicht mehr nötig. */
+        .icon-action-btn { background: none; border: none; border-radius: 50%; width: 30px; height: 30px;
+                            padding: 0; display: inline-flex; align-items: center; justify-content: center;
+                            color: var(--secondary-text-color); cursor: pointer; flex-shrink: 0; }
+        .icon-action-btn:hover { background: var(--card-background-color, #fff); }
+        .icon-action-btn:disabled { opacity: 0.4; cursor: default; background: none; }
+        .icon-action-btn ha-icon { --mdc-icon-size: 18px; }
+        .icon-action-btn.success { color: var(--success-color, #43a047); }
+        .icon-action-btn.danger { color: var(--error-color, #db4437); }
+        /* "+ Aufgabe hinzufügen"/"+ Eigene Aufgabe hinzufügen" links, der
+           "Favoriten"-Launcher rechts, in derselben Reihe (v0.22) - ist der
+           rechte Teil leer (kein Favoriten-Zugriff), bleibt der linke Teil
+           dank justify-content: space-between trotzdem einfach linksbündig. */
+        .task-actions-row { display: flex; justify-content: space-between; align-items: center;
+                              gap: 8px; flex-wrap: wrap; }
+        .task-actions-row button.add { padding: 8px 0; }
+        /* v0.22: klickbare Bestenlisten-Zeile (öffnet die "diese Woche
+           erledigt"-Übersicht für das jeweilige Mitglied, siehe
+           _openMemberCompletions) - optische/Tastatur-Hinweise, dass die
+           ganze Zeile ein Button ist. */
+        .row.clickable { cursor: pointer; }
+        .row.clickable:hover { background: var(--card-background-color, #fff); }
+        .row.clickable:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         @media (max-width: 480px) {
           .row { flex-wrap: wrap; }
           .row-main { flex-basis: 100%; }
-          .row-actions { flex-basis: 100%; flex-direction: column; align-items: stretch; justify-content: flex-start; }
-          .row-actions button { width: 100%; }
+          .row-actions { flex-basis: 100%; justify-content: flex-start; }
         }
         .subtask-list { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 4px 24px; }
         .subtask-item { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 0.9em; }
@@ -2642,6 +2851,10 @@
           if (this._isAdmin() && !this._isChildUser()) this._openFavoritesDialog();
         } else if (action === "close-favorites") {
           this._closeFavoritesDialog();
+        } else if (action === "open-member-completions") {
+          this._openMemberCompletions(el.dataset.memberId)?.catch(() => {});
+        } else if (action === "close-member-completions") {
+          this._closeMemberCompletions();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.
@@ -2659,6 +2872,19 @@
             form.outerHTML = spec.render();
           }
         }
+      });
+
+      // v0.22: Enter/Leertaste lösen einen [role="button"] (aktuell nur die
+      // klickbaren Bestenlisten-Zeilen, siehe _renderRankingSection) wie
+      // einen Klick aus - native <button>-Elemente brauchen das nicht, ein
+      // per Tastatur fokussiertes <div role="button"> aber schon, da der
+      // Browser dafür keinen "click" von selbst auslöst.
+      this.shadowRoot.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        const el = ev.target.closest('[role="button"][data-action]');
+        if (!el) return;
+        ev.preventDefault();
+        el.click();
       });
 
       this.shadowRoot.addEventListener("change", (ev) => {

@@ -11,7 +11,7 @@ StorageCollection (there is nothing to edit, only to append and prune).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -34,6 +34,7 @@ from .const import (
     CONF_REWARD_SCREEN_TIME_INVESTABLE,
     CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
@@ -68,7 +69,9 @@ from .const import (
     TASK_TRIGGER_KINDS,
     TASK_TRIGGER_NUMERIC_STATE,
     TASK_TRIGGER_STATE,
+    WEEKLY_BONUS_TASK_ID,
     WS_API_FAVORITE_INSTANTIATE,
+    WS_API_MEMBER_WEEKLY_COMPLETIONS,
     WS_API_PREFIX_BATTERY_OVERRIDES,
     WS_API_PREFIX_FAVORITES,
     WS_API_PREFIX_MEMBERS,
@@ -216,6 +219,9 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     # See TASK_KIND_CHECKLIST in const.py.
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+    # See CONF_TASK_CREATED_BY_MEMBER_ID in const.py - only ever set by
+    # ws_create_own_task, never by the card's admin task-creation form.
+    vol.Optional(CONF_TASK_CREATED_BY_MEMBER_ID): str,
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -1195,6 +1201,9 @@ def async_setup_websocket_api(
         data["enabled"] = True
         data["rotation"] = {"member_ids": [member_id], "strategy": ROTATION_STRATEGY_FIXED}
         data[CONF_TASK_REQUIRES_CONFIRMATION] = requires_confirmation
+        # v0.22: tags the task with its creator so the card can hide it from
+        # everyone else - see CONF_TASK_CREATED_BY_MEMBER_ID in const.py.
+        data[CONF_TASK_CREATED_BY_MEMBER_ID] = member_id
 
         try:
             item = await tasks.async_create_item(data)
@@ -1208,6 +1217,72 @@ def async_setup_websocket_api(
 
     websocket_api.async_register_command(
         hass, WS_API_TASK_CREATE_OWN, ws_create_own_task, CREATE_OWN_TASK_SCHEMA
+    )
+
+    @websocket_api.async_response
+    async def ws_list_member_weekly_completions(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Return one member's non-skipped completions for the current calendar week.
+
+        Backs the Bestenliste's click-through ("which tasks did this member
+        complete this week") - see WS_API_MEMBER_WEEKLY_COMPLETIONS in
+        const.py. The week boundary mirrors
+        FamilyTasksCoordinator._async_update_data's start_of_week exactly
+        (Monday 00:00 local) so this always lines up with the points_week
+        figure already shown on the leaderboard. Not admin-restricted - any
+        logged-in user may look up any member's completions, same as the
+        leaderboard/points sensors themselves are already visible to
+        everyone regardless of role.
+        """
+        member_id = msg["member_id"]
+        if member_id not in members.data:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Familienmitglied nicht gefunden."
+            )
+            return
+
+        local_now = dt_util.now()
+        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
+        start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
+
+        results: list[dict[str, Any]] = []
+        for entry in completions.entries:
+            if entry.get("completed_by_member_id") != member_id:
+                continue
+            if entry.get("skipped") or entry.get("task_id") == WEEKLY_BONUS_TASK_ID:
+                continue
+            completed_at = dt_util.parse_datetime(entry.get("completed_at", ""))
+            if completed_at is None or completed_at < start_of_week:
+                continue
+            # Prefer the denormalized name captured at completion time (v0.22)
+            # - a "once" task is deleted the moment it's completed, so an
+            # older entry (or one from before this field existed) falls back
+            # to looking the task up by id, and finally to a generic label if
+            # even that's gone.
+            task = tasks.data.get(entry["task_id"])
+            task_name = entry.get("task_name") or (task["name"] if task else "Aufgabe")
+            results.append(
+                {
+                    "task_id": entry["task_id"],
+                    "task_name": task_name,
+                    "points_awarded": entry.get("points_awarded", 0),
+                    "completed_at": entry["completed_at"],
+                }
+            )
+        results.sort(key=lambda r: r["completed_at"], reverse=True)
+        connection.send_result(msg["id"], {"completions": results})
+
+    websocket_api.async_register_command(
+        hass,
+        WS_API_MEMBER_WEEKLY_COMPLETIONS,
+        ws_list_member_weekly_completions,
+        websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+            {
+                vol.Required("type"): WS_API_MEMBER_WEEKLY_COMPLETIONS,
+                vol.Required("member_id"): str,
+            }
+        ),
     )
 
     @websocket_api.require_admin
@@ -1483,8 +1558,20 @@ class CompletionLogStore:
         member_id: str | None,
         points_awarded: int,
         skipped: bool = False,
+        task_name: str | None = None,
     ) -> dict[str, Any]:
-        """Append a new completion/skip entry and persist it."""
+        """Append a new completion/skip entry and persist it.
+
+        ``task_name`` (v0.22) is a denormalized copy of the task's name at
+        completion time - needed because a "once"-recurrence task is deleted
+        the moment it's completed (see async_complete_task in
+        coordinator.py), so a later lookup by task_id would otherwise find
+        nothing. Used by ws_list_member_weekly_completions below to show a
+        member's completed tasks even after such a task no longer exists;
+        entries written before this field existed simply have it as None,
+        and that lookup falls back to resolving the task_id against the
+        still-existing tasks collection (or "Aufgabe" if that's gone too).
+        """
         entry = {
             CONF_ID: uuid4().hex,
             "task_id": task_id,
@@ -1493,6 +1580,7 @@ class CompletionLogStore:
             "completed_at": dt_util.utcnow().isoformat(),
             "points_awarded": points_awarded,
             "skipped": skipped,
+            "task_name": task_name,
         }
         self._entries.append(entry)
         if len(self._entries) > MAX_COMPLETION_LOG_ENTRIES:

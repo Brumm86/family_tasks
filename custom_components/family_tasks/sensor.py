@@ -94,6 +94,11 @@ class FamilyTasksTaskStatusSensor(
             # const.py, lets an automation identify a "Pflichtaufgabe"
             # without needing the raw stored task object.
             "kind": task.kind,
+            # v0.22: only set for a task a "child" member created for
+            # themselves - see CONF_TASK_CREATED_BY_MEMBER_ID in const.py.
+            # The card uses this to hide such a task from everyone except the
+            # member it names.
+            "created_by_member_id": task.created_by_member_id,
         }
 
 
@@ -147,6 +152,14 @@ class FamilyTasksMemberPointsSensor(
             # the leaderboard card's balance display and reward-affordability
             # check.
             "points_available": member.points_available,
+            # v0.22: household-wide weekly-winner-bonus settings, identical on
+            # every member's points sensor - see
+            # FamilyTasksData.weekly_winner_bonus_enabled/...points in
+            # coordinator.py for why this rides along here instead of living
+            # on a dedicated entity. Drives the Bestenliste's "Wochensieger-
+            # Bonus: N Punkte" line.
+            "weekly_winner_bonus_enabled": self.coordinator.data.weekly_winner_bonus_enabled,
+            "weekly_winner_bonus_points": self.coordinator.data.weekly_winner_bonus_points,
         }
 
 

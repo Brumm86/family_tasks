@@ -37,6 +37,16 @@ CONF_SCREEN_TIME_MINUTES_PER_POINT: Final = "screen_time_minutes_per_point"
 CONF_WEEKLY_WINNER_BONUS_ENABLED: Final = "weekly_winner_bonus_enabled"
 CONF_WEEKLY_WINNER_BONUS_POINTS: Final = "weekly_winner_bonus_points"
 
+# Internal-only sentinel task_id for completion-log entries created by
+# FamilyTasksCoordinator._async_process_weekly_winner_bonus - never a real
+# task, so it never shows up in the task list, and is excluded from the
+# per-member weekly completion history the card shows when a Bestenliste row
+# is clicked (see WS_API_MEMBER_WEEKLY_COMPLETIONS below) even though the
+# points themselves count normally toward that member's totals. Lives here
+# (not in coordinator.py, where it originated) so storage.py's websocket
+# handler for that history can exclude it too without an import cycle.
+WEEKLY_BONUS_TASK_ID: Final = "__weekly_winner_bonus__"
+
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
@@ -188,6 +198,20 @@ CONF_MEMBER_NOTIFY_SERVICE: Final = "notify_service"
 # WS_API_TASK_CREATE_OWN below) choose this explicitly instead.
 CONF_TASK_REQUIRES_CONFIRMATION: Final = "requires_confirmation"
 
+# v0.22: set only by ws_create_own_task (WS_API_TASK_CREATE_OWN) - which
+# family member created this task for themselves. Purely a visibility flag:
+# family-tasks-card.js hides a task carrying this field from everyone except
+# the member it names, including admins/parents - a child's casual
+# self-reminder ("Zimmer aufräumen für mich") isn't meant to clutter anyone
+# else's task list. The auto-generated parent-confirmation task raised once
+# such a task is actually completed (see RECURRENCE_CONFIRMATION above) is a
+# separate task entity that never carries this field, so parents still see
+# and act on *that* one normally. Never set for an admin-created task -
+# TASK_CREATE_SCHEMA/TASK_UPDATE_SCHEMA accept it structurally (so
+# ws_create_own_task can pass it through the normal task-creation path), but
+# nothing in the card's admin task form exposes a way to set it by hand.
+CONF_TASK_CREATED_BY_MEMBER_ID: Final = "created_by_member_id"
+
 # Optional per-task button entity (see CONF_COMPLETION_BUTTON_ENTITY_ID) that
 # gets pressed the moment the task is actually marked done - mainly useful for
 # "trigger" tasks that mirror a device's own state, e.g. a vacuum's "resume
@@ -295,6 +319,17 @@ WS_API_PREFIX_BATTERY_OVERRIDES: Final = f"{DOMAIN}/battery_override"
 # to themselves only (points forced to 0), without needing an administrator
 # account. See ws_create_own_task in storage.py.
 WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
+
+# v0.22: read-only command backing the Bestenliste's per-member "which tasks
+# did they complete this week" drill-down (clicking a leaderboard row opens a
+# dialog listing them - see FamilyTasksCard._openMemberCompletions in
+# family-tasks-card.js). Not a StorageCollection command - there is nothing
+# to create/edit/delete here, just a filtered read of CompletionLogStore
+# (which is intentionally not a StorageCollection either, see storage.py) -
+# and not admin-restricted, since the underlying points/leaderboard data is
+# already visible to every user regardless of role. See
+# ws_list_member_weekly_completions in storage.py.
+WS_API_MEMBER_WEEKLY_COMPLETIONS: Final = f"{WS_API_PREFIX_MEMBERS}/weekly_completions"
 
 # --- Rewards (v0.9) ------------------------------------------------------------
 #

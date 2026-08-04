@@ -26,6 +26,7 @@ from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_REWARDS_OPT_IN,
+    CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_WEEKLY_WINNER_BONUS_ENABLED,
     CONF_WEEKLY_WINNER_BONUS_POINTS,
@@ -54,6 +55,7 @@ from .const import (
     TASK_STATUS_IDLE,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_PENDING,
+    WEEKLY_BONUS_TASK_ID,
 )
 from .storage import (
     BatteryOverrideStorageCollection,
@@ -68,14 +70,11 @@ from .storage import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Internal-only sentinel task_id for completion-log entries created by
-# FamilyTasksCoordinator._async_process_weekly_winner_bonus - never a real
-# task, so it never shows up in the task list. Points logged under this id
-# still count towards a member's points_total/points_available/points_week
-# (it's real, spendable points) but are deliberately excluded from the *next*
-# week's winner determination (_points_earned_in_range) - see
-# CONF_WEEKLY_WINNER_BONUS_ENABLED in const.py for why that exclusion matters.
-WEEKLY_BONUS_TASK_ID = "__weekly_winner_bonus__"
+# WEEKLY_BONUS_TASK_ID now lives in const.py (v0.22) so storage.py's
+# ws_list_member_weekly_completions can exclude it too, without an import
+# cycle - see the constant's docstring there. Re-exported under its original
+# name here since the rest of this module (and its docstrings) still refer to
+# it as a coordinator-local concept.
 
 
 @dataclass(slots=True)
@@ -118,6 +117,10 @@ class TaskStatusData:
     # here (and as a sensor attribute) mainly so an automation can identify a
     # TASK_KIND_MANDATORY task without needing the raw stored task object.
     kind: str = TASK_KIND_STANDARD
+    # v0.22: set only for a task a "child" member created for themselves (see
+    # CONF_TASK_CREATED_BY_MEMBER_ID in const.py) - the card uses this to
+    # hide such a task from everyone except the member it names.
+    created_by_member_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -160,6 +163,16 @@ class FamilyTasksData:
 
     tasks: dict[str, TaskStatusData] = field(default_factory=dict)
     members: dict[str, MemberSummaryData] = field(default_factory=dict)
+    # v0.22: household-wide weekly-winner-bonus settings (see
+    # CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py), read fresh from
+    # the config entry's options on every refresh. Exposed as sensor
+    # attributes (see FamilyTasksMemberPointsSensor in sensor.py) purely so
+    # the card can show "the weekly winner gets N bonus points" atop the
+    # Bestenliste - there is no coordinator-level entity to attach this to
+    # otherwise, so it rides along on every member's points sensor (the value
+    # is identical on all of them, the card just reads it off whichever one).
+    weekly_winner_bonus_enabled: bool = False
+    weekly_winner_bonus_points: int = 0
 
 
 def _current_period_date(recurrence: dict, today: date) -> date:
@@ -343,6 +356,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                         trigger_sensor_value=trigger_sensor_value,
                         trigger_sensor_unit=trigger_sensor_unit,
                         kind=task.get("kind", TASK_KIND_STANDARD),
+                        created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
                     )
                     continue
                 period_key = open_occurrence["period_key"]
@@ -411,6 +425,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 trigger_sensor_value=trigger_sensor_value,
                 trigger_sensor_unit=trigger_sensor_unit,
                 subtasks=subtasks_status,
+                created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
             )
 
         # Total points already redeemed for a catalog reward (v0.9), per
@@ -445,7 +460,24 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 screen_time_grant_active=member_id not in screen_time_paused_members,
             )
 
-        return FamilyTasksData(tasks=task_statuses, members=member_summaries)
+        weekly_winner_bonus_enabled = False
+        weekly_winner_bonus_points = 0
+        if self.config_entry:
+            weekly_winner_bonus_enabled = bool(
+                self.config_entry.options.get(
+                    CONF_WEEKLY_WINNER_BONUS_ENABLED, DEFAULT_WEEKLY_WINNER_BONUS_ENABLED
+                )
+            )
+            weekly_winner_bonus_points = self.config_entry.options.get(
+                CONF_WEEKLY_WINNER_BONUS_POINTS, DEFAULT_WEEKLY_WINNER_BONUS_POINTS
+            )
+
+        return FamilyTasksData(
+            tasks=task_statuses,
+            members=member_summaries,
+            weekly_winner_bonus_enabled=weekly_winner_bonus_enabled,
+            weekly_winner_bonus_points=weekly_winner_bonus_points,
+        )
 
     def _current_period_key(self, task_id: str, task: dict) -> str | None:
         """Return the id of the occurrence currently due, if any.
@@ -538,6 +570,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             period_key=period_key,
             member_id=acting_member_id,
             points_awarded=task.get("points", 0),
+            task_name=task.get("name"),
         )
 
         await self._async_advance_rotation(task_id, task, rotation, member_ids, index)
@@ -729,6 +762,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 period_key=period_key,
                 member_id=child_member_id,
                 points_awarded=original_task.get("points", 0),
+                task_name=original_task.get("name"),
             )
             rotation = original_task["rotation"]
             member_ids = rotation.get("member_ids") or []
