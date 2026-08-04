@@ -25,6 +25,7 @@ from .battery import LowBattery, async_compute_low_batteries
 from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
+    CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
@@ -33,6 +34,7 @@ from .const import (
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
+    DEFAULT_ROTATION_STRATEGY,
     DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
     DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
@@ -173,6 +175,13 @@ class FamilyTasksData:
     # is identical on all of them, the card just reads it off whichever one).
     weekly_winner_bonus_enabled: bool = False
     weekly_winner_bonus_points: int = 0
+    # v0.23: household-wide default rotation strategy for new tasks (see
+    # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
+    # same reason weekly_winner_bonus_enabled/...points do (no dedicated
+    # entity to attach a plain options value to). The card reads this to
+    # pre-select the right "Rotationstyp" when opening the "+ Aufgabe
+    # hinzufügen" form instead of always defaulting to "Reihum".
+    default_rotation_strategy: str = DEFAULT_ROTATION_STRATEGY
 
 
 def _current_period_date(recurrence: dict, today: date) -> date:
@@ -462,6 +471,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         weekly_winner_bonus_enabled = False
         weekly_winner_bonus_points = 0
+        # Household-wide default rotation strategy (see
+        # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - read fresh from the
+        # config entry's options every refresh, same pattern as the weekly-
+        # winner-bonus settings right below. Previously this option was only
+        # ever written by the options flow and never actually read anywhere,
+        # so the card's "+ Aufgabe hinzufügen" form always pre-selected
+        # "Reihum" regardless of what a household had configured here - see
+        # default_rotation_strategy below and FamilyTasksMemberPointsSensor in
+        # sensor.py for how it now reaches the card.
+        default_rotation_strategy = DEFAULT_ROTATION_STRATEGY
         if self.config_entry:
             weekly_winner_bonus_enabled = bool(
                 self.config_entry.options.get(
@@ -471,12 +490,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             weekly_winner_bonus_points = self.config_entry.options.get(
                 CONF_WEEKLY_WINNER_BONUS_POINTS, DEFAULT_WEEKLY_WINNER_BONUS_POINTS
             )
+            default_rotation_strategy = self.config_entry.options.get(
+                CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
+            )
 
         return FamilyTasksData(
             tasks=task_statuses,
             members=member_summaries,
             weekly_winner_bonus_enabled=weekly_winner_bonus_enabled,
             weekly_winner_bonus_points=weekly_winner_bonus_points,
+            default_rotation_strategy=default_rotation_strategy,
         )
 
     def _current_period_key(self, task_id: str, task: dict) -> str | None:

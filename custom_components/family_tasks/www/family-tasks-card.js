@@ -221,8 +221,12 @@
  * (whichever member is linked to the logged-in user, unless only_own_tasks
  * is explicitly `false`), same admin/parent-only visibility (never rendered
  * for a "child" user, whose list is always forced to their own tasks
- * regardless - see _effectiveTaskMemberFilterId). Persisted per device like
- * the other toggles.
+ * regardless - see _effectiveTaskMemberFilterId). v0.23: a manual chip pick
+ * is now persisted per logged-in HA user (taskMemberFilterByUser in
+ * localStorage), not flatly per device like the other toggles - on a shared
+ * device where more than one parent logs in, each of them keeps landing on
+ * their own default/pick instead of inheriting whatever the last person who
+ * used the card happened to have selected.
  *
  * Favoriten (v0.17, replaces the v0.16 star-toggle/quick-complete bar
  * entirely): a "Favorit" is a reusable task *template* a parent maintains -
@@ -699,16 +703,17 @@
         this._controlsHidden = saved?.controlsHidden ?? false;
         // v0.16: replaces the old plain "Nur eigene Aufgaben"/"Alle Aufgaben
         // anzeigen" toggle button with per-member filter chips (see
-        // _renderMemberFilterChips) - same first-run default as before
-        // (only_own_tasks !== false), just expressed as the "own" sentinel
-        // instead of a boolean, since a chip has to point at *someone*
-        // rather than just being on/off.
-        this._taskMemberFilter =
-          saved?.taskMemberFilter !== undefined
-            ? saved.taskMemberFilter
-            : this._config.only_own_tasks === false
-            ? null
-            : "own";
+        // _renderMemberFilterChips). v0.23: unlike the other toggles here,
+        // _taskMemberFilter is deliberately *not* seeded from storage yet at
+        // this point - setConfig runs before `hass` (and therefore the
+        // logged-in user) is known, but the whole point of this filter is to
+        // default to *that* user's own tasks. It stays `undefined` and is
+        // resolved lazily, per logged-in member, the first time
+        // _effectiveTaskMemberFilterId() runs - see that method and
+        // _saveUiState for how a manual chip pick is now remembered
+        // per-member instead of flatly per device (previously any one
+        // member/parent picking "Alle" or someone else's chip on a shared
+        // device silently changed everyone else's default too).
         // Erledigte Einlösungen sind standardmäßig ausgeblendet, wie schon in
         // der ehemals eigenständigen Bestenlisten-Karte.
         this._hideFulfilled = saved?.hideFulfilled ?? true;
@@ -743,6 +748,24 @@
 
     _saveUiState() {
       try {
+        // v0.23: taskMemberFilter used to be a single flat value shared by
+        // every user of a device - a parent picking "Alle" (or a sibling's
+        // chip) silently changed the default for the next person to open the
+        // same card too, including a different family member who should
+        // still land on *their own* tasks. It's now stored per logged-in HA
+        // user id (taskMemberFilterByUser) instead, merged on top of
+        // whatever's already there so saving some *other* toggle here (e.g.
+        // hideMembers) never clobbers a different user's remembered filter
+        // pick. this._taskMemberFilter itself still only ever holds the
+        // *current* user's in-memory value - see
+        // _effectiveTaskMemberFilterId, which lazily seeds it from this same
+        // map the first time it runs for a given login.
+        const existing = this._loadUiState() || {};
+        const taskMemberFilterByUser = { ...(existing.taskMemberFilterByUser || {}) };
+        const userId = this._hass?.user?.id;
+        if (userId && this._taskMemberFilter !== undefined) {
+          taskMemberFilterByUser[userId] = this._taskMemberFilter;
+        }
         window.localStorage.setItem(
           this._storageKey(),
           JSON.stringify({
@@ -750,7 +773,7 @@
             hideMembers: this._hideMembers,
             hideBattery: this._hideBattery,
             controlsHidden: this._controlsHidden,
-            taskMemberFilter: this._taskMemberFilter,
+            taskMemberFilterByUser,
             hideFulfilled: this._hideFulfilled,
             hideLeaderboard: this._hideLeaderboard,
             hideRewards: this._hideRewards,
@@ -1011,6 +1034,21 @@
       };
     }
 
+    // v0.23: household-wide default rotation strategy (see
+    // CONF_DEFAULT_ROTATION_STRATEGY in const.py) - same "rides along on
+    // every member's points sensor" pattern as _weeklyWinnerBonus above.
+    // Used by _openTaskForm to pre-select "Rotationstyp" for a brand new
+    // task instead of always hardcoding "Reihum" - previously this option
+    // was configurable in the integration's options but never actually read
+    // anywhere, so it had no effect at all.
+    _defaultRotationStrategy() {
+      if (!this._hass) return "round_robin";
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      return sensor?.attributes?.default_rotation_strategy ?? "round_robin";
+    }
+
     // v0.16: always ranks by points_week now - the "Woche"/"Monat" tab
     // switcher (and points_month) is gone, see the file header note on the
     // Bestenliste section for why.
@@ -1059,6 +1097,14 @@
     _openTaskForm(taskId) {
       this._editingTaskId = taskId;
       this._taskForm = taskId ? taskToForm(this._tasks[taskId]) : emptyTaskForm();
+      if (!taskId) {
+        // v0.23: a brand new task starts on the household's configured
+        // default rotation strategy (Integrations-Optionen) instead of
+        // always "Reihum" - see _defaultRotationStrategy. Only applies to a
+        // fresh form; editing an existing task always keeps that task's own
+        // rotation.strategy (taskToForm above), untouched.
+        this._taskForm.rotation.strategy = this._defaultRotationStrategy();
+      }
       this._taskFormOpen = true;
       this._render();
     }
@@ -1702,7 +1748,29 @@
     // controls at all, see _renderMemberFilterChips), and the "own" sentinel
     // (the first-run default) resolves freshly against whoever is currently
     // logged in rather than a member id baked in at setConfig time.
+    //
+    // v0.23: this._taskMemberFilter itself is now lazily seeded here (once
+    // per session, on first call) instead of eagerly in setConfig, because
+    // it has to be looked up per logged-in HA user id - and setConfig runs
+    // before `hass` (and therefore the user) is available. Seeds from that
+    // user's own remembered pick (taskMemberFilterByUser in localStorage, see
+    // _saveUiState) if there is one, otherwise falls back to the "own"/null
+    // first-run default exactly as before. Previously a single flat
+    // taskMemberFilter value was shared by every user of the same device -
+    // whichever member/parent last clicked "Alle" or a sibling's chip
+    // silently became the default for the next person to open the card too,
+    // instead of everyone always starting on their own tasks.
     _effectiveTaskMemberFilterId() {
+      if (this._taskMemberFilter === undefined) {
+        const userId = this._hass?.user?.id;
+        const byUser = this._loadUiState()?.taskMemberFilterByUser || {};
+        this._taskMemberFilter =
+          userId && Object.prototype.hasOwnProperty.call(byUser, userId)
+            ? byUser[userId]
+            : this._config.only_own_tasks === false
+            ? null
+            : "own";
+      }
       const filter = this._isChildUser() ? "own" : this._taskMemberFilter;
       if (filter === null || filter === undefined) return null;
       return filter === "own" ? this._currentMemberId() : filter;
@@ -2030,6 +2098,11 @@
       // _openMemberCompletions. role="button"/tabindex sorgen zusammen mit
       // dem Enter/Leertaste-Handler in _attachListenersOnce für einfache
       // Tastaturbedienbarkeit.
+      // v0.23: kleines Pfeil-Icon (".disclosure-icon") rechts in jeder Zeile,
+      // rein optisch - macht sichtbar, dass die Zeile anklickbar ist und zu
+      // Details führt, statt dass diese Funktion nur durch Zufälliges
+      // Anklicken entdeckt wird (Name/Punkte allein sahen wie reiner Text
+      // aus, ohne erkennbaren Hinweis auf die Detail-Ansicht).
       const rankingList = ranked.length
         ? `<div class="list">${ranked
             .map((entry, index) => {
@@ -2046,6 +2119,7 @@
                     <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
                     <div class="balance">${esc(entry.member.name)}: ${pointsLabel(available)} verfügbar</div>
                   </div>
+                  <ha-icon class="disclosure-icon" icon="mdi:chevron-right"></ha-icon>
                 </div>`;
             })
             .join("")}</div>`
@@ -2636,7 +2710,21 @@
                             color: var(--secondary-text-color); cursor: pointer; flex-shrink: 0; }
         .icon-action-btn:hover { background: var(--card-background-color, #fff); }
         .icon-action-btn:disabled { opacity: 0.4; cursor: default; background: none; }
-        .icon-action-btn ha-icon { --mdc-icon-size: 18px; }
+        /* Explicit width/height (not just --mdc-icon-size) on the <ha-icon>
+           host itself, not only its internal svg - ha-icon resolves an
+           mdi:* icon's actual path asynchronously (a separately-loaded icon
+           metadata chunk), and since this card rebuilds its entire
+           shadow-DOM innerHTML on every re-render (see the file header -
+           framework-free, no diffing), every row's <ha-icon> is torn down
+           and recreated from scratch each time, briefly re-running that
+           lookup. Without a fixed host size the button could visibly pop/
+           reflow between that brief unresolved state and the icon actually
+           painting in - most noticeable on the round danger delete button,
+           where an unresolved/collapsed icon on a small red-tinted circular
+           button could read as a plain dot until it resolves (often by the
+           time a pointer lingers over it on hover). Sizing the host itself
+           keeps the button's layout box stable across that transition. */
+        .icon-action-btn ha-icon { --mdc-icon-size: 18px; width: 18px; height: 18px; display: inline-flex; }
         .icon-action-btn.success { color: var(--success-color, #43a047); }
         .icon-action-btn.danger { color: var(--error-color, #db4437); }
         /* "+ Aufgabe hinzufügen"/"+ Eigene Aufgabe hinzufügen" links, der
@@ -2653,6 +2741,10 @@
         .row.clickable { cursor: pointer; }
         .row.clickable:hover { background: var(--card-background-color, #fff); }
         .row.clickable:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+        /* v0.23: reiner optischer Hinweis, dass eine Bestenlisten-Zeile
+           anklickbar ist (öffnet die "diese Woche erledigt"-Details) - siehe
+           _renderRankingSection. */
+        .disclosure-icon { --mdc-icon-size: 20px; width: 20px; height: 20px; color: var(--secondary-text-color); flex-shrink: 0; }
         @media (max-width: 480px) {
           .row { flex-wrap: wrap; }
           .row-main { flex-basis: 100%; }

@@ -160,6 +160,13 @@ class FamilyTasksMemberPointsSensor(
             # Bonus: N Punkte" line.
             "weekly_winner_bonus_enabled": self.coordinator.data.weekly_winner_bonus_enabled,
             "weekly_winner_bonus_points": self.coordinator.data.weekly_winner_bonus_points,
+            # v0.23: household-wide default rotation strategy (see
+            # CONF_DEFAULT_ROTATION_STRATEGY in const.py), identical on every
+            # member's points sensor - same "rides along, no dedicated
+            # entity" reasoning as the weekly-winner-bonus attributes above.
+            # The card reads this to pre-select "Rotationstyp" when opening
+            # the "+ Aufgabe hinzufügen" form.
+            "default_rotation_strategy": self.coordinator.data.default_rotation_strategy,
         }
 
 
