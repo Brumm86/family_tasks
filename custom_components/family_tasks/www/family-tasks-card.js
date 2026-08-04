@@ -52,22 +52,31 @@
  *                               as above). That section is configuration-only
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
- *   hide_favorites_section: false - initial value for the "Favoriten"
- *                               visibility toggle (v0.19, same first-run-only
- *                               rule as above, same v0.11-style default-true
- *                               flip - see below). Parent-only, like the
- *                               section itself: never rendered for a child
- *                               (see the Favoriten note further down), so
- *                               this option has no effect for them either.
+ *   hide_leaderboard_section: false - initial value for the "Bestenliste"
+ *                               visibility toggle (v0.21, same first-run-only
+ *                               rule as above). Unlike hide_members_list/
+ *                               hide_battery_section this is *not* Eltern-
+ *                               only - the toggle button renders for every
+ *                               user, including a "Kind"-linked one, and
+ *                               defaults to `false` (shown) rather than
+ *                               joining the v0.11 default-true flip below,
+ *                               since a child typically needs to see this
+ *                               section right away.
+ *   hide_rewards_section: false - same as hide_leaderboard_section, for the
+ *                               "Belohnungen" section (catalog + redemption
+ *                               history) directly below it.
  *
  * v0.11 default flip: hide_members_list, hide_battery_section and
- * only_own_tasks now default to *true* (compact, own-tasks-only) the very
- * first time the card runs on a device and no persisted localStorage state
- * exists yet, instead of *false* (everything shown) - set any of them to
- * `false` explicitly in the card config to keep the pre-v0.11 "show
- * everything" first-run behavior. hide_favorites_section (v0.19) joined this
- * same group when the "Favoriten" section became collapsible. This also
- * softens a real-world failure
+ * only_own_tasks default to *true* (compact, own-tasks-only) the very first
+ * time the card runs on a device and no persisted localStorage state exists
+ * yet, instead of *false* (everything shown) - set any of them to `false`
+ * explicitly in the card config to keep the pre-v0.11 "show everything"
+ * first-run behavior. hide_leaderboard_section/hide_rewards_section (v0.21)
+ * are deliberately *not* part of this group - see above. (hide_favorites_
+ * section, v0.19-v0.20, briefly was part of this group too; removed in
+ * v0.21 along with the collapsible-inline-section approach it belonged to -
+ * see the Favoriten note further down.) This also softens a real-world
+ * failure
  * mode: on some devices/browsers (observed on a Samsung Galaxy S24, likely a
  * webview/private-mode storage restriction) window.localStorage silently
  * throws on every read/write, so the toggle state never persists at all and
@@ -186,13 +195,21 @@
  * drives the reward balance/affordability, and CRUD on the catalog
  * (family_tasks/reward/*)/redemptions (family_tasks/reward_redemption/*)
  * follows the exact same admin/child rules as tasks and members elsewhere in
- * this card. This section is always visible to everyone, including a "Kind"-
- * linked user (who needs to see and redeem rewards, not just configure
- * something) - unlike "Familienmitglieder"/"Batterien" it has no
- * show/hide toggle of its own. v0.16 removes the "Woche"/"Monat" tab switcher
- * that used to sit above the ranking - it always ranks by points_week now,
- * so points_month is no longer read by this card at all (the sensor
- * attribute itself is untouched, just unused here).
+ * this card. This section is always *usable* by everyone, including a
+ * "Kind"-linked user (who needs to see and redeem rewards, not just
+ * configure something). v0.16 removes the "Woche"/"Monat" tab switcher that
+ * used to sit above the ranking - it always ranks by points_week now, so
+ * points_month is no longer read by this card at all (the sensor attribute
+ * itself is untouched, just unused here).
+ *
+ * v0.21: "Bestenliste" and "Belohnungen" are now each independently
+ * collapsible (_renderRankingSection/_renderRewardsSection,
+ * hide_leaderboard_section/hide_rewards_section above) - unlike
+ * "Familienmitglieder"/"Batterien" the "Ausblenden"/"... anzeigen" buttons
+ * render for *every* user, not just parents, since a child needs to be able
+ * to get the reward catalog back out of the way (or bring it back) just as
+ * much as a parent does. Both default to shown on a fresh device, not the
+ * v0.11 compact default the admin-only sections use.
  *
  * Aufgaben-Filter nach Familienmitglied (v0.16): the "Aufgaben" section's
  * header now shows a row of filter chips - "Alle" plus one per family
@@ -221,10 +238,22 @@
  * the template itself is untouched and can be clicked again any number of
  * times. Parent-only end to end, same rule as member/reward-catalog
  * management (isAdmin && !isChildUser) - a child never sees the "Favoriten"
- * section, its "+ Favorit hinzufügen" button, or any favorite at all.
- * Collapsible like "Familienmitglieder"/"Batterien" (v0.19, see
- * hide_favorites_section above) since a household with several favorites
- * would otherwise permanently push the task list further down the card.
+ * launcher button, the dialog it opens, or any favorite at all.
+ *
+ * v0.19 made the "Favoriten" section collapsible inline (hide_favorites_
+ * section, same pattern as "Familienmitglieder"/"Batterien"), since a
+ * household with several favorites would otherwise permanently push the
+ * task list further down the card. v0.21 goes a step further and moves it
+ * out of the regular card flow entirely: a small "Favoriten" button next to
+ * "+ Aufgabe hinzufügen" (_renderFavoritesLauncher) opens the whole catalog
+ * in its own modal dialog (_renderFavoritesSection now renders only the
+ * dialog's content; _openFavoritesDialog/_closeFavoritesDialog and the
+ * "favorites-list" entry in _syncDialogs manage it, same native <dialog>/
+ * showModal() mechanism as the task/member/reward/favorite-edit dialogs
+ * elsewhere in this file) - so the regularly-used task view never grows
+ * with the catalog's size at all, not even a single collapsed row.
+ * hide_favorites_section and the inline collapse it controlled are removed
+ * as of v0.21; a card config that still sets it is simply ignored.
  *
  * Checklist display (v0.12): a checklist task's sub-items are now sorted
  * alphabetically for display - open items first (alphabetically among
@@ -250,6 +279,20 @@
  * (task/member/reward/battery-override CRUD, redeeming, marking a redemption
  * fulfilled) now surfaces a rejected call via alert() instead of failing
  * silently - see _callWS.
+ *
+ * v0.21: the card's big top-level sections - "Aufgaben" (including its "+
+ * Aufgabe hinzufügen"/"+ Eigene Aufgabe hinzufügen"/"Favoriten" buttons),
+ * "Bestenliste", "Belohnungen", "Batterien", "Familienmitglieder" - are now
+ * visually separated by a thin divider line (.section-divider, see
+ * cardSections in _render()) instead of relying on spacing alone, since a
+ * card with several sections open at once had started to read as one long
+ * undifferentiated block. Dividers are only inserted between sections that
+ * actually rendered something, so a "Kind" user (who never sees "Batterien"/
+ * "Familienmitglieder" at all) doesn't end up with a stray line at the
+ * bottom of the card. See the Favoriten note above and the "Bestenliste &
+ * Belohnungen" note further up for the other two v0.21 changes (Favoriten
+ * moved into its own dialog; Bestenliste/Belohnungen each independently
+ * collapsible).
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -554,9 +597,19 @@
       this._favoriteFormOpen = false;
       this._editingFavoriteId = null;
       this._favoriteForm = emptyFavoriteForm();
-      // Whether the "Favoriten" section is collapsed (v0.19) - same
-      // show/hide-toggle pattern as _hideMembers/_hideBattery.
-      this._hideFavorites = undefined;
+      // Whether the "Favoriten" catalog dialog itself is open (v0.21,
+      // replaces the v0.19 _hideFavorites inline-collapse toggle - see
+      // _renderFavoritesLauncher/_openFavoritesDialog). Not persisted, same
+      // as the other *FormOpen dialog flags: it always starts closed on
+      // load, same as _taskFormOpen/_memberFormOpen/etc.
+      this._favoritesDialogOpen = false;
+      // Bestenliste/Belohnungen (v0.21): independently collapsible, unlike
+      // _hideMembers/_hideBattery this toggle is available to *every* user
+      // including a "Kind"-account (see _renderRankingSection/
+      // _renderRewardsSection) since both sections are used by children too,
+      // not just parents configuring something.
+      this._hideLeaderboard = undefined;
+      this._hideRewards = undefined;
     }
 
     setConfig(config) {
@@ -593,10 +646,13 @@
         // Erledigte Einlösungen sind standardmäßig ausgeblendet, wie schon in
         // der ehemals eigenständigen Bestenlisten-Karte.
         this._hideFulfilled = saved?.hideFulfilled ?? true;
-        // v0.19: gleicher Erststart-Default wie hide_members_list/
-        // hide_battery_section (kompakt, sofern nicht per Config explizit
-        // auf `false` gesetzt).
-        this._hideFavorites = saved?.hideFavorites ?? this._config.hide_favorites_section !== false;
+        // v0.21: Bestenliste/Belohnungen bleiben - anders als
+        // Mitglieder/Batterien/die alte Favoriten-Sektion - standardmäßig
+        // sichtbar (kein v0.11-Kompakt-Default), da auch ein "Kind"-Konto
+        // sie normalerweise sofort braucht (Belohnungen einlösen). Optional
+        // per Config-Option von Anfang an ausgeblendet startbar.
+        this._hideLeaderboard = saved?.hideLeaderboard ?? !!this._config.hide_leaderboard_section;
+        this._hideRewards = saved?.hideRewards ?? !!this._config.hide_rewards_section;
       }
     }
 
@@ -630,7 +686,8 @@
             controlsHidden: this._controlsHidden,
             taskMemberFilter: this._taskMemberFilter,
             hideFulfilled: this._hideFulfilled,
-            hideFavorites: this._hideFavorites,
+            hideLeaderboard: this._hideLeaderboard,
+            hideRewards: this._hideRewards,
           })
         );
       } catch (err) {
@@ -1284,6 +1341,20 @@
       this._render();
     }
 
+    // v0.21: opens/closes the "Favoriten" catalog dialog itself (as opposed
+    // to _openFavoriteForm/_closeFavoriteForm above, which is the nested
+    // add/edit form for a single favorite) - a second, independent <dialog>
+    // that can be shown on top of it, since native <dialog> elements stack.
+    _openFavoritesDialog() {
+      this._favoritesDialogOpen = true;
+      this._render();
+    }
+
+    _closeFavoritesDialog() {
+      this._favoritesDialogOpen = false;
+      this._render();
+    }
+
     async _saveFavorite() {
       const f = this._favoriteForm;
       if (!f.name.trim()) return;
@@ -1374,6 +1445,36 @@
             ${!canManageMembers || hideAddMember ? "" : `<button class="add" data-action="new-member">+ Mitglied hinzufügen</button>`}
           `;
 
+      const taskSection = `
+        <div class="section-header">
+          <h3>Aufgaben</h3>
+          ${!showVisibilityControls || controlsHidden ? "" : `
+            <div class="header-actions">
+              <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
+            </div>`}
+        </div>
+        ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
+        ${this._renderTaskList(isAdmin)}
+        ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
+        ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
+        ${this._renderFavoritesLauncher(canManageFavorites)}
+      `;
+
+      // v0.21: die großen Kartenbereiche (Aufgaben inkl. "hinzufügen"/
+      // "Favoriten"-Buttons, Bestenliste, Belohnungen, Batterien,
+      // Familienmitglieder) werden jetzt durch einen dünnen Trennstrich
+      // (.section-divider) optisch voneinander abgesetzt statt nur durch
+      // vertikalen Abstand - nur zwischen tatsächlich gerenderten (nicht
+      // leeren) Bereichen, damit z. B. ein "Kind"-Konto (das weder
+      // Batterien- noch Mitglieder-Abschnitt sieht) keine überflüssigen
+      // Striche am Kartenende bekommt.
+      const cardSections = [
+        taskSection,
+        this._renderLeaderboardSection(isAdmin, isChildUser),
+        isAdmin ? this._renderBatterySection(controlsHidden, showVisibilityControls) : "",
+        membersSection,
+      ].filter((section) => section && section.trim());
+
       this.shadowRoot.innerHTML = `
         <style>${this._styles()}</style>
         <ha-card>
@@ -1388,24 +1489,7 @@
             ><ha-icon icon="${controlsHidden ? "mdi:tune-variant" : "mdi:tune"}"></ha-icon></button>` : ""}
           </div>
           <div class="card-content">
-            <div class="section-header">
-              <h3>Aufgaben</h3>
-              ${!showVisibilityControls || controlsHidden ? "" : `
-                <div class="header-actions">
-                  <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
-                </div>`}
-            </div>
-            ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
-            ${this._renderFavoritesSection(canManageFavorites, controlsHidden)}
-            ${this._renderTaskList(isAdmin)}
-            ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
-            ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
-
-            ${this._renderLeaderboardSection(isAdmin, isChildUser)}
-
-            ${isAdmin ? this._renderBatterySection(controlsHidden, showVisibilityControls) : ""}
-
-            ${membersSection}
+            ${cardSections.join('<hr class="section-divider">')}
           </div>
 
           ${this._taskFormOpen ? `
@@ -1433,6 +1517,14 @@
             <h3>${this._editingFavoriteId ? "Favorit bearbeiten" : "Favorit hinzufügen"}</h3>
             ${this._renderFavoriteForm()}
           </dialog>` : ""}
+          ${this._favoritesDialogOpen ? `
+          <dialog class="dialog" data-dialog="favorites-list">
+            <div class="section-header">
+              <h3>Favoriten</h3>
+              <button type="button" class="link" data-action="close-favorites">Schließen</button>
+            </div>
+            ${this._renderFavoritesSection(canManageFavorites)}
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
@@ -1452,6 +1544,7 @@
         ["member", () => this._memberFormOpen, () => this._closeMemberForm()],
         ["reward", () => this._rewardFormOpen, () => this._closeRewardForm()],
         ["favorite", () => this._favoriteFormOpen, () => this._closeFavoriteForm()],
+        ["favorites-list", () => this._favoritesDialogOpen, () => this._closeFavoritesDialog()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -1646,9 +1739,9 @@
         </div>`;
     }
 
-    // v0.17: parent-only "Favoriten" section - a reusable task-template
-    // catalog (family_tasks/favorite/*, see the file header comment above
-    // and FavoriteStorageCollection in storage.py). Structurally mirrors
+    // v0.17: parent-only "Favoriten" catalog - a reusable task-template list
+    // (family_tasks/favorite/*, see the file header comment above and
+    // FavoriteStorageCollection in storage.py). Structurally mirrors
     // _renderRewardsSection below (a small parent-maintained list with
     // Bearbeiten/Löschen, plus a "+ ... hinzufügen" button), not the old
     // v0.16 quick-complete bar this replaces - the primary action per row is
@@ -1658,18 +1751,14 @@
     // to see or use, so the whole section (including the ability to
     // instantiate) is admin/parent-only, not just management.
     //
-    // v0.19: collapsible via _hideFavorites, same "Ausblenden"/"anzeigen"
-    // toggle pattern as _renderBatterySection - a household with several
-    // favorites otherwise permanently pushes the task list further down the
-    // card. controlsHidden (compact mode) additionally hides the toggle
-    // button itself, same as elsewhere.
-    _renderFavoritesSection(canManageFavorites, controlsHidden) {
+    // v0.21: no longer inlined into the "Aufgaben" section (that was the
+    // v0.19 collapsible-section approach, _hideFavorites) - this now only
+    // renders the *content* of the "Favoriten" dialog opened via
+    // _renderFavoritesLauncher/_openFavoritesDialog below, so it no longer
+    // needs its own hide toggle or heading (the dialog wrapper in _render()
+    // supplies the "Favoriten" <h3> and a "Schließen" button).
+    _renderFavoritesSection(canManageFavorites) {
       if (!canManageFavorites) return "";
-      if (this._hideFavorites) {
-        return controlsHidden
-          ? ""
-          : `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-favorites">Favoriten anzeigen</button></div>`;
-      }
       const favoriteIds = Object.keys(this._favorites).sort((a, b) =>
         (this._favorites[a].name ?? "").localeCompare(this._favorites[b].name ?? "", "de", { sensitivity: "base" })
       );
@@ -1698,12 +1787,21 @@
             .join("")}</div>`
         : `<p class="muted">Noch keine Favoriten angelegt.</p>`;
       return `
-        <div class="section-header">
-          <h4>Favoriten</h4>
-          ${controlsHidden ? "" : `<button class="link" data-action="toggle-hide-favorites">Ausblenden</button>`}
-        </div>
         ${list}
         <button class="add" data-action="new-favorite">+ Favorit hinzufügen</button>`;
+    }
+
+    // v0.21: small launcher button in the "Aufgaben" section (next to "+
+    // Aufgabe hinzufügen") that opens the "Favoriten" catalog in its own
+    // modal dialog instead of rendering the whole catalog inline - keeps the
+    // regularly-used task view from growing with every favorite a household
+    // adds. Shows the current favorite count so there's a hint of what's
+    // behind it without opening the dialog. Same admin/parent-only gating as
+    // the catalog itself.
+    _renderFavoritesLauncher(canManageFavorites) {
+      if (!canManageFavorites) return "";
+      const count = Object.keys(this._favorites).length;
+      return `<button class="add" data-action="open-favorites">${count ? `Favoriten (${count})` : "Favoriten"}</button>`;
     }
 
     _renderMemberList(canManageMembers) {
@@ -1739,21 +1837,44 @@
 
     // Bestenliste + Belohnungen (v0.15, gemerged aus der ehemals
     // eigenständigen family-tasks-leaderboard-card.js - siehe Datei-Header).
-    // Anders als "Familienmitglieder"/"Batterien" nicht über
-    // hideMembers/hideBattery ausblendbar: die Rangliste und der
-    // Belohnungs-Katalog sind für jeden - auch ein "Kind"-Konto - immer
-    // sichtbar, da ein Kind hier auswählen/einlösen können muss, nicht nur
-    // Eltern etwas zu konfigurieren haben.
+    // Anders als "Familienmitglieder"/"Batterien" ist der Zugriff selbst
+    // nicht eingeschränkt: die Rangliste und der Belohnungs-Katalog sind für
+    // jeden - auch ein "Kind"-Konto - immer nutzbar, da ein Kind hier
+    // auswählen/einlösen können muss, nicht nur Eltern etwas zu
+    // konfigurieren haben. Seit v0.21 aber jeweils für sich ausblendbar
+    // (_renderRankingSection/_renderRewardsSection unten) - siehe dort für
+    // die Begründung, warum die Umschalter dafür trotzdem für alle
+    // sichtbar bleiben.
     _renderLeaderboardSection(isAdmin, isChildUser) {
-      const ranked = this._rankedMembers();
-      const maxPoints = ranked.length ? Math.max(...ranked.map((r) => r.points), 1) : 1;
       // Gleiche Regel wie canManageMembers oben - ein "Kind"-verknüpfter
       // Nutzer bekommt keine Katalog-/Einlösungs-Verwaltung, unabhängig vom
       // HA-Admin-Flag (serverseitig ebenfalls erzwungen, siehe
       // RewardRedemptionStorageCollectionWebsocket in storage.py).
       const canManageRewards = isAdmin && !isChildUser;
       const currentMemberId = this._currentMemberId();
+      return `
+        ${this._renderRankingSection()}
+        <hr class="section-divider">
+        ${this._renderRewardsSection(canManageRewards, currentMemberId)}
+      `;
+    }
 
+    // v0.21: "Bestenliste" ausblendbar, wie schon länger "Familienmitglieder"/
+    // "Batterien"/(bis v0.20) "Favoriten" - anders als bei diesen ist der
+    // Umschalter hier aber *nicht* an showVisibilityControls/controlsHidden
+    // gekoppelt (also nicht Eltern-only und nicht vom Kompakt-Modus-Button
+    // betroffen): die Bestenliste ist für ein "Kind"-Konto genauso relevant
+    // wie für Eltern, das Ausblenden ist hier reiner Anzeige-Komfort pro
+    // Gerät, keine Admin-Einstellung. Startet standardmäßig sichtbar (siehe
+    // setConfig) - anders als der v0.11-Kompakt-Default der übrigen
+    // Abschnitte, da ein Kind sonst beim allerersten Laden gar nicht sähe,
+    // dass es hier etwas einlösen kann.
+    _renderRankingSection() {
+      if (this._hideLeaderboard) {
+        return `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-leaderboard">Bestenliste anzeigen</button></div>`;
+      }
+      const ranked = this._rankedMembers();
+      const maxPoints = ranked.length ? Math.max(...ranked.map((r) => r.points), 1) : 1;
       const rankingList = ranked.length
         ? `<div class="list">${ranked
             .map((entry, index) => {
@@ -1778,13 +1899,26 @@
       return `
         <div class="section-header">
           <h3>Bestenliste</h3>
+          <button class="link" data-action="toggle-hide-leaderboard">Ausblenden</button>
         </div>
         ${rankingList}
-        ${this._renderRewardsSection(canManageRewards, currentMemberId)}
       `;
     }
 
+    // v0.21: "Belohnungen" ausblendbar - gleiches Muster/gleiche Begründung
+    // wie _renderRankingSection oben (für alle sichtbarer Umschalter, nicht
+    // Eltern-only, standardmäßig sichtbar). Umfasst sowohl den Katalog als
+    // auch "Bisherige Einlösungen" als einen gemeinsamen Block - dessen
+    // eigener _hideFulfilled-Umschalter bleibt unverändert eine Ebene
+    // darunter bestehen.
     _renderRewardsSection(canManageRewards, currentMemberId) {
+      if (this._hideRewards) {
+        return `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-rewards">Belohnungen anzeigen</button></div>`;
+      }
+      return this._renderRewardsContent(canManageRewards, currentMemberId);
+    }
+
+    _renderRewardsContent(canManageRewards, currentMemberId) {
       const currentMember = currentMemberId ? this._members[currentMemberId] : null;
       const currentParticipates = !!currentMember && currentMember.participates_in_rewards !== false;
       const availablePoints = currentMemberId ? this._availablePointsFor(currentMemberId) : 0;
@@ -1876,6 +2010,7 @@
       return `
         <div class="section-header">
           <h4>Belohnungen</h4>
+          <button class="link" data-action="toggle-hide-rewards">Ausblenden</button>
         </div>
         ${currentMemberId ? `<p class="muted">Dein Guthaben: ${pointsLabel(availablePoints)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
         ${catalogList}
@@ -2371,6 +2506,10 @@
            level row (v0.9) - without this, two adjacent buttons with no
            wrapping element between them would sit side by side. */
         .section-toggle-row { display: block; margin: 4px 0; }
+        /* v0.21: dünner Trennstrich zwischen den großen Kartenbereichen
+           (Aufgaben, Bestenliste, Belohnungen, Batterien,
+           Familienmitglieder) - siehe cardSections in _render(). */
+        hr.section-divider { border: none; border-top: 1px solid var(--divider-color, #e0e0e0); margin: 16px 0; }
         /* Native modal dialog (task editing/creation, v0.8) - shown via
            showModal() so it always renders on top of the whole page, never
            hidden behind other open cards. */
@@ -2477,6 +2616,14 @@
           this._hideFulfilled = !this._hideFulfilled;
           this._saveUiState();
           this._render();
+        } else if (action === "toggle-hide-leaderboard") {
+          this._hideLeaderboard = !this._hideLeaderboard;
+          this._saveUiState();
+          this._render();
+        } else if (action === "toggle-hide-rewards") {
+          this._hideRewards = !this._hideRewards;
+          this._saveUiState();
+          this._render();
         } else if (action === "new-favorite") {
           // Defense-in-depth, same reasoning as new-reward/new-member above -
           // the backend enforces this too regardless (see
@@ -2490,10 +2637,11 @@
           if (this._isAdmin() && !this._isChildUser()) this._deleteFavorite(el.dataset.favoriteId)?.catch(() => {});
         } else if (action === "instantiate-favorite") {
           if (this._isAdmin() && !this._isChildUser()) this._instantiateFavorite(el.dataset.favoriteId)?.catch(() => {});
-        } else if (action === "toggle-hide-favorites") {
-          this._hideFavorites = !this._hideFavorites;
-          this._saveUiState();
-          this._render();
+        } else if (action === "open-favorites") {
+          // Defense-in-depth, same reasoning as new-favorite/new-member above.
+          if (this._isAdmin() && !this._isChildUser()) this._openFavoritesDialog();
+        } else if (action === "close-favorites") {
+          this._closeFavoritesDialog();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.

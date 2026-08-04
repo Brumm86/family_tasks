@@ -2,6 +2,16 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.21.0] - 2026-08-04
+
+### Changed
+- **Favoriten öffnen jetzt in einem eigenen Fenster**: der Abschnitt „Favoriten" sitzt nicht mehr inline in der Karte (auch nicht als eingeklappte Zeile, siehe die v0.19-„Favoriten ausblendbar"-Funktion, die dieser Ansatz ersetzt) - stattdessen öffnet ein kleiner „Favoriten"-Button neben „+ Aufgabe hinzufügen" den kompletten Katalog in einem eigenen modalen Dialogfenster (`<dialog>`/`showModal()`, derselbe Mechanismus wie beim Aufgaben-/Mitglieder-/Belohnungsformular). Damit wächst die regelmäßig genutzte Aufgabenansicht nicht mehr mit der Größe des Katalogs mit, nicht einmal um eine einzelne eingeklappte Zeile. Weiterhin ausschließlich für Eltern sichtbar. Die `hide_favorites_section`-Konfigurationsoption entfällt ersatzlos und wird, falls noch gesetzt, einfach ignoriert.
+
+### Added
+- **Bestenliste einzeln ausblendbar**: neuer „Ausblenden"/„Bestenliste anzeigen"-Umschalter, unabhängig von „Belohnungen" darunter (`hide_leaderboard_section`-Konfigurationsoption, pro Gerät gespeichert). Anders als bei „Familienmitglieder"/„Batterien" ist dieser Umschalter für alle Konten sichtbar, auch für ein „Kind"-Konto - startet standardmäßig sichtbar, nicht im v0.11-Kompakt-Default, da ein Kind die Bestenliste in der Regel sofort braucht.
+- **Belohnungen einzeln ausblendbar**: gleiches Muster wie die Bestenliste direkt darüber, eigener Umschalter (`hide_rewards_section`-Konfigurationsoption), umfasst Katalog und „Bisherige Einlösungen" gemeinsam als einen Block; deren eigener „Erledigte ausblenden"-Umschalter bleibt unverändert bestehen.
+- **Trennstriche zwischen den Kartenbereichen**: ein dünner Strich trennt jetzt die großen Bereiche der Karte (Aufgaben inkl. „hinzufügen"/„Favoriten"-Buttons, Bestenliste, Belohnungen, Batterien, Familienmitglieder) optisch voneinander, statt sich nur auf den vertikalen Abstand zu verlassen - nur zwischen Bereichen, die tatsächlich etwas anzeigen, damit z. B. ein „Kind"-Konto (ohne Batterien-/Mitglieder-Abschnitt) keine überflüssige Linie am Kartenende bekommt.
+
 ## [0.20.0] - 2026-08-03
 
 ### Fixed
