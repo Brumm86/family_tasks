@@ -70,6 +70,14 @@ class FamilyTasksTaskStatusSensor(
             # them (see FamilyTasksCoordinator._assigned_member_ids); for
             # everything else it's just [assigned_member_id].
             "assigned_member_ids": task.assigned_member_ids,
+            # v0.25: who may currently act on (complete) this occurrence -
+            # assigned_member_ids plus, once overdue and assigned to a child,
+            # every other active child in the household (see
+            # eligible_member_ids in coordinator.py). The card uses this
+            # instead of assigned_member_ids for the "own tasks" filter and
+            # the "Erledigt" button so a sibling can step in on an overdue
+            # task instead of just watching it sit there.
+            "eligible_member_ids": task.eligible_member_ids,
             "due_at": task.due_at.isoformat() if task.due_at else None,
             "points": task.points,
             "period_key": task.period_key,

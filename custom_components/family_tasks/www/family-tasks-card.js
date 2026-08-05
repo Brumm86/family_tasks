@@ -1899,6 +1899,17 @@
     _renderTaskList(isAdmin) {
       let ids = Object.keys(this._tasks);
       const currentMemberId = this._currentMemberId();
+      // v0.25: a non-child admin (a parent/guardian account, as opposed to a
+      // "child" account that also happens to be admin - see _isChildUser)
+      // may always complete a task currently assigned to a child, regardless
+      // of whether it's overdue - see the canAct computation below and
+      // MEMBER_ROLE_CHILD in const.py. The backend already never actually
+      // restricted who may call the complete_task service (see
+      // FamilyTasksCoordinator.async_complete_task's docstring) - this only
+      // brings the button back into the UI, re-adding what v0.22 removed for
+      // everyone, but scoped to parents acting on a child's task rather than
+      // anyone acting on anyone's.
+      const isParentUser = isAdmin && !this._isChildUser();
       // v0.22: a task a "child" member created for themselves (see
       // "created_by_member_id" / CONF_TASK_CREATED_BY_MEMBER_ID in const.py,
       // set by ws_create_own_task in storage.py) is only ever visible to
@@ -1921,14 +1932,18 @@
       if (filterMemberId !== null) {
         ids = ids.filter((id) => {
           if (!filterMemberId) return false;
-          // assigned_member_ids already lists every member currently
-          // responsible - just [assigned_member_id] for most rotation
-          // strategies, but every selected member for a "fixed" rotation
-          // with more than one assignee (see
-          // FamilyTasksCoordinator._assigned_member_ids in coordinator.py) -
-          // so a single membership check covers both cases.
-          const assignedIds = this._statusStateForTask(id)?.attributes?.assigned_member_ids ?? [];
-          return assignedIds.includes(filterMemberId);
+          // v0.25: eligible_member_ids (falling back to assigned_member_ids
+          // for an older cached sensor snapshot) rather than
+          // assigned_member_ids itself - see the field's comment in
+          // coordinator.py. Normally identical, but once an occurrence goes
+          // overdue and is assigned to a child, every other active child
+          // is added too, so this same "own tasks" filter (forced on for a
+          // "child" account, see _effectiveTaskMemberFilterId) also surfaces
+          // a sibling's overdue task in their own list instead of hiding it
+          // just because it wasn't originally assigned to them.
+          const attrs = this._statusStateForTask(id)?.attributes ?? {};
+          const eligibleIds = attrs.eligible_member_ids ?? attrs.assigned_member_ids ?? [];
+          return eligibleIds.includes(filterMemberId);
         });
       }
       if (!ids.length) {
@@ -1969,6 +1984,32 @@
           const assigneeLabel = assignedIds.length
             ? assignedIds.map((mid) => esc(this._memberName(mid))).join(", ")
             : "–";
+          // v0.25: eligible_member_ids (see coordinator.py) - who may
+          // currently act on this occurrence beyond assignedIds itself. Used
+          // below both to decide whether *this* logged-in member can act on
+          // a task assigned to someone else (a sibling stepping in once it's
+          // overdue) and to surface that as a short hint next to the
+          // assignee, since otherwise an "Erledigt" button showing up on a
+          // task assigned to someone else would be confusing.
+          const eligibleIds = statusState?.attributes?.eligible_member_ids ?? assignedIds;
+          const assignedToChild = assignedIds.some((mid) => this._members[mid]?.role === "child");
+          // Whoever actually completes an occurrence is credited for it
+          // (see async_complete_task in coordinator.py, which always logs
+          // the acting member's own id) - so a sibling stepping in on an
+          // overdue task, or a parent completing a child's task, both keep
+          // their own points instead of the original assignee's.
+          const actingForOther =
+            currentMemberId &&
+            !assignedIds.includes(currentMemberId) &&
+            (eligibleIds.includes(currentMemberId) || (isParentUser && assignedToChild));
+          const overdueSiblingHint =
+            !isConfirmation &&
+            status === "overdue" &&
+            currentMemberId &&
+            !assignedIds.includes(currentMemberId) &&
+            eligibleIds.includes(currentMemberId)
+              ? " · jetzt auch für dich (überfällig)"
+              : "";
           const detail = isConfirmation
             ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
             : isChecklist
@@ -1981,7 +2022,7 @@
                   .map((b) => esc(`${b.name}${b.level !== null && b.level !== undefined ? ` (${b.level}%)` : " (niedrig)"}`))
                   .join(", ")
               : "Keine Batterie niedrig"
-            : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.`;
+            : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${overdueSiblingHint}`;
           const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
           // v0.22: the plain "Überspringen" button (skip to the next
           // occurrence of a recurring task) is removed entirely. The
@@ -1997,7 +2038,19 @@
           // (currentMemberId null) never matches any assignedIds, so they
           // simply never see the button, same as before this member never
           // being one of the assignees.
-          const canAct = assignedIds.includes(currentMemberId);
+          // v0.25: two additions on top of that v0.22 rule, both re-adding
+          // ways to act on someone *else's* task (rather than reverting to
+          // the pre-v0.22 "anyone, always" behavior) - see actingForOther
+          // above for why points still go to whoever actually clicks either
+          // way:
+          // - eligibleIds also matches once a child's task goes overdue (see
+          //   eligible_member_ids in coordinator.py), so a sibling sees the
+          //   button on it too, not just the originally assigned child.
+          // - a parent (isParentUser) always sees the button on any task
+          //   currently assigned to a child, overdue or not - the backend
+          //   never blocked this to begin with, only the card's UI did.
+          const canAct =
+            eligibleIds.includes(currentMemberId) || (isParentUser && assignedToChild);
           // A checklist task only becomes "done" once every sub-item is
           // checked (see async_toggle_subtask in coordinator.py) - the
           // manual "Erledigt" button is disabled for it so completion always
@@ -2037,7 +2090,7 @@
                   <span class="muted">${detail}</span>
                 </div>
                 <div class="row-actions">
-                  ${canAct ? iconActionButton("complete-task", isConfirmation ? "mdi:check-bold" : "mdi:check", isConfirmation ? "Bestätigen" : "Erledigt", { dataset: `data-task-id="${id}"`, extraClass: "success", disabled: disableComplete }) : ""}
+                  ${canAct ? iconActionButton("complete-task", isConfirmation ? "mdi:check-bold" : "mdi:check", isConfirmation ? "Bestätigen" : actingForOther ? "Erledigt (Punkte gehen an dich)" : "Erledigt", { dataset: `data-task-id="${id}"`, extraClass: "success", disabled: disableComplete }) : ""}
                   ${showReject && canAct ? iconActionButton("skip-task", "mdi:close", "Ablehnen", { dataset: `data-task-id="${id}"`, extraClass: "danger", disabled: resolved }) : ""}
                   ${isConfirmation || !isAdmin ? "" : `
                   ${iconActionButton("edit-task", "mdi:pencil", "Bearbeiten", { dataset: `data-task-id="${id}"` })}
@@ -2876,7 +2929,28 @@
            the very first paint. */
         .icon-action-btn svg { width: 18px; height: 18px; display: block; fill: currentColor; }
         .icon-action-btn.success { color: var(--success-color, #43a047); }
-        .icon-action-btn.danger { color: var(--error-color, #db4437); }
+        /* v0.25: the actual cause of the "Löschen"/"Ablehnen" buttons
+           rendering as a plain red circle with no visible glyph (until
+           hovered) was never the async icon lookup that v0.23/v0.24 above
+           addressed - svgIcon has painted a synchronous, correctly-colored
+           bin/cross glyph since v0.24. The real culprit is CSS specificity:
+           the plain-text-button rule "button.danger { background:
+           var(--error-color) }" further down (still used by the actual
+           text-button confirm dialogs, e.g. "Aufgabe wirklich löschen?") has
+           higher specificity (one class + one type selector) than
+           ".icon-action-btn { background: none }" (one class selector), so
+           it quietly won and painted every danger-styled icon button's
+           circular background solid red - the same red as the icon's own
+           color/fill: currentColor, making the glyph invisible against its
+           own background. Only ":hover" (".icon-action-btn:hover", two
+           selectors, background: card-background-color) was specific enough
+           to override it, which is exactly why hovering "fixed" it. Setting
+           background: none explicitly here (".icon-action-btn.danger", two
+           class selectors - now specific enough to beat "button.danger")
+           removes the stray red fill for good, matching how ".success"
+           icon buttons (never touched by that rule) already looked all
+           along: a transparent circle with just the colored glyph. */
+        .icon-action-btn.danger { color: var(--error-color, #db4437); background: none; }
         /* "+ Aufgabe hinzufügen"/"+ Eigene Aufgabe hinzufügen" links, der
            "Favoriten"-Launcher rechts, in derselben Reihe (v0.22) - ist der
            rechte Teil leer (kein Favoriten-Zugriff), bleibt der linke Teil

@@ -105,6 +105,31 @@ class TaskStatusData:
     # instead of "belonging" to whichever one happens to sit at
     # rotation.current_index.
     assigned_member_ids: list[str] = field(default_factory=list)
+    # v0.25: who may currently act on (complete) this occurrence - normally
+    # identical to assigned_member_ids, but with two additions layered on
+    # top, neither of which changes assigned_member_ids itself (that field
+    # stays the "whose turn/responsibility is this" display value used for
+    # the assignee label, per-member open-task counts, and new-task
+    # notifications):
+    # - every other active MEMBER_ROLE_CHILD member in the household, once
+    #   this occurrence is TASK_STATUS_OVERDUE and at least one of its
+    #   current assignees is itself a child - see the eligible_member_ids
+    #   computation in _async_update_data. Lets a sibling step in on a
+    #   sibling's overdue task instead of it just sitting there; whoever
+    #   actually completes it is still credited individually (async_add_entry
+    #   is always called with the acting member's own id), and since a task's
+    #   completion is keyed by (task_id, period_key) rather than per-member,
+    #   one sibling completing it resolves the occurrence for both - there is
+    #   no separate "done" state per child to reconcile.
+    # - a parent completing a task currently assigned to a child is *always*
+    #   allowed (not only once overdue) - this needs no special entry here
+    #   since async_complete_task never actually checked eligible_member_ids
+    #   to begin with (see its docstring); a parent is simply never blocked
+    #   server-side. eligible_member_ids only drives the card's UI (which
+    #   "Erledigt" buttons/rows it shows), see canAct in
+    #   family-tasks-card.js, which separately allows any non-child admin to
+    #   act on a child-assigned task regardless of this list.
+    eligible_member_ids: list[str] = field(default_factory=list)
     # Only populated for recurrence type "trigger" (see RECURRENCE_TRIGGER):
     # the bound sensor's current state/value and unit of measurement, so the
     # card can show e.g. "aktuell: 18.4 °C" alongside the trigger definition
@@ -362,6 +387,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                         due_at=None,
                         assigned_member_id=assigned_member_id,
                         assigned_member_ids=assigned_member_ids,
+                        # Nothing open yet, so no occurrence can be overdue -
+                        # eligible_member_ids is just assigned_member_ids,
+                        # same as every other idle/non-overdue occurrence.
+                        eligible_member_ids=assigned_member_ids,
                         trigger_sensor_value=trigger_sensor_value,
                         trigger_sensor_unit=trigger_sensor_unit,
                         kind=task.get("kind", TASK_KIND_STANDARD),
@@ -394,6 +423,27 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     # below its warning threshold.
                     status = TASK_STATUS_IDLE
 
+            # v0.25: once this occurrence is overdue and at least one current
+            # assignee is a child, every other active child in the household
+            # also becomes eligible to step in and complete it - see
+            # eligible_member_ids on TaskStatusData for the full reasoning.
+            # Deliberately keyed off "any assignee is a child" rather than
+            # "every assignee is a child" so a mixed fixed assignment (e.g. a
+            # parent + a child sharing a task) still opens up to the other
+            # children too, not just to the household's parents (who could
+            # already act on it regardless, per async_complete_task).
+            eligible_member_ids = list(assigned_member_ids)
+            if status == TASK_STATUS_OVERDUE and any(
+                self._member_role(mid) == MEMBER_ROLE_CHILD for mid in assigned_member_ids
+            ):
+                for other_id, other_member in self.members.data.items():
+                    if (
+                        other_id not in eligible_member_ids
+                        and other_member.get("active", True)
+                        and self._member_role(other_id) == MEMBER_ROLE_CHILD
+                    ):
+                        eligible_member_ids.append(other_id)
+
             subtasks_status: list[dict] = []
             if task.get("kind") == TASK_KIND_CHECKLIST:
                 checked_ids = self.checklist_state.checked_ids(task_id, period_key)
@@ -423,6 +473,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 due_at=due_at,
                 assigned_member_id=assigned_member_id,
                 assigned_member_ids=assigned_member_ids,
+                eligible_member_ids=eligible_member_ids,
                 kind=task.get("kind", TASK_KIND_STANDARD),
                 last_completed_by=last_entry.get("completed_by_member_id")
                 if last_entry
