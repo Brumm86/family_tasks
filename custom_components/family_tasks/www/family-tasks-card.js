@@ -424,6 +424,53 @@
     return minutes ? ` · +${esc(minutes)} Min. Bildschirmzeit` : "";
   }
 
+  // v0.24: inline SVG path data for the small, fixed set of MDI icons this
+  // file itself chooses (row-action buttons, the Bestenliste disclosure
+  // arrow) - as opposed to an *arbitrary* icon a user types into a task/
+  // member/reward's own "icon"-Feld (task.icon/member.icon/r.icon/f.icon),
+  // which still goes through <ha-icon> below since there's no fixed set to
+  // pre-bake a path for. See ICON_SVG_PATHS' first user (svgIcon) for why.
+  const ICON_SVG_PATHS = {
+    delete: "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z",
+    pencil:
+      "M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z",
+    close: "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z",
+    check: "M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z",
+    "check-bold": "M9,20.42L2.79,14.21L5.62,11.38L9,14.77L18.88,4.88L21.71,7.71L9,20.42Z",
+    "playlist-plus": "M3 16H10V14H3M18 14V10H16V14H12V16H16V20H18V16H22V14M14 6H3V8H14M14 10H3V12H14V10Z",
+    "chevron-right": "M8.59,16.58L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.58Z",
+    "star-plus-outline":
+      "M5.8 21L7.4 14L2 9.2L9.2 8.6L12 2L14.8 8.6L22 9.2L18.8 12H18C17.3 12 16.6 12.1 15.9 12.4L18.1 10.5L13.7 10.1L12 6.1L10.3 10.1L5.9 10.5L9.2 13.4L8.2 17.7L12 15.4L12.5 15.7C12.3 16.2 12.1 16.8 12.1 17.3L5.8 21M17 14V17H14V19H17V22H19V19H22V17H19V14H17Z",
+  };
+
+  // Renders one of the icons above as a plain inline <svg>, not <ha-icon>.
+  //
+  // Up to v0.23 every icon-action-btn used <ha-icon icon="mdi:...">, which
+  // resolves its actual SVG path asynchronously (a separately-loaded icon
+  // metadata lookup - see Home Assistant's ha-icon component) rather than
+  // painting synchronously. v0.23 tried to fix the resulting symptom (the
+  // small round "Löschen" button briefly/indefinitely showing as a bare red
+  // circle with no bin glyph, only appearing once the pointer happened to
+  // hover it) by giving the <ha-icon> host a fixed width/height so at least
+  // the button's layout didn't jump - that kept the button's *size* stable
+  // but never addressed why the glyph itself wasn't painting, and the
+  // problem persisted. Since this card rebuilds its entire shadow-DOM
+  // innerHTML on every re-render (see the file header), every row's
+  // <ha-icon> was torn down and recreated from scratch each time, repeatedly
+  // re-triggering that async lookup - for a small, fixed set of icons this
+  // file itself controls (never a user-typed icon string), there is no
+  // reason to depend on that lookup at all. Embedding the path data directly
+  // (see ICON_SVG_PATHS above, taken from the Material Design Icons "delete"/
+  // "pencil"/etc. glyphs) paints synchronously with the rest of the
+  // innerHTML, on the very first render, every time - no async gap for the
+  // button to visibly sit empty (or red-and-empty for the danger-styled
+  // delete button) until something incidentally repaints it.
+  function svgIcon(name, size = 18) {
+    const path = ICON_SVG_PATHS[name];
+    if (!path) return `<ha-icon icon="mdi:${name}"></ha-icon>`;
+    return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" focusable="false" aria-hidden="true"><path d="${path}" fill="currentColor"></path></svg>`;
+  }
+
   // Kompakter Icon-Button (v0.22) für Zeilen-Aktionen wie "Erledigt"/
   // "Bearbeiten"/"Löschen" - ersetzt die bisherigen großen Text-Buttons in
   // .row-actions überall auf der Karte (Aufgaben, Favoriten,
@@ -434,8 +481,13 @@
   // gleich (siehe .icon-action-btn in _styles). `dataset` ist ein bereits
   // fertig formatierter String mit den data-*-Attributen, die der jeweilige
   // Klick-Handler in _attachListenersOnce braucht (z. B. data-task-id).
+  // `icon` is still passed as "mdi:delete" etc. (unchanged call sites) - the
+  // "mdi:" prefix is stripped to look the glyph up in ICON_SVG_PATHS (see
+  // svgIcon above); an icon not in that fixed set still falls back to
+  // <ha-icon>, though every current caller is covered.
   function iconActionButton(action, icon, title, { dataset = "", extraClass = "", disabled = false } = {}) {
-    return `<button type="button" class="icon-action-btn ${extraClass}" data-action="${action}" ${dataset} title="${esc(title)}" aria-label="${esc(title)}" ${disabled ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon></button>`;
+    const name = icon.startsWith("mdi:") ? icon.slice(4) : icon;
+    return `<button type="button" class="icon-action-btn ${extraClass}" data-action="${action}" ${dataset} title="${esc(title)}" aria-label="${esc(title)}" ${disabled ? "disabled" : ""}>${svgIcon(name)}</button>`;
   }
 
   function emptyTriggerForm() {
@@ -566,6 +618,8 @@
       screen_time_minutes: "",
       auto_fulfill: false,
       screen_time_investable: false,
+      note_enabled: false,
+      note_label: "",
     };
   }
 
@@ -589,6 +643,11 @@
       // das einlösende Mitglied selbst wählen, wie viele Punkte investiert
       // werden, statt eines festen Preis-/Minuten-Paars.
       screen_time_investable: reward?.screen_time_investable ?? false,
+      // v0.24 - siehe CONF_REWARD_NOTE_ENABLED/CONF_REWARD_NOTE_LABEL in
+      // const.py: verlangt beim Einlösen einen kurzen Freitext (z. B. das
+      // gewünschte Mittagessen) statt nur "Bestätigen".
+      note_enabled: reward?.note_enabled ?? false,
+      note_label: reward?.note_label ?? "",
     };
   }
 
@@ -650,6 +709,10 @@
       // für die anstehende investierbare (Handyzeit-)Einlösung eingetragen
       // hat - siehe CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py.
       this._pendingInvestPoints = 1;
+      // Freitext für die anstehende Einlösung einer CONF_REWARD_NOTE_ENABLED-
+      // Belohnung (v0.24), z. B. das gewünschte Mittagessen - siehe
+      // _selectReward/_confirmRedeem.
+      this._pendingRedeemNote = "";
       // Ob bereits erledigte Einlösungen in "Bisherige Einlösungen"
       // ausgeblendet sind - siehe setConfig für die Default-an/persistierte
       // First-Run-Regel, gleiches Muster wie die übrigen Karten-Toggles.
@@ -680,6 +743,14 @@
       this._memberCompletionsMemberId = null;
       this._memberCompletions = [];
       this._memberCompletionsLoading = false;
+      // v0.24: "Punkte vergeben" - welches Familienmitglied gerade seine
+      // Bestätigungs-Zeile in der Mitgliederliste zeigt (immer nur eine,
+      // gleiches Muster wie _pendingRedeemId bei Belohnungen), plus die
+      // aktuell eingetragene Punktzahl (kann negativ sein, zum Abziehen) und
+      // der optionale Grund-Freitext. Siehe WS_API_POINTS_AWARD in const.py.
+      this._pendingAwardPointsMemberId = null;
+      this._pendingAwardPoints = 1;
+      this._pendingAwardNote = "";
     }
 
     setConfig(config) {
@@ -1314,6 +1385,38 @@
       await this._callWS({ type: "family_tasks/member/delete", member_id: memberId });
     }
 
+    // --- Punkte vergeben (v0.24) -----------------------------------------
+    //
+    // Erlaubt Eltern, einem Mitglied unabhängig von einzelnen Aufgaben
+    // Punkte gutzuschreiben oder abzuziehen (negative Punktzahl) - siehe
+    // WS_API_POINTS_AWARD in const.py. Gleiches Bestätigungs-Zeilen-Muster
+    // wie das Einlösen einer Belohnung oben (_selectReward/_confirmRedeem).
+
+    _selectAwardPoints(memberId) {
+      this._pendingAwardPointsMemberId = memberId;
+      this._pendingAwardPoints = 1;
+      this._pendingAwardNote = "";
+      this._render();
+    }
+
+    _cancelAwardPoints() {
+      this._pendingAwardPointsMemberId = null;
+      this._render();
+    }
+
+    async _confirmAwardPoints(memberId) {
+      const points = Math.trunc(Number(this._pendingAwardPoints)) || 0;
+      if (!points) return;
+      const msg = { type: "family_tasks/points/award", member_id: memberId, points };
+      const note = (this._pendingAwardNote || "").trim();
+      if (note) msg.note = note;
+      await this._callWS(msg);
+      this._pendingAwardPointsMemberId = null;
+      this._pendingAwardPoints = 1;
+      this._pendingAwardNote = "";
+      this._render();
+    }
+
     // Per-battery override editing ("Batterien" section): items are created
     // lazily and deleted again once they'd be a no-op, matching how
     // storage.BatteryOverrideStorageCollection is documented to work - only
@@ -1382,11 +1485,13 @@
         alert("Bitte die Bildschirmzeit in Minuten angeben (oder \"Punkte investieren lassen\" aktivieren).");
         return;
       }
+      const noteEnabled = !!f.note_enabled;
       const payload = {
         name: f.name.trim(),
         points_cost: Math.max(0, Number(f.points_cost) || 0),
         auto_fulfill: !!f.auto_fulfill,
         screen_time_investable: isInvestable,
+        note_enabled: noteEnabled,
       };
       if (f.icon) payload.icon = f.icon.trim();
       // Keine Handyzeit-Belohnung -> nicht gesetzt. Beim Bearbeiten muss das
@@ -1400,6 +1505,13 @@
         payload.screen_time_minutes = Math.max(1, Number(f.screen_time_minutes) || 1);
       } else if (this._editingRewardId) {
         payload.screen_time_minutes = null;
+      }
+      // Gleiches "explizites null löscht" Muster (v0.24) - siehe
+      // CONF_REWARD_NOTE_LABEL in const.py.
+      if (noteEnabled && f.note_label.trim()) {
+        payload.note_label = f.note_label.trim();
+      } else if (this._editingRewardId) {
+        payload.note_label = null;
       }
       if (this._editingRewardId) {
         await this._callWS({
@@ -1422,11 +1534,13 @@
     _selectReward(rewardId) {
       this._pendingRedeemId = rewardId;
       this._pendingInvestPoints = 1;
+      this._pendingRedeemNote = "";
       this._render();
     }
 
     _cancelRedeem() {
       this._pendingRedeemId = null;
+      this._pendingRedeemNote = "";
       this._render();
     }
 
@@ -1435,16 +1549,22 @@
     // leisten kann (siehe ws_redeem_reward in storage.py) - der clientseitige
     // "disabled"-Zustand der "Auswählen"/"Bestätigen"-Buttons sorgt nur
     // dafür, dass es gar nicht erst angeboten wird, ist aber nicht die
-    // eigentliche Absicherung.
+    // eigentliche Absicherung. Gleiches gilt für die v0.24-Freitext-Prüfung
+    // (CONF_REWARD_NOTE_ENABLED) - ws_redeem_reward lehnt eine Einlösung
+    // ohne Text serverseitig ebenfalls ab.
     async _confirmRedeem(rewardId) {
       const reward = this._rewards[rewardId];
       const msg = { type: "family_tasks/reward_redemption/redeem", reward_id: rewardId };
       if (reward?.screen_time_investable) {
         msg.points_spent = Math.max(1, Number(this._pendingInvestPoints) || 1);
       }
+      if (reward?.note_enabled) {
+        msg.note = (this._pendingRedeemNote || "").trim();
+      }
       await this._callWS(msg);
       this._pendingRedeemId = null;
       this._pendingInvestPoints = 1;
+      this._pendingRedeemNote = "";
       this._render();
     }
 
@@ -2037,16 +2157,35 @@
           if (member.active === false) statusParts.push("inaktiv");
           if (member.role === "child") statusParts.push("Kind");
           if (member.participates_in_rewards === false) statusParts.push("nimmt nicht an Belohnungen teil");
+          // v0.24: "Punkte vergeben" - siehe _selectAwardPoints/
+          // _confirmAwardPoints. Gleiches canManageMembers-Gate wie
+          // Bearbeiten/Löschen (Eltern-only, serverseitig zusätzlich über
+          // ws_award_points erzwungen).
+          const isPending = this._pendingAwardPointsMemberId === id;
           return `
-            <div class="row">
-              <div class="row-main">
-                <span class="name">${esc(member.name)}</span>
-                ${statusParts.length ? `<span class="muted">${esc(statusParts.join(" · "))}</span>` : ""}
+            <div class="row-wrap">
+              <div class="row">
+                <div class="row-main">
+                  <span class="name">${esc(member.name)}</span>
+                  ${statusParts.length ? `<span class="muted">${esc(statusParts.join(" · "))}</span>` : ""}
+                </div>
+                ${canManageMembers ? `
+                <div class="row-actions">
+                  ${iconActionButton("award-points", "mdi:star-plus-outline", "Punkte vergeben", { dataset: `data-member-id="${id}"` })}
+                  ${iconActionButton("edit-member", "mdi:pencil", "Bearbeiten", { dataset: `data-member-id="${id}"` })}
+                  ${iconActionButton("delete-member", "mdi:delete", "Löschen", { dataset: `data-member-id="${id}"`, extraClass: "danger" })}
+                </div>` : ""}
               </div>
-              ${canManageMembers ? `
-              <div class="row-actions">
-                ${iconActionButton("edit-member", "mdi:pencil", "Bearbeiten", { dataset: `data-member-id="${id}"` })}
-                ${iconActionButton("delete-member", "mdi:delete", "Löschen", { dataset: `data-member-id="${id}"`, extraClass: "danger" })}
+              ${isPending ? `
+              <div class="confirm-row">
+                <label>Punkte (negativ zum Abziehen)
+                  <input type="number" step="1" data-action="award-points-value" data-member-id="${id}" value="${esc(this._pendingAwardPoints ?? 1)}">
+                </label>
+                <label>Grund (optional)
+                  <input type="text" data-action="award-points-note" data-member-id="${id}" placeholder="z. B. Extra für Oma geholfen" value="${esc(this._pendingAwardNote ?? "")}">
+                </label>
+                <button data-action="confirm-award-points" data-member-id="${id}" ${Number(this._pendingAwardPoints) ? "" : "disabled"}>Bestätigen</button>
+                <button type="button" class="link" data-action="cancel-award-points">Abbrechen</button>
               </div>` : ""}
             </div>`;
         })
@@ -2119,7 +2258,7 @@
                     <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
                     <div class="balance">${esc(entry.member.name)}: ${pointsLabel(available)} verfügbar</div>
                   </div>
-                  <ha-icon class="disclosure-icon" icon="mdi:chevron-right"></ha-icon>
+                  <span class="disclosure-icon">${svgIcon("chevron-right", 20)}</span>
                 </div>`;
             })
             .join("")}</div>`
@@ -2208,6 +2347,14 @@
               const affordable = currentParticipates && (isInvestable ? availablePoints >= 1 : availablePoints >= cost);
               const isPending = this._pendingRedeemId === id;
               const priceLabel = isInvestable ? "Punkte frei wählbar" : `${pointsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}`;
+              // v0.24: CONF_REWARD_NOTE_ENABLED - siehe const.py. Ein
+              // Freitext-Feld im Bestätigungsschritt, z. B. für "Mittagessen
+              // auswählen" (welches Mittagessen gewünscht ist), statt nur
+              // eines einfachen "wirklich einlösen?"-Hinweises.
+              const noteEnabled = !!r.note_enabled;
+              const noteLabel = r.note_label?.trim() || "Text";
+              const noteValid = !noteEnabled || !!(this._pendingRedeemNote || "").trim();
+              const investValid = !isInvestable || (this._pendingInvestPoints >= 1 && this._pendingInvestPoints <= availablePoints);
               return `
                 <div class="row-wrap">
                   <div class="row">
@@ -2222,18 +2369,17 @@
                       ${iconActionButton("delete-reward", "mdi:delete", "Löschen", { dataset: `data-reward-id="${id}"`, extraClass: "danger" })}` : ""}
                     </div>
                   </div>
-                  ${isPending && isInvestable ? `
+                  ${isPending ? `
                   <div class="confirm-row">
+                    ${isInvestable ? `
                     <label>Punkte investieren
                       <input type="number" min="1" max="${availablePoints}" data-action="invest-points" data-reward-id="${id}" value="${esc(this._pendingInvestPoints ?? 1)}">
-                    </label>
-                    <button data-action="confirm-redeem" data-reward-id="${id}" ${this._pendingInvestPoints >= 1 && this._pendingInvestPoints <= availablePoints ? "" : "disabled"}>Bestätigen</button>
-                    <button type="button" class="link" data-action="cancel-redeem">Abbrechen</button>
-                  </div>` : ""}
-                  ${isPending && !isInvestable ? `
-                  <div class="confirm-row">
-                    <span>„${esc(r.name)}" für ${pointsLabel(cost)} einlösen?</span>
-                    <button data-action="confirm-redeem" data-reward-id="${id}">Bestätigen</button>
+                    </label>` : `<span>„${esc(r.name)}" für ${pointsLabel(cost)} einlösen?</span>`}
+                    ${noteEnabled ? `
+                    <label>${esc(noteLabel)}
+                      <input type="text" data-action="redeem-note" data-reward-id="${id}" value="${esc(this._pendingRedeemNote ?? "")}" required>
+                    </label>` : ""}
+                    <button data-action="confirm-redeem" data-reward-id="${id}" ${investValid && noteValid ? "" : "disabled"}>Bestätigen</button>
                     <button type="button" class="link" data-action="cancel-redeem">Abbrechen</button>
                   </div>` : ""}
                 </div>`;
@@ -2259,6 +2405,7 @@
                   <div class="row-main">
                     <span class="name">${esc(r.member_name)} · ${esc(r.reward_name)}</span>
                     <span class="muted">${pointsLabel(r.points_cost ?? 0)}${screenTimeSuffix(r.screen_time_minutes)}${r.fulfilled ? " · erledigt" : ""}</span>
+                    ${r.note ? `<span class="muted">„${esc(r.note)}"</span>` : ""}
                   </div>
                   ${!r.fulfilled && canManageRewards ? `
                   <div class="row-actions">
@@ -2317,6 +2464,13 @@
             <input type="checkbox" data-reward-field="auto_fulfill" ${f.auto_fulfill ? "checked" : ""}>
             Gilt mit der Einlösung sofort als erledigt${isScreenTime ? " (bei Handyzeit meist sinnvoll, da automatisch gewährt)" : ""}
           </label>
+          <label class="checkbox-label">
+            <input type="checkbox" data-reward-field="note_enabled" ${f.note_enabled ? "checked" : ""}>
+            Freitext-Eingabe beim Einlösen (z. B. gewünschtes Mittagessen)
+          </label>
+          ${f.note_enabled ? `
+          <label>Beschriftung des Textfelds (optional)<input type="text" data-reward-field="note_label" placeholder="z. B. Gewünschtes Mittagessen" value="${esc(f.note_label)}"></label>
+          ` : ""}
           <div class="form-actions">
             <button type="submit" data-action="save-reward">Speichern</button>
             <button type="button" data-action="cancel-reward-form">Abbrechen</button>
@@ -2710,21 +2864,17 @@
                             color: var(--secondary-text-color); cursor: pointer; flex-shrink: 0; }
         .icon-action-btn:hover { background: var(--card-background-color, #fff); }
         .icon-action-btn:disabled { opacity: 0.4; cursor: default; background: none; }
-        /* Explicit width/height (not just --mdc-icon-size) on the <ha-icon>
-           host itself, not only its internal svg - ha-icon resolves an
-           mdi:* icon's actual path asynchronously (a separately-loaded icon
-           metadata chunk), and since this card rebuilds its entire
-           shadow-DOM innerHTML on every re-render (see the file header -
-           framework-free, no diffing), every row's <ha-icon> is torn down
-           and recreated from scratch each time, briefly re-running that
-           lookup. Without a fixed host size the button could visibly pop/
-           reflow between that brief unresolved state and the icon actually
-           painting in - most noticeable on the round danger delete button,
-           where an unresolved/collapsed icon on a small red-tinted circular
-           button could read as a plain dot until it resolves (often by the
-           time a pointer lingers over it on hover). Sizing the host itself
-           keeps the button's layout box stable across that transition. */
-        .icon-action-btn ha-icon { --mdc-icon-size: 18px; width: 18px; height: 18px; display: inline-flex; }
+        /* v0.24: plain inline <svg> (see svgIcon/ICON_SVG_PATHS), not
+           <ha-icon>, so no width/height rule is needed to paper over an
+           async icon-path lookup any more - the v0.23 attempt at exactly
+           that (sizing the <ha-icon> host so at least the button's layout
+           didn't jump) never actually fixed the underlying symptom (the
+           round danger delete button showing as a bare red circle with no
+           bin glyph until something incidentally repainted it, e.g. a
+           hover). See svgIcon's comment for the full explanation - this
+           rule just sizes the svg itself now, synchronously correct from
+           the very first paint. */
+        .icon-action-btn svg { width: 18px; height: 18px; display: block; fill: currentColor; }
         .icon-action-btn.success { color: var(--success-color, #43a047); }
         .icon-action-btn.danger { color: var(--error-color, #db4437); }
         /* "+ Aufgabe hinzufügen"/"+ Eigene Aufgabe hinzufügen" links, der
@@ -2744,7 +2894,8 @@
         /* v0.23: reiner optischer Hinweis, dass eine Bestenlisten-Zeile
            anklickbar ist (öffnet die "diese Woche erledigt"-Details) - siehe
            _renderRankingSection. */
-        .disclosure-icon { --mdc-icon-size: 20px; width: 20px; height: 20px; color: var(--secondary-text-color); flex-shrink: 0; }
+        .disclosure-icon { display: inline-flex; width: 20px; height: 20px; color: var(--secondary-text-color); flex-shrink: 0; }
+        .disclosure-icon svg { fill: currentColor; display: block; }
         @media (max-width: 480px) {
           .row { flex-wrap: wrap; }
           .row-main { flex-basis: 100%; }
@@ -2874,6 +3025,16 @@
         else if (action === "cancel-member-form") this._closeMemberForm();
         else if (action === "edit-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(el.dataset.memberId); }
         else if (action === "delete-member") { if (this._isAdmin() && !this._isChildUser()) this._deleteMember(el.dataset.memberId)?.catch(() => {}); }
+        else if (action === "award-points") {
+          // Defense-in-depth, same reasoning as edit-member/delete-member
+          // above - the backend enforces this too regardless (see
+          // ws_award_points in storage.py).
+          if (this._isAdmin() && !this._isChildUser()) this._selectAwardPoints(el.dataset.memberId);
+        } else if (action === "cancel-award-points") {
+          this._cancelAwardPoints();
+        } else if (action === "confirm-award-points") {
+          if (this._isAdmin() && !this._isChildUser()) this._confirmAwardPoints(el.dataset.memberId)?.catch(() => {});
+        }
         else if (action === "toggle-hide-not-due") {
           this._hideNotDue = !this._hideNotDue;
           this._saveUiState();
@@ -3010,6 +3171,32 @@
         const investEl = ev.target.closest('[data-action="invest-points"]');
         if (investEl) {
           this._pendingInvestPoints = Math.max(1, Number(investEl.value) || 1);
+          this._render();
+          return;
+        }
+
+        // Freitext-Feld für eine CONF_REWARD_NOTE_ENABLED-Belohnung (v0.24) -
+        // gleiches Muster wie invest-points direkt oberhalb, ebenfalls nur
+        // Teil der Bestätigungs-Zeile, nicht des Belohnungs-Formulars.
+        const redeemNoteEl = ev.target.closest('[data-action="redeem-note"]');
+        if (redeemNoteEl) {
+          this._pendingRedeemNote = redeemNoteEl.value;
+          this._render();
+          return;
+        }
+
+        // "Punkte vergeben"-Bestätigungszeile (v0.24) - gleiches Muster wie
+        // invest-points/redeem-note oberhalb, nur Teil der Zeile in der
+        // Mitgliederliste, nicht des Mitglieder-Formulars.
+        const awardPointsEl = ev.target.closest('[data-action="award-points-value"]');
+        if (awardPointsEl) {
+          this._pendingAwardPoints = Math.trunc(Number(awardPointsEl.value)) || 0;
+          this._render();
+          return;
+        }
+        const awardNoteEl = ev.target.closest('[data-action="award-points-note"]');
+        if (awardNoteEl) {
+          this._pendingAwardNote = awardNoteEl.value;
           this._render();
           return;
         }

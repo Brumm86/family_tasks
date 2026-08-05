@@ -31,6 +31,8 @@ from .const import (
     CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_REWARD_AUTO_FULFILL,
+    CONF_REWARD_NOTE_ENABLED,
+    CONF_REWARD_NOTE_LABEL,
     CONF_REWARD_SCREEN_TIME_INVESTABLE,
     CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
@@ -39,6 +41,7 @@ from .const import (
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     EVENT_REWARD_REDEEMED,
+    MANUAL_POINTS_TASK_ID,
     MAX_COMPLETION_LOG_ENTRIES,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
@@ -72,6 +75,7 @@ from .const import (
     WEEKLY_BONUS_TASK_ID,
     WS_API_FAVORITE_INSTANTIATE,
     WS_API_MEMBER_WEEKLY_COMPLETIONS,
+    WS_API_POINTS_AWARD,
     WS_API_PREFIX_BATTERY_OVERRIDES,
     WS_API_PREFIX_FAVORITES,
     WS_API_PREFIX_MEMBERS,
@@ -560,6 +564,9 @@ REWARD_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_REWARD_AUTO_FULFILL, default=False): bool,
     # See CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py.
     vol.Optional(CONF_REWARD_SCREEN_TIME_INVESTABLE, default=False): bool,
+    # See CONF_REWARD_NOTE_ENABLED/CONF_REWARD_NOTE_LABEL in const.py.
+    vol.Optional(CONF_REWARD_NOTE_ENABLED, default=False): bool,
+    vol.Optional(CONF_REWARD_NOTE_LABEL): str,
 }
 
 REWARD_UPDATE_SCHEMA: collection.VolDictType = {
@@ -574,6 +581,12 @@ REWARD_UPDATE_SCHEMA: collection.VolDictType = {
     ),
     vol.Optional(CONF_REWARD_AUTO_FULFILL): bool,
     vol.Optional(CONF_REWARD_SCREEN_TIME_INVESTABLE): bool,
+    vol.Optional(CONF_REWARD_NOTE_ENABLED): bool,
+    # Same "explicit null clears it" pattern as screen_time_minutes above -
+    # switching "Freitext bei Einlösung" back off leaves a stale label
+    # around otherwise (harmless since it's ignored while note_enabled is
+    # False, but _update_data below drops it the same way for consistency).
+    vol.Optional(CONF_REWARD_NOTE_LABEL): vol.Any(None, str),
 }
 
 
@@ -610,6 +623,11 @@ class RewardStorageCollection(collection.DictStorageCollection):
             # Explicit clear, rather than persisting a literal None - mirrors
             # BatteryOverrideStorageCollection's "threshold" clearing below.
             updated.pop(CONF_REWARD_SCREEN_TIME_MINUTES, None)
+        if (
+            CONF_REWARD_NOTE_LABEL in validated
+            and validated[CONF_REWARD_NOTE_LABEL] is None
+        ):
+            updated.pop(CONF_REWARD_NOTE_LABEL, None)
         return updated
 
 
@@ -658,6 +676,11 @@ REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     # event payload can label it distinctly ("12 Punkte investiert" instead of
     # implying a fixed catalog price).
     vol.Optional("points_invested"): vol.All(int, vol.Range(min=1)),
+    # v0.24: the redeeming member's free-text note, only present for a
+    # CONF_REWARD_NOTE_ENABLED reward (e.g. which lunch they'd like) - see
+    # ws_redeem_reward, which requires a non-blank value whenever the reward
+    # asks for one.
+    vol.Optional("note"): str,
 }
 
 # Only "fulfilled" may ever be changed after the fact - see
@@ -928,6 +951,26 @@ REDEEM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
         # CONF_SCREEN_TIME_MINUTES_PER_POINT) rather than trusting a
         # client-computed minutes value. Ignored for any other reward.
         vol.Optional("points_spent"): vol.All(int, vol.Range(min=1)),
+        # v0.24: required (and only meaningful) for a CONF_REWARD_NOTE_ENABLED
+        # reward - e.g. which lunch the member wants for "Mittagessen
+        # auswählen". Ignored for any other reward; ws_redeem_reward rejects
+        # the redemption if the reward requires one and this is missing/blank.
+        vol.Optional("note"): str,
+    }
+)
+
+
+# v0.24 - see WS_API_POINTS_AWARD in const.py. "points" may be negative (a
+# correction/deduction); zero is rejected in the handler below rather than
+# here, so the error message can be specific instead of voluptuous' generic
+# "value must be..." wording. The range bound is just a sanity limit against
+# obvious fat-finger input, not a meaningful business rule.
+AWARD_POINTS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_POINTS_AWARD,
+        vol.Required("member_id"): str,
+        vol.Required("points"): vol.All(int, vol.Range(min=-100000, max=100000)),
+        vol.Optional("note"): str,
     }
 )
 
@@ -1112,6 +1155,22 @@ def async_setup_websocket_api(
         else:
             points_cost = reward.get("points_cost", 0)
 
+        # v0.24: a CONF_REWARD_NOTE_ENABLED reward (e.g. "Mittagessen
+        # auswählen") needs a non-blank note before it may be redeemed at
+        # all - checked here, before the balance check below, so a member
+        # who forgot to fill it in sees that specific error rather than a
+        # possibly-unrelated "not enough points" one.
+        note: str | None = None
+        if reward.get(CONF_REWARD_NOTE_ENABLED):
+            note = (msg.get("note") or "").strip()
+            if not note:
+                connection.send_error(
+                    msg["id"],
+                    websocket_api.ERR_INVALID_FORMAT,
+                    "Bitte einen Text eingeben.",
+                )
+                return
+
         available = _available_points(completions, reward_redemptions, member_id)
         if available < points_cost:
             connection.send_error(
@@ -1133,6 +1192,8 @@ def async_setup_websocket_api(
                 redemption_data[CONF_REWARD_SCREEN_TIME_MINUTES] = screen_time_minutes
             if points_invested is not None:
                 redemption_data["points_invested"] = points_invested
+            if note is not None:
+                redemption_data["note"] = note
             # See CONF_REWARD_AUTO_FULFILL in const.py: a reward configured
             # that way (typically a screen-time reward, granted automatically
             # by a household automation reacting to EVENT_REWARD_REDEEMED
@@ -1165,10 +1226,80 @@ def async_setup_websocket_api(
                 "points_cost": points_cost,
                 "points_invested": points_invested,
                 CONF_REWARD_SCREEN_TIME_MINUTES: screen_time_minutes,
+                "note": note,
             },
         )
 
     websocket_api.async_register_command(hass, WS_API_REWARD_REDEEM, ws_redeem_reward, REDEEM_REWARD_SCHEMA)
+
+    @websocket_api.async_response
+    async def ws_award_points(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Let a parent grant (or, with a negative amount, deduct) points for a member.
+
+        Independent of any task or reward - see WS_API_POINTS_AWARD in
+        const.py. Parent-only, same "not a child, regardless of HA admin
+        flag" guard used throughout this module (ws_instantiate_favorite,
+        reward-redemption "fulfilled", member management). Logged via the
+        normal completion log under the internal MANUAL_POINTS_TASK_ID
+        sentinel (same mechanism CompletionLogStore already uses for the
+        weekly-winner bonus) so it counts toward the member's points_total/
+        points_week/points_month/points_available exactly like a real task
+        completion - there is no separate "adjustments" ledger.
+
+        CompletionLogStore is a plain append-only log, not a
+        StorageCollection - unlike tasks/members/reward_redemptions there is
+        no change-set listener wired up in __init__.py to trigger a
+        coordinator refresh automatically, so this reads the coordinator
+        straight off the config entry's runtime_data (populated by the time
+        this handler actually runs, well after async_setup_websocket_api
+        itself returns during setup - same "resolved lazily, not at
+        registration time" trick already used for entry.options in
+        ws_redeem_reward above) and requests one explicitly, the same way
+        FamilyTasksCoordinator's own async_complete_task/async_skip_task
+        already do right after their own completions.async_add_entry call.
+        """
+        role = _member_role_for_user(hass, members, connection.user)
+        if role == MEMBER_ROLE_CHILD:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Mitglieder mit der Rolle 'Kind' dürfen keine Punkte vergeben.",
+            )
+            return
+
+        member = members.data.get(msg["member_id"])
+        if member is None:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Familienmitglied nicht gefunden."
+            )
+            return
+
+        points = msg["points"]
+        if points == 0:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, "Punktzahl darf nicht 0 sein."
+            )
+            return
+
+        note = (msg.get("note") or "").strip() or None
+        entry_item = await completions.async_add_entry(
+            task_id=MANUAL_POINTS_TASK_ID,
+            period_key=dt_util.utcnow().date().isoformat(),
+            member_id=msg["member_id"],
+            points_awarded=points,
+            task_name=note or ("Punkte erteilt" if points > 0 else "Punkte abgezogen"),
+        )
+
+        runtime_data = getattr(entry, "runtime_data", None) if entry is not None else None
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is not None:
+            await coordinator.async_request_refresh()
+
+        connection.send_result(msg["id"], entry_item)
+
+    websocket_api.async_register_command(hass, WS_API_POINTS_AWARD, ws_award_points, AWARD_POINTS_SCHEMA)
 
     @websocket_api.async_response
     async def ws_create_own_task(
@@ -1233,7 +1364,9 @@ def async_setup_websocket_api(
         figure already shown on the leaderboard. Not admin-restricted - any
         logged-in user may look up any member's completions, same as the
         leaderboard/points sensors themselves are already visible to
-        everyone regardless of role.
+        everyone regardless of role. Excludes WEEKLY_BONUS_TASK_ID and
+        MANUAL_POINTS_TASK_ID entries (v0.24) - neither is a completed task,
+        even though both count normally toward the member's point totals.
         """
         member_id = msg["member_id"]
         if member_id not in members.data:
@@ -1250,7 +1383,10 @@ def async_setup_websocket_api(
         for entry in completions.entries:
             if entry.get("completed_by_member_id") != member_id:
                 continue
-            if entry.get("skipped") or entry.get("task_id") == WEEKLY_BONUS_TASK_ID:
+            if entry.get("skipped") or entry.get("task_id") in (
+                WEEKLY_BONUS_TASK_ID,
+                MANUAL_POINTS_TASK_ID,
+            ):
                 continue
             completed_at = dt_util.parse_datetime(entry.get("completed_at", ""))
             if completed_at is None or completed_at < start_of_week:

@@ -47,6 +47,20 @@ CONF_WEEKLY_WINNER_BONUS_POINTS: Final = "weekly_winner_bonus_points"
 # handler for that history can exclude it too without an import cycle.
 WEEKLY_BONUS_TASK_ID: Final = "__weekly_winner_bonus__"
 
+# v0.24: same sentinel pattern as WEEKLY_BONUS_TASK_ID above, for a manual
+# points award/deduction a parent makes independent of any task (see
+# WS_API_POINTS_AWARD/ws_award_points in storage.py) - never a real task, and
+# excluded from the per-member weekly completion history for the same reason
+# (it isn't a completed task), while still counting normally toward the
+# member's points_total/points_week/points_month/points_available and toward
+# who's currently leading for the *next* weekly-winner-bonus determination
+# (unlike WEEKLY_BONUS_TASK_ID, deliberately not excluded there - see
+# FamilyTasksCoordinator._points_earned_in_range in coordinator.py -  a
+# manually-awarded point is just as "real" as a task-completion one, with
+# none of the self-reinforcing-bonus problem a previous week's bonus would
+# have).
+MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
+
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
@@ -388,6 +402,22 @@ CONF_REWARD_AUTO_FULFILL: Final = "auto_fulfill"
 # automatically instead of silently keeping the old fixed-minutes behavior.
 CONF_REWARD_SCREEN_TIME_INVESTABLE: Final = "screen_time_investable"
 
+# v0.24: marks a catalog reward as needing a short free-text note from the
+# redeeming member, filled in at redemption time (family_tasks/
+# reward_redemption/redeem's new optional "note") and stored on the
+# resulting redemption entry - e.g. the seeded "Mittagessen auswählen"
+# reward, where a child should be able to say *which* lunch they want
+# instead of a parent having to ask separately after the fact. Off by
+# default, same "opt-in per catalog item" pattern as
+# CONF_REWARD_SCREEN_TIME_MINUTES/CONF_REWARD_AUTO_FULFILL - most rewards
+# ("Filmabend aussuchen") don't need any extra detail. CONF_REWARD_NOTE_LABEL
+# is the optional custom field label shown above the text field (e.g.
+# "Gewünschtes Mittagessen"); falls back to a generic label in the card if
+# left blank. See ws_redeem_reward in storage.py, which rejects a redemption
+# of such a reward if "note" is missing/blank.
+CONF_REWARD_NOTE_ENABLED: Final = "note_enabled"
+CONF_REWARD_NOTE_LABEL: Final = "note_label"
+
 # Fired on hass.bus the moment a redemption is created (end of ws_redeem_reward
 # in storage.py), carrying member_id/member_name/reward_id/reward_name/
 # points_cost/screen_time_minutes. This - not a hardcoded call into a specific
@@ -413,6 +443,22 @@ EVENT_REWARD_REDEEMED: Final = f"{DOMAIN}_reward_redeemed"
 # however it likes (a different notify target, a TTS announcement, etc.)
 # without the integration having to know about any of that.
 EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
+
+# --- Manual point awards (v0.24) ------------------------------------------------
+#
+# Lets a parent grant (or, with a negative amount, deduct/correct) points for
+# a member directly, independent of any task or reward - e.g. a one-off
+# "half-yearly report card" bonus, or fixing a mistaken completion without
+# having to fabricate a fake task for it. Not a StorageCollection: creating
+# one just appends to the existing completion log (see
+# MANUAL_POINTS_TASK_ID/CompletionLogStore.async_add_entry, same mechanism
+# the weekly-winner bonus already uses) rather than being its own persisted,
+# editable entity - there's nothing to later edit/delete, only ever more
+# awards on top, same as a task completion itself is never edited after the
+# fact. Parent-only (not a child, regardless of HA admin flag - same
+# "_member_role_for_user != MEMBER_ROLE_CHILD" guard used throughout
+# storage.py), see ws_award_points in storage.py.
+WS_API_POINTS_AWARD: Final = f"{DOMAIN}/points/award"
 
 # --- Coordinator --------------------------------------------------------------
 
