@@ -1825,6 +1825,29 @@
       `;
       this._attachListenersOnce();
       this._syncDialogs();
+      this._hydrateDateTimeInputs(this.shadowRoot);
+    }
+
+    // ha-date-input/ha-time-input (used for recurrence.anchor_date/due_time
+    // since v0.26, replacing native <input type="date"/"time"> - see the
+    // CHANGELOG entry for why: those crashed the official macOS companion
+    // app, which renders its native date/time picker as a UIPickerView in a
+    // popover, an idiom Mac Catalyst doesn't support) both require a
+    // `locale` property to render/open without throwing. That property is
+    // *not* HTML-attribute-reflected (Lit's `attribute: false`), so it can't
+    // be set via the plain string templates this framework-free card builds
+    // its HTML from - it has to be assigned as a real JS property after the
+    // elements exist in the DOM. Must run synchronously right after every
+    // innerHTML/outerHTML assignment that can (re)create one of these
+    // elements (see call sites), *before* returning control to the browser -
+    // Lit defers a freshly-upgraded element's first render to a microtask,
+    // so setting .locale synchronously here still lands before that first
+    // render/before the user could possibly have clicked it yet.
+    _hydrateDateTimeInputs(root) {
+      if (!this._hass) return;
+      root.querySelectorAll("ha-date-input, ha-time-input").forEach((el) => {
+        el.locale = this._hass.locale;
+      });
     }
 
     // Opens any dialog whose *FormOpen flag is true but that isn't already
@@ -2677,10 +2700,10 @@
           ${f.recurrence.type === "interval_days" ? `
             <div class="grid2">
               <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
-              <label>Ankerdatum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>
+              <label>Ankerdatum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>
             </div>` : ""}
           ${f.recurrence.type === "once" ? `
-            <label>Datum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>` : ""}
+            <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>` : ""}
           ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
           ${f.recurrence.type === "trigger" ? this._renderCompletionButtonField(f.completion_button_entity_id) : ""}
           ${f.recurrence.type === "battery" ? `
@@ -2688,7 +2711,7 @@
 
           ${f.recurrence.type !== "trigger" ? `
           <div class="grid2">
-            <label>Fällig um (optional)<input type="time" data-field="due_time" value="${esc(f.due_time)}"></label>
+            <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" value="${esc(f.due_time)}"></ha-time-input></label>
             <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
           </div>` : `
           <label>Karenz bis überfällig, nachdem der Sensor ausgelöst hat (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>`}
@@ -2744,13 +2767,13 @@
           ${f.recurrence.type === "interval_days" ? `
             <div class="grid2">
               <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
-              <label>Ankerdatum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>
+              <label>Ankerdatum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>
             </div>` : ""}
           ${f.recurrence.type === "once" ? `
-            <label>Datum<input type="date" data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></label>` : ""}
+            <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>` : ""}
 
           <div class="grid2">
-            <label>Fällig um (optional)<input type="time" data-field="due_time" value="${esc(f.due_time)}"></label>
+            <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" value="${esc(f.due_time)}"></ha-time-input></label>
             <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
           </div>
 
@@ -3297,7 +3320,13 @@
         this._applyFieldChange(spec.target, el);
         // Re-render only the form itself in place so unrelated typing isn't lost,
         // but recurrence-type / rotation changes need the sub-fields to redraw.
+        // (form.outerHTML replaces the node itself, so `form` is detached
+        // afterwards - grab its still-attached parent first so the
+        // ha-date-input/ha-time-input .locale hydration below, see
+        // _hydrateDateTimeInputs, can find the freshly-rendered replacement.)
+        const formParent = form.parentNode;
         form.outerHTML = spec.render();
+        this._hydrateDateTimeInputs(formParent);
       });
     }
 
@@ -3337,6 +3366,17 @@
         const pos = list.indexOf(el.value);
         if (el.checked && pos === -1) list.push(el.value);
         if (!el.checked && pos !== -1) list.splice(pos, 1);
+        return;
+      }
+
+      // due_time comes from <ha-time-input> since v0.26 (see
+      // _hydrateDateTimeInputs) instead of a native <input type="time">, and
+      // that component's .value always includes seconds ("HH:MM:SS", even
+      // with the seconds field itself hidden). Strip that back down to
+      // "HH:MM" so storage keeps getting the format storage.py documents
+      // ("HH:MM") and existing due_time values/tests aren't affected.
+      if (leaf === "due_time") {
+        target.due_time = el.value ? el.value.slice(0, 5) : el.value;
         return;
       }
 

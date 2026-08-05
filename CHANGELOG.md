@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.26.0] - 2026-08-05
+
+### Fixed
+- **Fälligkeitsdatum/-uhrzeit einer Aufgabe konnte die macOS-Companion-App abstürzen lassen**: das Auswählen von "Datum"/"Ankerdatum" (`recurrence.anchor_date`) oder "Fällig um" (`due_time`) im Aufgaben-Formular nutzte bisher native `<input type="date">`/`<input type="time">`-Felder. Deren nativer Auswahl-Dialog wird von WebKit intern über einen `UIPickerView` dargestellt - unter Mac Catalyst (dem Unterbau der offiziellen macOS-App) wirft das Öffnen eines solchen Pickers in einem Popover eine von UIKit selbst nicht abgefangene Exception (`_throwForUnsupportedMacIdiomBehaviorWithReason:`), die die gesamte App beendet. Ein vom Nutzer bereitgestellter Crash-Report zeigte diesen exakten Absturzpfad (`UIPickerView _didMoveFromWindow:` → `_UIPopoverHostManagerMac`). Betroffen war ausschließlich diese native OS-Picker-UI selbst, nicht Backend-Code der Integration. Beide Felder nutzen jetzt die eigenen Web-Components des Home-Assistant-Frontends, `<ha-date-input>`/`<ha-time-input>` (`family-tasks-card.js`) - dieselben, die z. B. der Automatisierungs-Editor verwendet. Die öffnen einen eigenen, in HTML/CSS gezeichneten Auswahl-Dialog statt eines nativen OS-Pickers und können den Absturz dadurch grundsätzlich nicht mehr auslösen; als Nebeneffekt folgt die Zeit-Eingabe jetzt außerdem automatisch dem 12h/24h-Format des angemeldeten Nutzers. Da diese Komponenten eine `locale`-Eigenschaft benötigen, die sich (anders als `value`) nicht als HTML-Attribut in den bisherigen, framework-freien String-Templates setzen lässt, weist eine neue `_hydrateDateTimeInputs`-Methode sie direkt nach jedem `innerHTML`/`outerHTML`-Aufbau per JavaScript zu. `<ha-time-input>` liefert seinen Wert außerdem immer inklusive Sekunden (`"HH:MM:SS"`) statt wie zuvor `"HH:MM"` - `_applyFieldChange` kürzt das beim Speichern wieder auf `"HH:MM"`, damit das gespeicherte Format unverändert zum in `storage.py` dokumentierten bleibt; `FamilyTasksCoordinator._due_at` (`coordinator.py`) akzeptiert zusätzlich vorsorglich auch ein `"HH:MM:SS"` direkt aus der Storage Collection, falls ein `due_time`-Wert je auf einem anderen Weg als über die Karte dorthin gelangt.
+
 ## [0.25.0] - 2026-08-05
 
 ### Fixed

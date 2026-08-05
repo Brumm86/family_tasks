@@ -245,11 +245,26 @@ def _current_period_date(recurrence: dict, today: date) -> date:
 
 
 def _due_at(period_start: date, due_time: str | None) -> datetime:
-    """Combine a period's date with an optional time-of-day into a datetime."""
+    """Combine a period's date with an optional time-of-day into a datetime.
+
+    due_time is stored (and documented, see storage.py) as "HH:MM", but the
+    card's due-time field has used the frontend's own `ha-time-input`
+    component since v0.26 instead of a native `<input type="time">` (see
+    CHANGELOG) - that component always reports a value with seconds
+    ("HH:MM:SS"), and the card normalizes it back down to "HH:MM" before
+    saving. Splitting on ":" and only looking at the first two parts (instead
+    of the previous str.partition-based parsing, which put everything from
+    the second ":" onward - including a "SS" suffix - into what it treated as
+    the minutes component and passed to int()) keeps this tolerant of a
+    "HH:MM:SS" value too, in case one ever reaches storage directly via the
+    websocket API rather than through the card.
+    """
     if due_time:
-        hour, _, minute = due_time.partition(":")
+        hour_str, _, rest = due_time.partition(":")
+        minute_str = rest.partition(":")[0]
         naive = datetime.combine(
-            period_start, datetime.min.time().replace(hour=int(hour), minute=int(minute or 0))
+            period_start,
+            datetime.min.time().replace(hour=int(hour_str), minute=int(minute_str or 0)),
         )
     else:
         naive = datetime.combine(period_start, datetime.max.time().replace(microsecond=0))
