@@ -56,6 +56,7 @@ from .const import (
     ROTATION_STRATEGY_FIXED,
     STORAGE_KEY_BATTERY_OVERRIDES,
     STORAGE_KEY_CHECKLIST_STATE,
+    STORAGE_KEY_CLAIM_STATE,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_FAVORITES,
     STORAGE_KEY_MEMBERS,
@@ -1832,6 +1833,69 @@ class ChecklistStateStore:
 async def async_create_checklist_state_store(hass: HomeAssistant) -> ChecklistStateStore:
     """Create and load the checklist sub-item state store."""
     store = ChecklistStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class ClaimStateStore:
+    """Tracks which member currently has an open task occurrence reserved.
+
+    See CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in const.py and
+    FamilyTasksCoordinator.async_claim_task/async_complete_task in
+    coordinator.py: while a claim is active for a task's current period, only
+    the claimant may complete it, and nobody (including the claimant) may
+    open a second, overlapping claim on it. Not a StorageCollection: runtime
+    state written by claim/release/expiry, never edited directly by the user
+    - same pattern as TriggerStateStore/ChecklistStateStore. Keyed on task_id
+    only (at most one open claim per task at a time, mirroring
+    TriggerStateStore); a stored entry whose period_key no longer matches the
+    task's current period is stale - the period rolled over with the claim
+    still open (e.g. a recurring task's next occurrence started before the
+    reservation itself expired) - and is treated the same as "no active
+    claim" rather than carried over into the new period, same reasoning as
+    ChecklistStateStore.checked_ids.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, dict[str, Any]]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_CLAIM_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        # task_id -> {"period_key": str, "member_id": str, "claimed_at": iso str}
+        self._state: dict[str, dict[str, Any]] = {}
+
+    async def async_load(self) -> None:
+        """Load open claims from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def get(self, task_id: str, period_key: str) -> dict[str, Any] | None:
+        """Return the active claim for a task's current period, if any."""
+        entry = self._state.get(task_id)
+        if not entry or entry.get("period_key") != period_key:
+            return None
+        return entry
+
+    async def async_claim(
+        self, task_id: str, period_key: str, member_id: str, *, claimed_at: datetime
+    ) -> dict[str, Any]:
+        """Reserve a task's current occurrence for one member."""
+        entry = {
+            "period_key": period_key,
+            "member_id": member_id,
+            "claimed_at": claimed_at.isoformat(),
+        }
+        self._state[task_id] = entry
+        await self._store.async_save(self._state)
+        return entry
+
+    async def async_clear(self, task_id: str) -> None:
+        """Drop a task's active claim - released, completed, or expired."""
+        if self._state.pop(task_id, None) is not None:
+            await self._store.async_save(self._state)
+
+
+async def async_create_claim_state_store(hass: HomeAssistant) -> ClaimStateStore:
+    """Create and load the task-claim state store."""
+    store = ClaimStateStore(hass)
     await store.async_load()
     return store
 

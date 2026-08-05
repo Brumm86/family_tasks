@@ -424,6 +424,25 @@
     return minutes ? ` · +${esc(minutes)} Min. Bildschirmzeit` : "";
   }
 
+  // v0.27: "18:30" for a timestamp falling on today, "Mo 18:30" otherwise
+  // (e.g. a Karenzzeit that pushes a late due_time past midnight) - shared by
+  // the per-task "Zu erledigen bis"/"Reserviert bis" labels below (see
+  // deadline_at/claim_expires_at task attributes, both ISO datetimes from
+  // coordinator.py). Returns "" for anything that doesn't parse so callers
+  // can use it directly in a template without an extra guard.
+  function formatDeadline(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const sameDay = d.toDateString() === new Date().toDateString();
+    return d.toLocaleString(
+      "de-DE",
+      sameDay
+        ? { hour: "2-digit", minute: "2-digit" }
+        : { weekday: "short", hour: "2-digit", minute: "2-digit" }
+    );
+  }
+
   // v0.24: inline SVG path data for the small, fixed set of MDI icons this
   // file itself chooses (row-action buttons, the Bestenliste disclosure
   // arrow) - as opposed to an *arbitrary* icon a user types into a task/
@@ -1843,11 +1862,60 @@
     // Lit defers a freshly-upgraded element's first render to a microtask,
     // so setting .locale synchronously here still lands before that first
     // render/before the user could possibly have clicked it yet.
+    //
+    // v0.27: that v0.26 switch introduced its own regression - ha-date-input/
+    // ha-time-input are only ever *registered* as custom elements once Home
+    // Assistant's own frontend has, somewhere on the current page, already
+    // lazily loaded the bundle that defines them (e.g. by opening certain
+    // config panels first). On a bare Lovelace dashboard - the normal way
+    // this card is used - that bundle frequently never loads, so the tag
+    // stays an unrecognized custom element: no picker UI, no error either,
+    // the field just silently isn't there. That's exactly the "the due-time
+    // field disappeared" report this fixes. There is no reliable, HA-
+    // version-stable way for a card outside HA's own source tree to force
+    // that bundle to load on demand, so instead of gambling on one, this
+    // detects the failure (customElements.get below returns undefined) and
+    // swaps the element for a plain, safe text fallback - see
+    // _replaceWithPlainDateTimeInput, "safe" specifically meaning *not* a
+    // native <input type="date"/"time">, which is what crashed the
+    // companion app in the first place (the whole reason this component
+    // switch happened). _renderTaskForm()/_renderOwnTaskForm() keep emitting
+    // the real ha-date-input/ha-time-input tag in their template regardless
+    // - every field change re-renders the whole form (see the "change"
+    // listener's form.outerHTML assignment) and re-runs this hydration, so a
+    // household on a setup where the bundle *does* load upgrades back to the
+    // native picker automatically the next time the form redraws, with
+    // nothing to configure.
     _hydrateDateTimeInputs(root) {
       if (!this._hass) return;
       root.querySelectorAll("ha-date-input, ha-time-input").forEach((el) => {
-        el.locale = this._hass.locale;
+        if (customElements.get(el.tagName.toLowerCase())) {
+          el.locale = this._hass.locale;
+          return;
+        }
+        this._replaceWithPlainDateTimeInput(el);
       });
+    }
+
+    // Fallback for _hydrateDateTimeInputs above when ha-date-input/
+    // ha-time-input isn't actually registered: a plain text field carrying
+    // the same data-field/value so the generic _applyFieldChange handling
+    // (including its due_time "HH:MM:SS" trimming, harmless no-op on an
+    // already-"HH:MM" value from here) needs no changes to cope with either
+    // element. Deliberately type="text" with a pattern/placeholder hint
+    // rather than type="date"/"time" - see the comment above.
+    _replaceWithPlainDateTimeInput(el) {
+      const isTime = el.tagName.toLowerCase() === "ha-time-input";
+      const fallback = document.createElement("input");
+      fallback.type = "text";
+      fallback.inputMode = "numeric";
+      fallback.placeholder = isTime ? "hh:mm" : "jjjj-mm-tt";
+      fallback.pattern = isTime ? "([01][0-9]|2[0-3]):[0-5][0-9]" : "\\d{4}-\\d{2}-\\d{2}";
+      fallback.autocomplete = "off";
+      const fieldAttr = el.getAttribute("data-field");
+      if (fieldAttr) fallback.dataset.field = fieldAttr;
+      fallback.value = el.getAttribute("value") || "";
+      el.replaceWith(fallback);
     }
 
     // Opens any dialog whose *FormOpen flag is true but that isn't already
@@ -2033,19 +2101,31 @@
             eligibleIds.includes(currentMemberId)
               ? " · jetzt auch für dich (überfällig)"
               : "";
-          const detail = isConfirmation
-            ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
-            : isChecklist
-            ? `${subtasks.filter((s) => s.checked).length}/${subtasks.length} erledigt`
-            : isTrigger
-            ? `Sensor: ${triggerValueLabel}`
-            : isBattery
-            ? batteryEntities.length
-              ? batteryEntities
-                  .map((b) => esc(`${b.name}${b.level !== null && b.level !== undefined ? ` (${b.level}%)` : " (niedrig)"}`))
-                  .join(", ")
-              : "Keine Batterie niedrig"
-            : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${overdueSiblingHint}`;
+          // v0.27: the task's Karenzzeit, shown as the clock time it's
+          // actually due by (deadline_at = due_at + overdue_after_minutes,
+          // see coordinator.py) instead of just the internal minutes value
+          // used to compute the "Überfällig" status - only while there's
+          // still something to do (pending/overdue; a done/confirmation
+          // occurrence has nothing left to be "due" by).
+          const deadlineAt = statusState?.attributes?.deadline_at;
+          const deadlineSuffix =
+            !isConfirmation && deadlineAt && (status === "pending" || status === "overdue")
+              ? ` · Zu erledigen bis ${esc(formatDeadline(deadlineAt))}`
+              : "";
+          const detail =
+            (isConfirmation
+              ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
+              : isChecklist
+              ? `${subtasks.filter((s) => s.checked).length}/${subtasks.length} erledigt`
+              : isTrigger
+              ? `Sensor: ${triggerValueLabel}`
+              : isBattery
+              ? batteryEntities.length
+                ? batteryEntities
+                    .map((b) => esc(`${b.name}${b.level !== null && b.level !== undefined ? ` (${b.level}%)` : " (niedrig)"}`))
+                    .join(", ")
+                : "Keine Batterie niedrig"
+              : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${overdueSiblingHint}`) + deadlineSuffix;
           const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
           // v0.22: the plain "Überspringen" button (skip to the next
           // occurrence of a recurring task) is removed entirely. The
@@ -2072,8 +2152,38 @@
           // - a parent (isParentUser) always sees the button on any task
           //   currently assigned to a child, overdue or not - the backend
           //   never blocked this to begin with, only the card's UI did.
+          //
+          // v0.27: "Annehmen" reservation (see claimed_by_member_id/
+          // claim_expires_at/claimable task attributes, coordinator.py) adds
+          // a *narrowing* on top of the above: while someone else has an
+          // occurrence claimed, isClaimedByOther below strips even the
+          // isParentUser bypass - "können während der Dauer der
+          // Reservierung von anderen Nutzern nicht angenommen oder erledigt
+          // werden" applies to the parent-override convenience too, not just
+          // eligibleIds (which the backend already narrows to [claimedBy]
+          // itself, see _async_update_data - this extra check only matters
+          // for the isParentUser clause that doesn't consult eligibleIds at
+          // all).
+          const claimedByMemberId = statusState?.attributes?.claimed_by_member_id;
+          const claimExpiresAt = statusState?.attributes?.claim_expires_at;
+          const claimable = !!statusState?.attributes?.claimable;
+          const isClaimedByOther = !!claimedByMemberId && claimedByMemberId !== currentMemberId;
+          const isClaimedByMe = !!claimedByMemberId && claimedByMemberId === currentMemberId;
           const canAct =
-            eligibleIds.includes(currentMemberId) || (isParentUser && assignedToChild);
+            !isClaimedByOther &&
+            (eligibleIds.includes(currentMemberId) || (isParentUser && assignedToChild));
+          // Offered only to someone actually in eligibleIds (not via the
+          // isParentUser bypass - a parent never needs to reserve a child's
+          // task against anyone, they can already act on it any time) and
+          // only while "claimable" (nobody has already claimed it, and more
+          // than one member is currently eligible - see TaskStatusData.
+          // claimable in coordinator.py).
+          const canClaim = claimable && !!currentMemberId && eligibleIds.includes(currentMemberId);
+          const claimSuffix = claimedByMemberId
+            ? isClaimedByMe
+              ? ` · von dir reserviert bis ${esc(formatDeadline(claimExpiresAt))}`
+              : ` · reserviert von ${esc(this._memberName(claimedByMemberId))} bis ${esc(formatDeadline(claimExpiresAt))}`
+            : "";
           // A checklist task only becomes "done" once every sub-item is
           // checked (see async_toggle_subtask in coordinator.py) - the
           // manual "Erledigt" button is disabled for it so completion always
@@ -2110,10 +2220,12 @@
                   <span class="badge" style="background:${color}">${esc(label)}</span>
                   ${isMandatory ? `<span class="badge" style="background:var(--error-color, #db4437)">Pflicht</span>` : ""}
                   <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}</span>
-                  <span class="muted">${detail}</span>
+                  <span class="muted">${detail}${claimSuffix}</span>
                 </div>
                 <div class="row-actions">
+                  ${canClaim ? iconActionButton("claim-task", "mdi:hand-back-right-outline", "Annehmen", { dataset: `data-task-id="${id}"` }) : ""}
                   ${canAct ? iconActionButton("complete-task", isConfirmation ? "mdi:check-bold" : "mdi:check", isConfirmation ? "Bestätigen" : actingForOther ? "Erledigt (Punkte gehen an dich)" : "Erledigt", { dataset: `data-task-id="${id}"`, extraClass: "success", disabled: disableComplete }) : ""}
+                  ${isClaimedByMe ? iconActionButton("release-task", "mdi:undo-variant", "Abbrechen", { dataset: `data-task-id="${id}"` }) : ""}
                   ${showReject && canAct ? iconActionButton("skip-task", "mdi:close", "Ablehnen", { dataset: `data-task-id="${id}"`, extraClass: "danger", disabled: resolved }) : ""}
                   ${isConfirmation || !isAdmin ? "" : `
                   ${iconActionButton("edit-task", "mdi:pencil", "Bearbeiten", { dataset: `data-task-id="${id}"` })}
@@ -3116,6 +3228,10 @@
           this._hass.callService("family_tasks", "complete_task", { task_id: el.dataset.taskId });
         else if (action === "skip-task")
           this._hass.callService("family_tasks", "skip_task", { task_id: el.dataset.taskId });
+        else if (action === "claim-task")
+          this._hass.callService("family_tasks", "claim_task", { task_id: el.dataset.taskId });
+        else if (action === "release-task")
+          this._hass.callService("family_tasks", "release_task", { task_id: el.dataset.taskId });
         else if (action === "new-own-task") { if (this._isChildUser()) this._openOwnTaskForm(); }
         else if (action === "cancel-own-task-form") this._closeOwnTaskForm();
         else if (action === "new-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(null); }

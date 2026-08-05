@@ -23,6 +23,8 @@ from homeassistant.util import dt as dt_util
 
 from .battery import LowBattery, async_compute_low_batteries
 from .const import (
+    CLAIM_PENALTY_POINTS,
+    CLAIM_RESERVATION_MINUTES,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
@@ -31,6 +33,7 @@ from .const import (
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_WEEKLY_WINNER_BONUS_ENABLED,
     CONF_WEEKLY_WINNER_BONUS_POINTS,
+    CONFIRMATION_REJECTION_PENALTY_POINTS,
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
@@ -38,6 +41,7 @@ from .const import (
     DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
     DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
+    MANUAL_POINTS_TASK_ID,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
     RECURRENCE_BATTERY,
@@ -62,6 +66,7 @@ from .const import (
 from .storage import (
     BatteryOverrideStorageCollection,
     ChecklistStateStore,
+    ClaimStateStore,
     CompletionLogStore,
     MemberStorageCollection,
     RewardRedemptionStorageCollection,
@@ -93,6 +98,33 @@ class TaskStatusData:
     assigned_member_id: str | None
     last_completed_by: str | None = None
     last_completed_at: datetime | None = None
+    # v0.27: due_at plus the task's Karenzzeit (overdue_after_minutes) - the
+    # actual clock moment this occurrence flips from pending to
+    # TASK_STATUS_OVERDUE (see the `now > due_at + overdue_after` check in
+    # _async_update_data). Previously that Karenzzeit only ever existed as an
+    # internal minutes value used to compute the overdue *status*; this
+    # exposes the resulting deadline itself as a real timestamp so the card
+    # can show each task's "Zu erledigen bis HH:MM" instead of the parent
+    # having to work it out by hand from the Karenzzeit setting. None
+    # wherever due_at itself is None (recurrence "trigger"/"confirmation"
+    # with no open occurrence yet).
+    deadline_at: datetime | None = None
+    # v0.27: "Annehmen" reservation state - see ClaimStateStore in storage.py
+    # and FamilyTasksCoordinator.async_claim_task/_async_expire_claim. While
+    # claimed_by_member_id is set, eligible_member_ids above is narrowed down
+    # to exactly that one member (see the claim handling in
+    # _async_update_data) - nobody else may claim or complete the occurrence
+    # until claim_expires_at passes, at which point the claimant loses
+    # CLAIM_PENALTY_POINTS and the next refresh finds no active claim again,
+    # reopening it for the normal eligible_member_ids set. Both None
+    # whenever there is no active claim.
+    claimed_by_member_id: str | None = None
+    claim_expires_at: datetime | None = None
+    # Whether "Annehmen" should be offered at all right now - true only when
+    # nobody has already claimed this occurrence *and* more than one member
+    # is currently eligible to act on it (see eligible_member_ids); claiming
+    # a task only one person could ever do anyway would reserve nothing.
+    claimable: bool = False
     # Only populated for recurrence type "battery" (see RECURRENCE_BATTERY):
     # every currently monitored battery at/below its warning threshold, as
     # dicts {entity_id, name, level, threshold} - see battery.LowBattery.
@@ -287,6 +319,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         checklist_state: ChecklistStateStore,
         reward_redemptions: RewardRedemptionStorageCollection,
         weekly_bonus_state: WeeklyBonusStateStore,
+        claim_state: ClaimStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -303,6 +336,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.checklist_state = checklist_state
         self.reward_redemptions = reward_redemptions
         self.weekly_bonus_state = weekly_bonus_state
+        self.claim_state = claim_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -459,6 +493,56 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     ):
                         eligible_member_ids.append(other_id)
 
+            # v0.27: "Annehmen" reservation - see ClaimStateStore in
+            # storage.py, CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in
+            # const.py, and claimed_by_member_id/claim_expires_at/claimable on
+            # TaskStatusData. "claimable" reflects the *pre-claim*
+            # eligible_member_ids (more than one possible actor right now) -
+            # claiming a task only one person could ever act on anyway would
+            # reserve nothing, so it's not offered there at all. A checklist
+            # has no single "erledigt" action to reserve (it completes
+            # sub-item by sub-item), and an auto-generated parent-
+            # confirmation task ("confirms" set) isn't a chore to claim
+            # either, so neither ever qualifies.
+            claimed_by_member_id: str | None = None
+            claim_expires_at: datetime | None = None
+            claimable = (
+                not task.get("confirms")
+                and task.get("kind") != TASK_KIND_CHECKLIST
+                and status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE)
+                and len(eligible_member_ids) > 1
+            )
+            claim_entry = self.claim_state.get(task_id, period_key)
+            if claim_entry is not None:
+                claimed_at = dt_util.parse_datetime(claim_entry["claimed_at"])
+                expires_at = claimed_at + timedelta(minutes=CLAIM_RESERVATION_MINUTES)
+                if status in (TASK_STATUS_DONE, TASK_STATUS_AWAITING_CONFIRMATION):
+                    # Done, or acted on in time and now just waiting on a
+                    # parent's sign-off (async_complete_task already clears
+                    # the claim itself the moment that happens - this is only
+                    # a defensive fallback for whatever briefly hasn't caught
+                    # up yet) - either way the claimant held up their end, so
+                    # there is nothing left to expire/penalize. A parent
+                    # taking a while to confirm must never itself cost the
+                    # child a point via this path - see the separate,
+                    # explicit-"Ablehnen" penalty in async_skip_task instead.
+                    await self.claim_state.async_clear(task_id)
+                elif now >= expires_at:
+                    # Reservation ran out with the occurrence still not done
+                    # - the claimant loses CLAIM_PENALTY_POINTS and it
+                    # reopens for everyone in eligible_member_ids again (left
+                    # untouched above) - see _async_expire_claim.
+                    await self._async_expire_claim(task_id, task, claim_entry["member_id"])
+                else:
+                    claimed_by_member_id = claim_entry["member_id"]
+                    claim_expires_at = expires_at
+                    # Nobody but the claimant may act on - or claim - this
+                    # occurrence while the reservation is active; see
+                    # async_complete_task/async_claim_task, which enforce
+                    # this server-side too, not just via what the card shows.
+                    eligible_member_ids = [claimed_by_member_id]
+                    claimable = False
+
             subtasks_status: list[dict] = []
             if task.get("kind") == TASK_KIND_CHECKLIST:
                 checked_ids = self.checklist_state.checked_ids(task_id, period_key)
@@ -486,9 +570,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 status=status,
                 period_key=period_key,
                 due_at=due_at,
+                deadline_at=due_at + overdue_after if due_at else None,
                 assigned_member_id=assigned_member_id,
                 assigned_member_ids=assigned_member_ids,
                 eligible_member_ids=eligible_member_ids,
+                claimed_by_member_id=claimed_by_member_id,
+                claim_expires_at=claim_expires_at,
+                claimable=claimable,
                 kind=task.get("kind", TASK_KIND_STANDARD),
                 last_completed_by=last_entry.get("completed_by_member_id")
                 if last_entry
@@ -634,6 +722,23 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             )
             return
 
+        # v0.27: an active "Annehmen" reservation (see ClaimStateStore in
+        # storage.py) blocks completion by anyone but the claimant - the
+        # card never shows the "Erledigt" button to anyone else while
+        # claimed_by_member_id is set (see eligible_member_ids in
+        # _async_update_data), this is the server-side half of that same
+        # rule. A None member_id (unresolvable acting member) never matches
+        # an active claim either, same as it never matches anyone's id.
+        claim_entry = self.claim_state.get(task_id, period_key)
+        if claim_entry is not None and claim_entry["member_id"] != member_id:
+            _LOGGER.debug(
+                "Task %s is reserved by %s - ignoring completion by %s",
+                task_id,
+                claim_entry["member_id"],
+                member_id,
+            )
+            return
+
         rotation = task["rotation"]
         member_ids = rotation.get("member_ids") or []
         index = rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
@@ -648,6 +753,14 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 # only self-created child tasks currently set this to False).
                 requires_confirmation = True
             if requires_confirmation:
+                # v0.27: the child *did* act in time - clear any active claim
+                # right away (same reasoning as the direct-completion path
+                # below) so a parent taking a while to confirm never counts
+                # as the reservation itself lapsing (see the AWAITING_
+                # CONFIRMATION handling in _async_update_data, which treats a
+                # still-present claim here defensively the same way, but
+                # this is the normal path).
+                await self.claim_state.async_clear(task_id)
                 await self._async_request_confirmation(
                     task, task_id, period_key, acting_member_id
                 )
@@ -661,6 +774,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             points_awarded=task.get("points", 0),
             task_name=task.get("name"),
         )
+        # v0.27: done in time - drop the now-moot claim (if any) right away
+        # instead of waiting for _async_update_data's DONE-status cleanup on
+        # the next refresh, so a stale "reserved" state can't briefly show
+        # for anyone reading coordinator data before that refresh happens.
+        await self.claim_state.async_clear(task_id)
 
         await self._async_advance_rotation(task_id, task, rotation, member_ids, index)
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
@@ -694,6 +812,21 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         task = self.tasks.data[task_id]
 
         if task.get("confirms"):
+            # v0.27: a parent explicitly rejecting a child's claimed
+            # completion costs that child CONFIRMATION_REJECTION_PENALTY_POINTS
+            # point(s), logged the same way a manual points/award adjustment
+            # is (see const.py) - "Sollten Eltern die Aufgabenerledigung nicht
+            # freigeben, verliert das Kind ebenfalls einen Punkt." The
+            # confirmation task's own name ("Bestätigen: <Aufgabe> (<Kind>)",
+            # see _async_request_confirmation) already identifies which task
+            # and child this was for, so it's reused as-is here.
+            await self.completions.async_add_entry(
+                task_id=MANUAL_POINTS_TASK_ID,
+                period_key=dt_util.utcnow().date().isoformat(),
+                member_id=task["confirms"]["member_id"],
+                points_awarded=-CONFIRMATION_REJECTION_PENALTY_POINTS,
+                task_name=f"Nicht freigegeben: {task.get('name', 'Aufgabe')}",
+            )
             await self.trigger_state.async_clear(task_id)
             await self.tasks.async_delete_item(task_id)
             await self.async_request_refresh()
@@ -717,6 +850,118 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
             await self.trigger_state.async_clear(task_id)
         await self.async_request_refresh()
+
+    async def async_claim_task(self, task_id: str, member_id: str | None) -> None:
+        """Reserve a task's current occurrence for CLAIM_RESERVATION_MINUTES.
+
+        Only lets ``member_id`` claim an occurrence they were actually
+        computed as eligible for on the last refresh (see eligible_member_ids
+        in _async_update_data), and only while nobody else already has it
+        claimed. See CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in
+        const.py for what happens if the reservation then lapses unfinished.
+
+        Every failure case here is a silent no-op rather than a raised error
+        (mirroring the guard clauses in async_complete_task above) - an
+        unresolvable member_id, an already-open claim, an ineligible member,
+        or a task/period the card would never have offered "Annehmen" for to
+        begin with only happen via a race between two people or direct API
+        use, not anything a normal click can trigger.
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+        if member_id is None:
+            _LOGGER.debug("Cannot claim task %s: no resolvable member_id", task_id)
+            return
+
+        task = self.tasks.data[task_id]
+        if task.get("confirms") or task.get("kind") == TASK_KIND_CHECKLIST:
+            return
+
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            return
+        if self.completions.get_last_entry(task_id, period_key) is not None:
+            return
+        if self.claim_state.get(task_id, period_key) is not None:
+            _LOGGER.debug("Task %s is already claimed", task_id)
+            return
+
+        # Reuses the eligible_member_ids the last coordinator refresh already
+        # computed (see _async_update_data) rather than recomputing rotation/
+        # overdue-sibling eligibility here from scratch - self.data always
+        # reflects at most COORDINATOR_UPDATE_INTERVAL-old state, same
+        # staleness any other read of coordinator.data already has between
+        # refreshes.
+        status_data = self.data.tasks.get(task_id) if self.data else None
+        eligible_ids = status_data.eligible_member_ids if status_data else []
+        if len(eligible_ids) < 2 or member_id not in eligible_ids:
+            _LOGGER.debug(
+                "Member %s cannot claim task %s (not eligible, or nobody to reserve it against)",
+                member_id,
+                task_id,
+            )
+            return
+
+        await self.claim_state.async_claim(
+            task_id, period_key, member_id, claimed_at=dt_util.utcnow()
+        )
+        await self.async_request_refresh()
+
+    async def async_release_task(self, task_id: str, member_id: str | None) -> None:
+        """Give back an active "Annehmen" reservation before it expires, no penalty.
+
+        Only the claimant themself may release their own claim - anyone else
+        "releasing" it would defeat the point of reserving it in the first
+        place. See async_claim_task above.
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            return
+
+        claim_entry = self.claim_state.get(task_id, period_key)
+        if claim_entry is None:
+            return
+        if member_id is None or claim_entry["member_id"] != member_id:
+            _LOGGER.debug(
+                "Task %s's claim belongs to %s, not %s - ignoring release",
+                task_id,
+                claim_entry["member_id"],
+                member_id,
+            )
+            return
+
+        await self.claim_state.async_clear(task_id)
+        await self.async_request_refresh()
+
+    async def _async_expire_claim(self, task_id: str, task: dict, member_id: str) -> None:
+        """A claim's CLAIM_RESERVATION_MINUTES ran out before completion.
+
+        Deducts CLAIM_PENALTY_POINTS from the claimant - logged the same way
+        ws_award_points logs a manual adjustment, under MANUAL_POINTS_TASK_ID
+        (see const.py), so it counts toward points_total/points_available
+        exactly like any other award/deduction - and drops the claim. The
+        caller (_async_update_data) doesn't restore claimed_by_member_id or
+        the narrowed eligible_member_ids after calling this, so the
+        occurrence is already back open to everyone in this same refresh.
+        """
+        await self.completions.async_add_entry(
+            task_id=MANUAL_POINTS_TASK_ID,
+            period_key=dt_util.utcnow().date().isoformat(),
+            member_id=member_id,
+            points_awarded=-CLAIM_PENALTY_POINTS,
+            task_name=f"Reservierung abgelaufen: {task.get('name', 'Aufgabe')}",
+        )
+        await self.claim_state.async_clear(task_id)
+        _LOGGER.debug(
+            "Task %s's claim by %s expired unfinished - %s point(s) deducted",
+            task_id,
+            member_id,
+            CLAIM_PENALTY_POINTS,
+        )
 
     def _member_role(self, member_id: str) -> str:
         member = self.members.data.get(member_id)

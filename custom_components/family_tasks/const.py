@@ -286,6 +286,29 @@ TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST, TASK_KIND_MANDATOR
 # left out here.
 OWN_TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST]
 
+# --- Task claiming / reservation (v0.27) --------------------------------------
+#
+# Lets a member "annehmen" (claim) a task occurrence they're currently
+# eligible to act on before actually completing it, reserving it for
+# CLAIM_RESERVATION_MINUTES so nobody else may claim or complete it while the
+# reservation is active - see FamilyTasksCoordinator.async_claim_task/
+# async_complete_task in coordinator.py and ClaimStateStore in storage.py.
+# Claiming is optional - "Erledigt" still works directly without claiming
+# first - and is only offered at all for an occurrence more than one member
+# is currently eligible to act on (see eligible_member_ids in coordinator.py);
+# with only ever one possible actor there is nobody to reserve it against.
+# If the claimant hasn't marked the occurrence done by the time the
+# reservation lapses, they lose CLAIM_PENALTY_POINTS point(s) (logged under
+# MANUAL_POINTS_TASK_ID, same mechanism ws_award_points already uses) and the
+# occurrence reopens for everyone who was eligible before the claim.
+CLAIM_RESERVATION_MINUTES: Final = 60
+CLAIM_PENALTY_POINTS: Final = 1
+
+# Points a "child" member loses when a parent explicitly rejects ("Ablehnen")
+# their completion of a task requiring confirmation - see async_skip_task in
+# coordinator.py. Logged the same way as CLAIM_PENALTY_POINTS above.
+CONFIRMATION_REJECTION_PENALTY_POINTS: Final = 1
+
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_VERSION: Final = 1
@@ -321,6 +344,10 @@ STORAGE_KEY_WEEKLY_BONUS_STATE: Final = f"{DOMAIN}.weekly_bonus_state"
 # v0.17: the parent-maintained Favoriten template catalog - see
 # WS_API_PREFIX_FAVORITES above.
 STORAGE_KEY_FAVORITES: Final = f"{DOMAIN}.favorites"
+# v0.27: which member currently has which task occurrence's "Annehmen"
+# reservation open - see ClaimStateStore in storage.py and the "Task
+# claiming / reservation" section above.
+STORAGE_KEY_CLAIM_STATE: Final = f"{DOMAIN}.claim_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -473,6 +500,14 @@ SERVICE_SKIP_TASK: Final = "skip_task"
 # command, so any family member - not just admins - can tick off their own
 # checklist items.
 SERVICE_TOGGLE_SUBTASK: Final = "toggle_subtask"
+# v0.27: reserve/give back an eligible task occurrence - see
+# FamilyTasksCoordinator.async_claim_task/async_release_task in
+# coordinator.py and the "Task claiming / reservation" section above. Plain
+# services (like complete_task/skip_task/toggle_subtask above) rather than
+# admin-only websocket commands, for the same reason toggle_subtask is one -
+# any eligible family member, not just admins, needs to be able to call them.
+SERVICE_CLAIM_TASK: Final = "claim_task"
+SERVICE_RELEASE_TASK: Final = "release_task"
 
 ATTR_TASK_ID: Final = "task_id"
 ATTR_MEMBER_ID: Final = "member_id"

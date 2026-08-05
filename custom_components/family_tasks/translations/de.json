@@ -99,6 +99,34 @@
           "description": "Die ID des Unterpunkts (siehe Attribut 'subtasks' des Status-Sensors)."
         }
       }
+    },
+    "claim_task": {
+      "name": "Aufgabe annehmen",
+      "description": "Reserviert die aktuelle Periode einer Aufgabe für 60 Minuten für ein Mitglied. In dieser Zeit kann niemand sonst die Aufgabe annehmen oder erledigen. Wird sie nicht rechtzeitig erledigt, verliert das reservierende Mitglied einen Punkt und die Aufgabe wird wieder freigegeben. Nur möglich, wenn mehr als ein Mitglied aktuell für die Aufgabe infrage kommt.",
+      "fields": {
+        "task_id": {
+          "name": "Aufgaben-ID",
+          "description": "Die ID der Aufgabe (siehe Attribute des Status-Sensors)."
+        },
+        "member_id": {
+          "name": "Mitglieds-ID",
+          "description": "Optional: reserviert die Aufgabe im Namen eines anderen Mitglieds als des aufrufenden Nutzers."
+        }
+      }
+    },
+    "release_task": {
+      "name": "Aufgabe zurückgeben",
+      "description": "Gibt eine per 'Aufgabe annehmen' reservierte Aufgabe vorzeitig wieder frei, ohne Punktabzug. Nur durch das reservierende Mitglied selbst möglich.",
+      "fields": {
+        "task_id": {
+          "name": "Aufgaben-ID",
+          "description": "Die ID der Aufgabe (siehe Attribute des Status-Sensors)."
+        },
+        "member_id": {
+          "name": "Mitglieds-ID",
+          "description": "Optional: gibt die Reservierung im Namen eines anderen Mitglieds als des aufrufenden Nutzers zurück."
+        }
+      }
     }
   }
 }

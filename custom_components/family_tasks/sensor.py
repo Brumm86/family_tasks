@@ -79,6 +79,21 @@ class FamilyTasksTaskStatusSensor(
             # task instead of just watching it sit there.
             "eligible_member_ids": task.eligible_member_ids,
             "due_at": task.due_at.isoformat() if task.due_at else None,
+            # v0.27: due_at plus the task's Karenzzeit - the clock moment
+            # this occurrence flips from pending to overdue, shown by the
+            # card as "Zu erledigen bis HH:MM" - see TaskStatusData.
+            # deadline_at in coordinator.py.
+            "deadline_at": task.deadline_at.isoformat() if task.deadline_at else None,
+            # v0.27: "Annehmen" reservation state - see ClaimStateStore in
+            # storage.py / TaskStatusData.claimed_by_member_id/
+            # claim_expires_at/claimable in coordinator.py. While
+            # claimed_by_member_id is set, eligible_member_ids above is
+            # already narrowed down to just that member.
+            "claimed_by_member_id": task.claimed_by_member_id,
+            "claim_expires_at": task.claim_expires_at.isoformat()
+            if task.claim_expires_at
+            else None,
+            "claimable": task.claimable,
             "points": task.points,
             "period_key": task.period_key,
             "last_completed_by": task.last_completed_by,

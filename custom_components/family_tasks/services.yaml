@@ -26,3 +26,25 @@ toggle_subtask:
       required: true
       selector:
         text:
+
+claim_task:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+    member_id:
+      required: false
+      selector:
+        text:
+
+release_task:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+    member_id:
+      required: false
+      selector:
+        text:

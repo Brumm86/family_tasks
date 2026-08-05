@@ -99,6 +99,34 @@
           "description": "The sub-item's ID (see the status sensor's 'subtasks' attribute)."
         }
       }
+    },
+    "claim_task": {
+      "name": "Claim task",
+      "description": "Reserves a task's current period for one member for 60 minutes. While reserved, nobody else may claim or complete it. If it isn't marked done in time, the claimant loses one point and the task reopens for everyone. Only possible when more than one member currently qualifies for the task.",
+      "fields": {
+        "task_id": {
+          "name": "Task ID",
+          "description": "The task's ID (see the status sensor's attributes)."
+        },
+        "member_id": {
+          "name": "Member ID",
+          "description": "Optional: claim the task on behalf of a member other than the calling user."
+        }
+      }
+    },
+    "release_task": {
+      "name": "Release task",
+      "description": "Gives back a task claimed via 'Claim task' before its reservation expires, with no point penalty. Only the claimant themself may do this.",
+      "fields": {
+        "task_id": {
+          "name": "Task ID",
+          "description": "The task's ID (see the status sensor's attributes)."
+        },
+        "member_id": {
+          "name": "Member ID",
+          "description": "Optional: release the reservation on behalf of a member other than the calling user."
+        }
+      }
     }
   }
 }

@@ -29,7 +29,9 @@ from .const import (
     DOMAIN,
     EVENT_TASK_ASSIGNED,
     PLATFORMS,
+    SERVICE_CLAIM_TASK,
     SERVICE_COMPLETE_TASK,
+    SERVICE_RELEASE_TASK,
     SERVICE_SKIP_TASK,
     SERVICE_TOGGLE_SUBTASK,
 )
@@ -38,6 +40,7 @@ from .coordinator import FamilyTasksCoordinator
 from .storage import (
     BatteryOverrideStorageCollection,
     ChecklistStateStore,
+    ClaimStateStore,
     CompletionLogStore,
     FavoriteStorageCollection,
     MemberStorageCollection,
@@ -48,6 +51,7 @@ from .storage import (
     WeeklyBonusStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
+    async_create_claim_state_store,
     async_create_favorites_collection,
     async_create_members_collection,
     async_create_reward_redemptions_collection,
@@ -76,6 +80,18 @@ TOGGLE_SUBTASK_SCHEMA = vol.Schema(
         vol.Optional(ATTR_MEMBER_ID): cv.string,
     }
 )
+CLAIM_TASK_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_TASK_ID): cv.string,
+        vol.Optional(ATTR_MEMBER_ID): cv.string,
+    }
+)
+RELEASE_TASK_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_TASK_ID): cv.string,
+        vol.Optional(ATTR_MEMBER_ID): cv.string,
+    }
+)
 
 
 @dataclass(slots=True)
@@ -92,6 +108,7 @@ class FamilyTasksRuntimeData:
     reward_redemptions: RewardRedemptionStorageCollection
     weekly_bonus_state: WeeklyBonusStateStore
     favorites: FavoriteStorageCollection
+    claim_state: ClaimStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -130,6 +147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     trigger_state = await async_create_trigger_state_store(hass)
     checklist_state = await async_create_checklist_state_store(hass)
     weekly_bonus_state = await async_create_weekly_bonus_state_store(hass)
+    claim_state = await async_create_claim_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
         hass,
@@ -142,6 +160,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         checklist_state,
         reward_redemptions,
         weekly_bonus_state,
+        claim_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -156,6 +175,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         reward_redemptions=reward_redemptions,
         weekly_bonus_state=weekly_bonus_state,
         favorites=favorites,
+        claim_state=claim_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -389,6 +409,16 @@ def _async_register_services(hass: HomeAssistant) -> None:
             call.data[ATTR_TASK_ID], call.data[ATTR_SUBTASK_ID], member_id
         )
 
+    async def _async_claim_task(call: ServiceCall) -> None:
+        coordinator = _get_coordinator(hass)
+        member_id = await _async_resolve_member_id(call)
+        await coordinator.async_claim_task(call.data[ATTR_TASK_ID], member_id)
+
+    async def _async_release_task(call: ServiceCall) -> None:
+        coordinator = _get_coordinator(hass)
+        member_id = await _async_resolve_member_id(call)
+        await coordinator.async_release_task(call.data[ATTR_TASK_ID], member_id)
+
     hass.services.async_register(
         DOMAIN, SERVICE_COMPLETE_TASK, _async_complete_task, schema=COMPLETE_TASK_SCHEMA
     )
@@ -400,4 +430,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
         SERVICE_TOGGLE_SUBTASK,
         _async_toggle_subtask,
         schema=TOGGLE_SUBTASK_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_CLAIM_TASK, _async_claim_task, schema=CLAIM_TASK_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_RELEASE_TASK, _async_release_task, schema=RELEASE_TASK_SCHEMA
     )
