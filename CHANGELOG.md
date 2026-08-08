@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.28.0] - 2026-08-08
+
+### Added
+- **"Erledigte ausblenden" für die Aufgabenliste - jetzt auch für Kinder, standardmäßig aktiv**: neuer Umschalter oben in der "Aufgaben"-Sektion, der bereits erledigte Vorkommen ("Erledigt"-Status) aus der Liste entfernt. Bisher gab es dafür keinen eigenen Schalter - "Nicht fällige ausblenden" (`_hideNotDue`) blendete "erledigt" nur als Nebeneffekt mit aus (zusammen mit "Wartet auf Sensor"), war aber Eltern-only (`showVisibilityControls`) und für ein "Kind"-Konto überhaupt nicht sichtbar, geschweige denn bedienbar. Der neue Schalter (`_hideCompleted`/`toggle-hide-completed` in `family-tasks-card.js`) rendert jetzt für jeden Nutzer, Kind eingeschlossen - gleiches Muster wie die längst rollenunabhängigen "Bestenliste"/"Belohnungen"-Umschalter - und filtert unabhängig von `_hideNotDue` ausschließlich den `"done"`-Status heraus, ohne "Wartet auf Sensor"-Aufgaben mit auszublenden. Anders als `hide_not_due_tasks` startet er auf einem frischen Gerät ohne gespeicherten Zustand standardmäßig *aktiv* (erledigte Aufgaben also ausgeblendet) - konfigurierbar über die neue Karten-Option `hide_completed_tasks: false`, um stattdessen mit sichtbaren erledigten Aufgaben zu starten. Der gewählte Zustand wird wie die übrigen Sichtbarkeits-Umschalter pro Gerät in `localStorage` gespeichert (`hideCompleted` in `_saveUiState`).
+
 ## [0.27.0] - 2026-08-05
 
 ### Fixed

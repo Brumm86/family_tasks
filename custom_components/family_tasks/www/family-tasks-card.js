@@ -65,6 +65,19 @@
  *   hide_rewards_section: false - same as hide_leaderboard_section, for the
  *                               "Belohnungen" section (catalog + redemption
  *                               history) directly below it.
+ *   hide_completed_tasks: false - initial value for the "Erledigte
+ *                               ausblenden" task-list toggle (v0.28, same
+ *                               first-run-only rule as above). Like
+ *                               hide_leaderboard_section/hide_rewards_section
+ *                               this is *not* Eltern-only - the toggle
+ *                               button renders for every user, including a
+ *                               "Kind"-linked one - but unlike those two it
+ *                               defaults to `true` (hidden) rather than
+ *                               `false`, since an already-done occurrence is
+ *                               rarely useful clutter in the day-to-day list
+ *                               for parent or child alike. Set this to
+ *                               `false` explicitly to start with completed
+ *                               tasks shown.
  *
  * v0.11 default flip: hide_members_list, hide_battery_section and
  * only_own_tasks default to *true* (compact, own-tasks-only) the very first
@@ -97,6 +110,12 @@
  * "Batterien" show/hide buttons - there is nothing for them to configure,
  * since a child's task list is always filtered down to their own tasks (the
  * "Nur eigene Aufgaben" filter is forced on, not just defaulted, for them).
+ * "Erledigte ausblenden" (v0.28) is a deliberate exception to this rule, same
+ * as the "Bestenliste"/"Belohnungen" show/hide buttons below - a child needs
+ * to declutter their own already-done tasks just as much as a parent does,
+ * so that button renders and works identically for every user regardless of
+ * role, and (unlike hide_not_due_tasks) starts hidden by default - see
+ * hide_completed_tasks above and _hideCompleted in the constructor.
  *
  * Task types: a task defaults to a single "Erledigt" action. Setting
  * "Aufgabentyp" to "Checkliste" instead gives it an open-ended list of named
@@ -122,13 +141,13 @@
  * moment the task is actually marked done - e.g. a vacuum's "resume cleaning"
  * button once its "needs emptying" task is completed.
  *
- * Persisted UI state: the "nicht fällige ausblenden" / "Familienmitglieder
- * ausblenden" / "Nur eigene Aufgaben" / "Batterien ausblenden" toggles and
- * the compact-mode button (top-right of the card, hides the toggle buttons
- * to keep the card small during normal use) are saved to localStorage per
- * browser/device, keyed by the card's title, so they survive dashboard
- * reloads. This is per-device state, not synced between devices - each
- * phone/tablet remembers its own preference.
+ * Persisted UI state: the "nicht fällige ausblenden" / "Erledigte
+ * ausblenden" / "Familienmitglieder ausblenden" / "Nur eigene Aufgaben" /
+ * "Batterien ausblenden" toggles and the compact-mode button (top-right of
+ * the card, hides the toggle buttons to keep the card small during normal
+ * use) are saved to localStorage per browser/device, keyed by the card's
+ * title, so they survive dashboard reloads. This is per-device state, not
+ * synced between devices - each phone/tablet remembers its own preference.
  *
  * Editing restricted to admins: creating/editing/deleting tasks is only
  * offered to Home Assistant users with an administrator account - Home
@@ -708,6 +727,15 @@
       this._memberForm = emptyMemberForm();
       this._ownTaskForm = emptyOwnTaskForm();
       this._hideNotDue = undefined;
+      // v0.28: "Erledigte ausblenden" for the task list itself - separate
+      // from _hideNotDue (which bundles "done" in with "idle"/waiting-for-
+      // sensor tasks and is admin-only, see showVisibilityControls). This
+      // toggle is available to *every* user including a "Kind"-account
+      // (same reasoning as _hideLeaderboard/_hideRewards below - a child
+      // wants their own list decluttered of what they've already finished
+      // just as much as a parent does) and, unlike hideNotDue, defaults to
+      // *hidden* on a fresh device - see setConfig.
+      this._hideCompleted = undefined;
       this._hideMembers = undefined;
       this._hideBattery = undefined;
       this._controlsHidden = undefined;
@@ -783,6 +811,16 @@
       if (this._hideNotDue === undefined) {
         const saved = this._loadUiState();
         this._hideNotDue = saved?.hideNotDue ?? !!this._config.hide_not_due_tasks;
+        // v0.28: "Erledigte ausblenden" defaults to *true* (hidden) on a
+        // genuinely fresh device, unlike hideNotDue just above - a
+        // household's task list otherwise accumulates every already-done
+        // occurrence right alongside what's actually still open, for both
+        // parents and children (see the toggle button placement in
+        // _render(), deliberately outside the showVisibilityControls/
+        // isChildUser gate that hideNotDue sits behind). Explicitly set
+        // `hide_completed_tasks: false` in the card config to start shown
+        // instead.
+        this._hideCompleted = saved?.hideCompleted ?? this._config.hide_completed_tasks !== false;
         // v0.11: default to hidden/own-tasks-only on a genuinely fresh device
         // (no saved state) unless the config explicitly opts back into the
         // old "show everything" default with `false` - see the file header
@@ -860,6 +898,7 @@
           this._storageKey(),
           JSON.stringify({
             hideNotDue: this._hideNotDue,
+            hideCompleted: this._hideCompleted,
             hideMembers: this._hideMembers,
             hideBattery: this._hideBattery,
             controlsHidden: this._controlsHidden,
@@ -1751,10 +1790,10 @@
       const taskSection = `
         <div class="section-header">
           <h3>Aufgaben</h3>
-          ${!showVisibilityControls || controlsHidden ? "" : `
-            <div class="header-actions">
-              <button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>
-            </div>`}
+          <div class="header-actions">
+            <button class="link" data-action="toggle-hide-completed">${this._hideCompleted ? "Erledigte anzeigen" : "Erledigte ausblenden"}</button>
+            ${!showVisibilityControls || controlsHidden ? "" : `<button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>`}
+          </div>
         </div>
         ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
         ${this._renderTaskList(isAdmin)}
@@ -2016,6 +2055,15 @@
         return !createdBy || createdBy === currentMemberId;
       });
       const totalCount = ids.length;
+      // v0.28: independent of hideNotDue above (which is admin-only and
+      // bundles "done" together with "idle"/waiting-for-sensor) - this
+      // hides only actually-completed occurrences ("Erledigt"), and is
+      // available to every user, children included, see the button in
+      // _render(). Ordering doesn't matter here since both filters only
+      // ever remove ids, never add them back.
+      if (this._hideCompleted) {
+        ids = ids.filter((id) => (this._statusStateForTask(id)?.state ?? "pending") !== "done");
+      }
       if (this._hideNotDue) {
         ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
       }
@@ -3250,6 +3298,12 @@
         }
         else if (action === "toggle-hide-not-due") {
           this._hideNotDue = !this._hideNotDue;
+          this._saveUiState();
+          this._render();
+        } else if (action === "toggle-hide-completed") {
+          // Available to every user, including a "Kind"-account - no
+          // isAdmin/isChildUser gate here, unlike toggle-hide-not-due above.
+          this._hideCompleted = !this._hideCompleted;
           this._saveUiState();
           this._render();
         } else if (action === "toggle-hide-members") {
