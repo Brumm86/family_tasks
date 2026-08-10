@@ -52,40 +52,48 @@
  *                               as above). That section is configuration-only
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
- *   hide_leaderboard_section: false - initial value for the "Bestenliste"
- *                               visibility toggle (v0.21, same first-run-only
- *                               rule as above). Unlike hide_members_list/
- *                               hide_battery_section this is *not* Eltern-
- *                               only - the toggle button renders for every
- *                               user, including a "Kind"-linked one, and
- *                               defaults to `false` (shown) rather than
- *                               joining the v0.11 default-true flip below,
- *                               since a child typically needs to see this
- *                               section right away.
- *   hide_rewards_section: false - same as hide_leaderboard_section, for the
+ *   hide_progress_section: false - initial value for the "Wochenfortschritt"
+ *                               progress-bar visibility toggle (v0.29,
+ *                               replaces the old "Bestenliste" ranking - see
+ *                               _renderProgressSection). Falls back to the
+ *                               older hide_leaderboard_section key if this
+ *                               one isn't set, so an existing dashboard that
+ *                               already hid the Bestenliste keeps behaving
+ *                               the same way without editing its config.
+ *                               Unlike hide_members_list/hide_battery_section
+ *                               this toggle button itself only renders for a
+ *                               parent (Eltern-only, per household request) -
+ *                               a "Kind"-linked user always just sees
+ *                               whatever the parent last chose on that
+ *                               device, with nothing to change it back
+ *                               themselves. Defaults to `false` (shown)
+ *                               rather than joining the v0.11 default-true
+ *                               flip below, since a child typically needs to
+ *                               see their own progress right away.
+ *   hide_rewards_section: false - same as hide_progress_section, for the
  *                               "Belohnungen" section (catalog + redemption
- *                               history) directly below it.
+ *                               history) directly below it - still toggle-able
+ *                               by every user, including a "Kind"-linked one.
  *   hide_completed_tasks: false - initial value for the "Erledigte
  *                               ausblenden" task-list toggle (v0.28, same
  *                               first-run-only rule as above). Like
- *                               hide_leaderboard_section/hide_rewards_section
- *                               this is *not* Eltern-only - the toggle
- *                               button renders for every user, including a
- *                               "Kind"-linked one - but unlike those two it
- *                               defaults to `true` (hidden) rather than
- *                               `false`, since an already-done occurrence is
- *                               rarely useful clutter in the day-to-day list
- *                               for parent or child alike. Set this to
- *                               `false` explicitly to start with completed
- *                               tasks shown.
+ *                               hide_rewards_section this is *not* Eltern-
+ *                               only - the toggle button renders for every
+ *                               user, including a "Kind"-linked one - but
+ *                               unlike that one it defaults to `true`
+ *                               (hidden) rather than `false`, since an
+ *                               already-done occurrence is rarely useful
+ *                               clutter in the day-to-day list for parent or
+ *                               child alike. Set this to `false` explicitly
+ *                               to start with completed tasks shown.
  *
  * v0.11 default flip: hide_members_list, hide_battery_section and
  * only_own_tasks default to *true* (compact, own-tasks-only) the very first
  * time the card runs on a device and no persisted localStorage state exists
  * yet, instead of *false* (everything shown) - set any of them to `false`
  * explicitly in the card config to keep the pre-v0.11 "show everything"
- * first-run behavior. hide_leaderboard_section/hide_rewards_section (v0.21)
- * are deliberately *not* part of this group - see above. (hide_favorites_
+ * first-run behavior. hide_progress_section/hide_rewards_section (v0.21/
+ * v0.29) are deliberately *not* part of this group - see above. (hide_favorites_
  * section, v0.19-v0.20, briefly was part of this group too; removed in
  * v0.21 along with the collapsible-inline-section approach it belonged to -
  * see the Favoriten note further down.) This also softens a real-world
@@ -222,13 +230,19 @@
  * itself is untouched, just unused here).
  *
  * v0.21: "Bestenliste" and "Belohnungen" are now each independently
- * collapsible (_renderRankingSection/_renderRewardsSection,
- * hide_leaderboard_section/hide_rewards_section above) - unlike
+ * collapsible (hide_leaderboard_section/hide_rewards_section above) - unlike
  * "Familienmitglieder"/"Batterien" the "Ausblenden"/"... anzeigen" buttons
  * render for *every* user, not just parents, since a child needs to be able
  * to get the reward catalog back out of the way (or bring it back) just as
  * much as a parent does. Both default to shown on a fresh device, not the
  * v0.11 compact default the admin-only sections use.
+ *
+ * v0.29: "Bestenliste" itself is replaced by a per-child weekly progress bar
+ * (_renderProgressSection, hide_progress_section above, see that method's
+ * comment for details) - "Belohnungen" (_renderRewardsSection) is
+ * unaffected and still toggle-able by every user as described above. Unlike
+ * "Belohnungen", hiding the progress bars is Eltern-only per household
+ * request - a "Kind"-linked user gets no toggle for it at all.
  *
  * Aufgaben-Filter nach Familienmitglied (v0.16): the "Aufgaben" section's
  * header now shows a row of filter chips - "Alle" plus one per family
@@ -420,6 +434,45 @@
     child: "Kind (Aufgaben brauchen Eltern-Bestätigung)",
   };
 
+  // v0.29: curated fallback icon list for every "Icon (optional)" field
+  // (Aufgabe/Favorit/Mitglied/Belohnung, see _hydrateIconPickers below) -
+  // most people don't have Material Design Icon names memorized, so typing
+  // "mdi:..." from scratch was the actual complaint this addresses. The
+  // primary path is a real <ha-icon-picker> (full searchable MDI catalog),
+  // used whenever Home Assistant's frontend has registered it; this list
+  // only backs the <input list="..."> fallback for a setup where that
+  // custom element isn't available (same "detect + degrade gracefully"
+  // pattern as _hydrateDateTimeInputs/_replaceWithPlainDateTimeInput) - a
+  // datalist still lets someone type any other "mdi:whatever" by hand, this
+  // is purely a set of one-click suggestions relevant to household chores/
+  // rewards/family members, not an exhaustive icon set.
+  const COMMON_ICON_OPTIONS = [
+    "mdi:broom", "mdi:trash-can", "mdi:dishwasher", "mdi:washing-machine",
+    "mdi:tshirt-crew", "mdi:bed", "mdi:toothbrush", "mdi:shower",
+    "mdi:silverware-fork-knife", "mdi:pot-steam", "mdi:fridge-outline",
+    "mdi:broom-outline", "mdi:vacuum", "mdi:spray-bottle", "mdi:paw",
+    "mdi:dog-side", "mdi:cat", "mdi:flower", "mdi:tree-outline",
+    "mdi:car", "mdi:car-wash", "mdi:bike", "mdi:trash-can-outline",
+    "mdi:recycle", "mdi:book-open-variant", "mdi:school", "mdi:pencil",
+    "mdi:home", "mdi:home-outline", "mdi:door", "mdi:window-closed-variant",
+    "mdi:lightbulb-on-outline", "mdi:battery-charging", "mdi:account",
+    "mdi:account-child", "mdi:account-child-outline", "mdi:human-male-child",
+    "mdi:human-female-girl", "mdi:account-multiple", "mdi:star",
+    "mdi:star-outline", "mdi:trophy", "mdi:gift", "mdi:cash",
+    "mdi:cellphone", "mdi:television", "mdi:gamepad-variant",
+    "mdi:movie-open", "mdi:ice-cream", "mdi:pizza", "mdi:food-apple",
+    "mdi:cake-variant", "mdi:swim", "mdi:soccer", "mdi:basketball",
+    "mdi:music", "mdi:paintbrush", "mdi:checkbox-marked-circle-outline",
+    "mdi:alert", "mdi:calendar-check",
+  ];
+  const ICON_DATALIST_ID = "family-tasks-icon-suggestions";
+  // Rendered once per shadow-DOM rebuild (see the outer template) regardless
+  // of whether any fallback icon input is actually on screen right now -
+  // cheap, and every fallback input just references it by `list=`.
+  const ICON_DATALIST_HTML = `<datalist id="${ICON_DATALIST_ID}">${COMMON_ICON_OPTIONS.map(
+    (icon) => `<option value="${icon}"></option>`
+  ).join("")}</datalist>`;
+
   function esc(value) {
     return String(value ?? "").replace(
       /[&<>"']/g,
@@ -557,8 +610,14 @@
       kind: "standard",
       subtasks: [],
       completion_button_entity_id: "",
+      // v0.29: "Einmalig" is the default for a brand-new task now, not
+      // "Täglich" - most ad-hoc tasks a parent adds on the fly (the common
+      // case "+ Aufgabe hinzufügen" is used for) are one-off, and picking
+      // "Täglich" by accident silently created a recurring chore nobody
+      // meant to set up. Editing an existing task is unaffected - taskToForm
+      // above always carries over that task's own stored recurrence.type.
       recurrence: {
-        type: "daily",
+        type: "once",
         interval: 1,
         weekdays: [0],
         anchor_date: "",
@@ -582,7 +641,8 @@
       requires_confirmation: true,
       kind: "standard",
       subtasks: [],
-      recurrence: { type: "daily", interval: 1, weekdays: [0], anchor_date: "" },
+      // v0.29: "Einmalig" default, same reasoning as emptyTaskForm above.
+      recurrence: { type: "once", interval: 1, weekdays: [0], anchor_date: "" },
     };
   }
 
@@ -731,10 +791,10 @@
       // from _hideNotDue (which bundles "done" in with "idle"/waiting-for-
       // sensor tasks and is admin-only, see showVisibilityControls). This
       // toggle is available to *every* user including a "Kind"-account
-      // (same reasoning as _hideLeaderboard/_hideRewards below - a child
-      // wants their own list decluttered of what they've already finished
-      // just as much as a parent does) and, unlike hideNotDue, defaults to
-      // *hidden* on a fresh device - see setConfig.
+      // (same reasoning as _hideRewards below - a child wants their own
+      // list decluttered of what they've already finished just as much as a
+      // parent does) and, unlike hideNotDue, defaults to *hidden* on a fresh
+      // device - see setConfig.
       this._hideCompleted = undefined;
       this._hideMembers = undefined;
       this._hideBattery = undefined;
@@ -775,16 +835,17 @@
       // as the other *FormOpen dialog flags: it always starts closed on
       // load, same as _taskFormOpen/_memberFormOpen/etc.
       this._favoritesDialogOpen = false;
-      // Bestenliste/Belohnungen (v0.21): independently collapsible, unlike
-      // _hideMembers/_hideBattery this toggle is available to *every* user
-      // including a "Kind"-account (see _renderRankingSection/
-      // _renderRewardsSection) since both sections are used by children too,
-      // not just parents configuring something.
-      this._hideLeaderboard = undefined;
+      // Wochenfortschritt/Belohnungen: independently collapsible. Anders als
+      // beim v0.21-"Bestenliste"-Umschalter, den dieser Fortschrittsbalken
+      // ersetzt (siehe _renderProgressSection), ist das Ausblenden hier
+      // Eltern-only - _hideRewards bleibt weiterhin für *jeden* Nutzer
+      // bedienbar, "Kind"-Konto eingeschlossen (siehe _renderRewardsSection),
+      // da der Belohnungs-Katalog selbst von Kindern genutzt wird.
+      this._hideProgress = undefined;
       this._hideRewards = undefined;
       // v0.22: "welche Aufgaben hat dieses Mitglied diese Woche erledigt"-
-      // Dialog, geöffnet per Klick auf eine Bestenlisten-Zeile (siehe
-      // _openMemberCompletions/_renderRankingSection). Nicht persistiert -
+      // Dialog, geöffnet per Klick auf eine Fortschritts-Zeile (siehe
+      // _openMemberCompletions/_renderProgressSection). Nicht persistiert -
       // startet wie jedes andere Dialog-Flag immer geschlossen.
       this._memberCompletionsDialogOpen = false;
       this._memberCompletionsMemberId = null;
@@ -845,12 +906,19 @@
         // Erledigte Einlösungen sind standardmäßig ausgeblendet, wie schon in
         // der ehemals eigenständigen Bestenlisten-Karte.
         this._hideFulfilled = saved?.hideFulfilled ?? true;
-        // v0.21: Bestenliste/Belohnungen bleiben - anders als
+        // v0.21/v0.29: Wochenfortschritt/Belohnungen bleiben - anders als
         // Mitglieder/Batterien/die alte Favoriten-Sektion - standardmäßig
         // sichtbar (kein v0.11-Kompakt-Default), da auch ein "Kind"-Konto
-        // sie normalerweise sofort braucht (Belohnungen einlösen). Optional
-        // per Config-Option von Anfang an ausgeblendet startbar.
-        this._hideLeaderboard = saved?.hideLeaderboard ?? !!this._config.hide_leaderboard_section;
+        // sie normalerweise sofort braucht (eigenen Fortschritt sehen,
+        // Belohnungen einlösen). Optional per Config-Option von Anfang an
+        // ausgeblendet startbar; `hideLeaderboard`/hide_leaderboard_section
+        // sind die alten, vor v0.29 verwendeten Namen - werden hier als
+        // Fallback weitergelesen, damit ein bereits ausgeblendeter Zustand
+        // beim Umstieg auf die Fortschrittsbalken erhalten bleibt.
+        this._hideProgress =
+          saved?.hideProgress ??
+          saved?.hideLeaderboard ??
+          !!(this._config.hide_progress_section ?? this._config.hide_leaderboard_section);
         this._hideRewards = saved?.hideRewards ?? !!this._config.hide_rewards_section;
       }
     }
@@ -904,7 +972,7 @@
             controlsHidden: this._controlsHidden,
             taskMemberFilterByUser,
             hideFulfilled: this._hideFulfilled,
-            hideLeaderboard: this._hideLeaderboard,
+            hideProgress: this._hideProgress,
             hideRewards: this._hideRewards,
           })
         );
@@ -1178,23 +1246,40 @@
       return sensor?.attributes?.default_rotation_strategy ?? "round_robin";
     }
 
-    // v0.16: always ranks by points_week now - the "Woche"/"Monat" tab
-    // switcher (and points_month) is gone, see the file header note on the
-    // Bestenliste section for why.
-    _rankedMembers() {
-      return Object.keys(this._members)
-        .map((id) => {
-          const member = this._members[id];
-          const sensor = this._pointsSensorForMember(id);
-          const points = Number(sensor?.attributes?.points_week ?? 0);
-          return { id, member, points };
-        })
-        .filter((entry) => entry.member.active !== false)
-        // Nur Mitglieder, die am Belohnungssystem teilnehmen, tauchen hier
-        // überhaupt auf - ein Haushalt kann z. B. nur die Kinder um Punkte
-        // konkurrieren lassen.
+    // v0.29: household-wide weekly point goal backing each child's
+    // "Wochenfortschritt" progress bar (see CONF_WEEKLY_PROGRESS_GOAL_POINTS
+    // in const.py) - same "rides along on every member's points sensor"
+    // pattern as _weeklyWinnerBonus/_defaultRotationStrategy above. 0 (the
+    // default) means no goal is configured - _renderProgressSection then
+    // renders each bar as a plain running tally with no target to fill.
+    _weeklyProgressGoal() {
+      if (!this._hass) return 0;
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      return Number(sensor?.attributes?.weekly_progress_goal_points ?? 0);
+    }
+
+    // v0.29: members shown in the "Wochenfortschritt" section - replaces the
+    // old _rankedMembers() leaderboard list. A "child" user only ever sees
+    // their own bar; anyone else (parent/admin, or an unlinked account) sees
+    // one bar per active "child" member of the household, so a parent can
+    // check both kids' progress at a glance without either kid seeing the
+    // other's as a competitive ranking (the whole point of replacing the
+    // Bestenliste). Still filtered to participates_in_rewards, same as the
+    // old ranking - a member opted out of the reward system has no
+    // spendable balance for this bar to lead toward.
+    _progressMembers(isChildUser, currentMemberId) {
+      const ids = isChildUser
+        ? currentMemberId
+          ? [currentMemberId]
+          : []
+        : Object.keys(this._members).filter((id) => this._members[id].role === "child");
+      return ids
+        .map((id) => ({ id, member: this._members[id] }))
+        .filter((entry) => entry.member && entry.member.active !== false)
         .filter((entry) => entry.member.participates_in_rewards !== false)
-        .sort((a, b) => b.points - a.points);
+        .sort((a, b) => a.member.name.localeCompare(b.member.name, "de"));
     }
 
     // --- actions -------------------------------------------------------
@@ -1816,13 +1901,14 @@
       // Striche am Kartenende bekommt.
       const cardSections = [
         taskSection,
-        this._renderLeaderboardSection(isAdmin, isChildUser),
+        this._renderPointsSection(isAdmin, isChildUser),
         isAdmin ? this._renderBatterySection(controlsHidden, showVisibilityControls) : "",
         membersSection,
       ].filter((section) => section && section.trim());
 
       this.shadowRoot.innerHTML = `
         <style>${this._styles()}</style>
+        ${ICON_DATALIST_HTML}
         <ha-card>
           <div class="card-header">
             <div class="name">${title}</div>
@@ -1884,6 +1970,7 @@
       this._attachListenersOnce();
       this._syncDialogs();
       this._hydrateDateTimeInputs(this.shadowRoot);
+      this._hydrateIconPickers(this.shadowRoot);
     }
 
     // ha-date-input/ha-time-input (used for recurrence.anchor_date/due_time
@@ -1936,25 +2023,103 @@
       });
     }
 
+    // v0.29: same registered-vs-not detection as _hydrateDateTimeInputs
+    // above, for the "Icon (optional)" fields (Aufgabe/Favorit/Mitglied/
+    // Belohnung) - lets someone pick a Material Design Icon from Home
+    // Assistant's own searchable picker instead of having to know/type an
+    // exact "mdi:..." name by heart. <ha-icon-picker> needs `.hass` (not
+    // `.locale` like the date/time pickers) to search/render its icon list.
+    // Falls back to a plain <input list="..."> wired to the shared
+    // ICON_DATALIST_HTML datalist (rendered once in the outer template) when
+    // the real component isn't registered - same reasoning as
+    // _replaceWithPlainDateTimeInput: still free-text (any "mdi:..." can be
+    // typed), just with one-click suggestions instead of none.
+    _hydrateIconPickers(root) {
+      if (!this._hass) return;
+      root.querySelectorAll("ha-icon-picker").forEach((el) => {
+        if (customElements.get("ha-icon-picker")) {
+          el.hass = this._hass;
+          return;
+        }
+        const fieldAttr = el.getAttribute("data-field");
+        const rewardFieldAttr = el.getAttribute("data-reward-field");
+        const fallback = document.createElement("input");
+        fallback.type = "text";
+        fallback.setAttribute("list", ICON_DATALIST_ID);
+        fallback.placeholder = el.getAttribute("placeholder") || "mdi:...";
+        fallback.autocomplete = "off";
+        if (fieldAttr) fallback.dataset.field = fieldAttr;
+        if (rewardFieldAttr) fallback.dataset.rewardField = rewardFieldAttr;
+        fallback.value = el.getAttribute("value") || "";
+        el.replaceWith(fallback);
+      });
+    }
+
     // Fallback for _hydrateDateTimeInputs above when ha-date-input/
-    // ha-time-input isn't actually registered: a plain text field carrying
-    // the same data-field/value so the generic _applyFieldChange handling
-    // (including its due_time "HH:MM:SS" trimming, harmless no-op on an
-    // already-"HH:MM" value from here) needs no changes to cope with either
-    // element. Deliberately type="text" with a pattern/placeholder hint
-    // rather than type="date"/"time" - see the comment above.
+    // ha-time-input isn't actually registered.
+    //
+    // v0.29: ha-time-input's fallback used to be a single plain text field
+    // requiring a literal "hh:mm" (with colon) to match its pattern. That's
+    // fine on a desktop keyboard, but the companion app's numeric keypad for
+    // a pattern-restricted text input frequently has no ":" key at all -
+    // "Fällig um" was effectively impossible to fill in on a phone on a
+    // setup where the real component isn't registered, exactly the reported
+    // bug this fixes. Replaced with two native <select> dropdowns (hour/
+    // minute, see _renderFallbackTimeInput below) - no typing needed at all,
+    // "eine komfortablere Auswahloption" as requested, and every phone's
+    // on-screen keyboard/picker already handles a <select> natively. The
+    // date fallback (ha-date-input, "YYYY-MM-DD") is unaffected - a dash is
+    // available on every keyboard, and this report was about the time field
+    // specifically.
     _replaceWithPlainDateTimeInput(el) {
       const isTime = el.tagName.toLowerCase() === "ha-time-input";
+      const fieldAttr = el.getAttribute("data-field");
+      const rawValue = el.getAttribute("value") || "";
+
+      if (isTime) {
+        el.replaceWith(this._renderFallbackTimeInput(fieldAttr, rawValue));
+        return;
+      }
+
       const fallback = document.createElement("input");
       fallback.type = "text";
       fallback.inputMode = "numeric";
-      fallback.placeholder = isTime ? "hh:mm" : "jjjj-mm-tt";
-      fallback.pattern = isTime ? "([01][0-9]|2[0-3]):[0-5][0-9]" : "\\d{4}-\\d{2}-\\d{2}";
+      fallback.placeholder = "jjjj-mm-tt";
+      fallback.pattern = "\\d{4}-\\d{2}-\\d{2}";
       fallback.autocomplete = "off";
-      const fieldAttr = el.getAttribute("data-field");
       if (fieldAttr) fallback.dataset.field = fieldAttr;
-      fallback.value = el.getAttribute("value") || "";
+      fallback.value = rawValue;
       el.replaceWith(fallback);
+    }
+
+    // Builds the <span data-field data-fallback-time> composite described
+    // above: two <select> dropdowns plus a leading "--" option in each to
+    // represent "no time set" (ha-time-input's `clearable` behavior) -
+    // picking "--" on either one clears due_time entirely rather than
+    // producing a half-set value. _applyFieldChange's due_time branch reads
+    // both selects off this element (via data-fallback-time) instead of a
+    // single .value, since no single child element holds the combined
+    // "HH:MM" value.
+    _renderFallbackTimeInput(fieldAttr, rawValue) {
+      const [h, m] = rawValue.includes(":") ? rawValue.split(":") : ["", ""];
+      const options = (count, selected) =>
+        [`<option value="">--</option>`]
+          .concat(
+            Array.from({ length: count }, (_, i) => String(i).padStart(2, "0")).map(
+              (v) => `<option value="${v}" ${v === selected ? "selected" : ""}>${v}</option>`
+            )
+          )
+          .join("");
+      const wrapper = document.createElement("span");
+      wrapper.className = "fallback-time-input";
+      if (fieldAttr) wrapper.dataset.field = fieldAttr;
+      wrapper.dataset.fallbackTime = "1";
+      wrapper.innerHTML = `
+        <select data-time-part="hour" aria-label="Stunde">${options(24, h)}</select>
+        <span aria-hidden="true">:</span>
+        <select data-time-part="minute" aria-label="Minute">${options(60, m)}</select>
+      `;
+      return wrapper;
     }
 
     // Opens any dialog whose *FormOpen flag is true but that isn't already
@@ -2428,17 +2593,17 @@
         .join("")}</div>`;
     }
 
-    // Bestenliste + Belohnungen (v0.15, gemerged aus der ehemals
-    // eigenständigen family-tasks-leaderboard-card.js - siehe Datei-Header).
-    // Anders als "Familienmitglieder"/"Batterien" ist der Zugriff selbst
-    // nicht eingeschränkt: die Rangliste und der Belohnungs-Katalog sind für
-    // jeden - auch ein "Kind"-Konto - immer nutzbar, da ein Kind hier
-    // auswählen/einlösen können muss, nicht nur Eltern etwas zu
-    // konfigurieren haben. Seit v0.21 aber jeweils für sich ausblendbar
-    // (_renderRankingSection/_renderRewardsSection unten) - siehe dort für
-    // die Begründung, warum die Umschalter dafür trotzdem für alle
-    // sichtbar bleiben.
-    _renderLeaderboardSection(isAdmin, isChildUser) {
+    // Wochenfortschritt + Belohnungen (v0.15 als "Bestenliste" gemerged aus
+    // der ehemals eigenständigen family-tasks-leaderboard-card.js - siehe
+    // Datei-Header; v0.29 ersetzt die Rangliste durch die Fortschrittsbalken
+    // unten, siehe _renderProgressSection). Anders als "Familienmitglieder"/
+    // "Batterien" ist der Zugriff selbst nicht eingeschränkt: Fortschritt und
+    // Belohnungs-Katalog sind für jeden - auch ein "Kind"-Konto - immer
+    // nutzbar, da ein Kind hier den eigenen Stand sehen/einlösen können muss,
+    // nicht nur Eltern etwas zu konfigurieren haben. Seit v0.21 aber jeweils
+    // für sich ausblendbar (_renderProgressSection/_renderRewardsSection
+    // unten) - siehe dort für die Begründung.
+    _renderPointsSection(isAdmin, isChildUser) {
       // Gleiche Regel wie canManageMembers oben - ein "Kind"-verknüpfter
       // Nutzer bekommt keine Katalog-/Einlösungs-Verwaltung, unabhängig vom
       // HA-Admin-Flag (serverseitig ebenfalls erzwungen, siehe
@@ -2446,28 +2611,36 @@
       const canManageRewards = isAdmin && !isChildUser;
       const currentMemberId = this._currentMemberId();
       return `
-        ${this._renderRankingSection()}
+        ${this._renderProgressSection(isAdmin, isChildUser, currentMemberId)}
         <hr class="section-divider">
         ${this._renderRewardsSection(canManageRewards, currentMemberId)}
       `;
     }
 
-    // v0.21: "Bestenliste" ausblendbar, wie schon länger "Familienmitglieder"/
-    // "Batterien"/(bis v0.20) "Favoriten" - anders als bei diesen ist der
-    // Umschalter hier aber *nicht* an showVisibilityControls/controlsHidden
-    // gekoppelt (also nicht Eltern-only und nicht vom Kompakt-Modus-Button
-    // betroffen): die Bestenliste ist für ein "Kind"-Konto genauso relevant
-    // wie für Eltern, das Ausblenden ist hier reiner Anzeige-Komfort pro
-    // Gerät, keine Admin-Einstellung. Startet standardmäßig sichtbar (siehe
-    // setConfig) - anders als der v0.11-Kompakt-Default der übrigen
-    // Abschnitte, da ein Kind sonst beim allerersten Laden gar nicht sähe,
-    // dass es hier etwas einlösen kann.
-    _renderRankingSection() {
-      if (this._hideLeaderboard) {
-        return `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-leaderboard">Bestenliste anzeigen</button></div>`;
+    // v0.29: "Bestenliste" (Rangliste, siehe CHANGELOG) ersetzt durch einen
+    // wöchentlichen Fortschrittsbalken pro Kind - kein Wettbewerb zwischen
+    // Geschwistern mehr, sondern jedes Kind gegen sein eigenes Wochenziel
+    // (CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py, siehe
+    // _weeklyProgressGoal). Ein "Kind"-Konto sieht ausschließlich den eigenen
+    // Balken; Eltern sehen die Balken aller Kinder (_progressMembers), damit
+    // beide im Blick behalten werden können. Anders als beim v0.21-
+    // "Bestenliste"-Umschalter ist das Ausblenden hier Eltern-only (siehe
+    // canToggle unten) - ein Kind bekommt keinen eigenen Schalter dafür,
+    // sieht aber weiterhin, was zuletzt auf diesem Gerät eingestellt wurde.
+    // Startet standardmäßig sichtbar (siehe setConfig) - anders als der
+    // v0.11-Kompakt-Default der übrigen Abschnitte, da ein Kind sonst beim
+    // allerersten Laden gar nicht sähe, wie weit es diese Woche schon ist.
+    _renderProgressSection(isAdmin, isChildUser, currentMemberId) {
+      const canToggle = isAdmin && !isChildUser;
+      if (this._hideProgress) {
+        return canToggle
+          ? `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-progress">Wochenfortschritt anzeigen</button></div>`
+          : "";
       }
-      const ranked = this._rankedMembers();
-      const maxPoints = ranked.length ? Math.max(...ranked.map((r) => r.points), 1) : 1;
+
+      const goal = this._weeklyProgressGoal();
+      const members = this._progressMembers(isChildUser, currentMemberId);
+
       // v0.22: jede Zeile öffnet per Klick einen Dialog mit den diese Woche
       // von diesem Mitglied erledigten Aufgaben - siehe
       // _openMemberCompletions. role="button"/tabindex sorgen zusammen mit
@@ -2475,50 +2648,55 @@
       // Tastaturbedienbarkeit.
       // v0.23: kleines Pfeil-Icon (".disclosure-icon") rechts in jeder Zeile,
       // rein optisch - macht sichtbar, dass die Zeile anklickbar ist und zu
-      // Details führt, statt dass diese Funktion nur durch Zufälliges
-      // Anklicken entdeckt wird (Name/Punkte allein sahen wie reiner Text
-      // aus, ohne erkennbaren Hinweis auf die Detail-Ansicht).
-      const rankingList = ranked.length
-        ? `<div class="list">${ranked
-            .map((entry, index) => {
-              const pct = Math.round((entry.points / maxPoints) * 100);
-              const available = this._availablePointsFor(entry.id);
+      // Details führt.
+      const progressList = members.length
+        ? `<div class="list">${members
+            .map(({ id, member }) => {
+              const sensor = this._pointsSensorForMember(id);
+              const weekPoints = Number(sensor?.attributes?.points_week ?? 0);
+              const available = this._availablePointsFor(id);
+              const pct = goal > 0 ? Math.min(100, Math.round((weekPoints / goal) * 100)) : 100;
+              const goalReached = goal > 0 && weekPoints >= goal;
+              const pointsLine = goal > 0 ? `${esc(weekPoints)} / ${esc(goal)} Pkt. diese Woche` : `${esc(weekPoints)} Pkt. diese Woche`;
+              const balanceLine = goal > 0 && !goalReached
+                ? `${pointsLabel(available)} verfügbar · noch ${esc(goal - weekPoints)} bis zum Wochenziel`
+                : `${pointsLabel(available)} verfügbar`;
               return `
-                <div class="row clickable" data-action="open-member-completions" data-member-id="${entry.id}" role="button" tabindex="0">
-                  <div class="rank">${index + 1}</div>
+                <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
                     <div class="row-top">
-                      <span class="name">${entry.member.icon ? `<ha-icon icon="${esc(entry.member.icon)}"></ha-icon> ` : ""}${esc(entry.member.name)}</span>
-                      <span class="points">${esc(entry.points)} Pkt.</span>
+                      <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}</span>
+                      <span class="points">${pointsLine}</span>
                     </div>
-                    <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-                    <div class="balance">${esc(entry.member.name)}: ${pointsLabel(available)} verfügbar</div>
+                    <div class="bar-track"><div class="bar-fill${goalReached ? " goal-reached" : ""}" style="width:${pct}%"></div></div>
+                    <div class="balance">${balanceLine}</div>
                   </div>
                   <span class="disclosure-icon">${svgIcon("chevron-right", 20)}</span>
                 </div>`;
             })
             .join("")}</div>`
-        : `<p class="muted">Noch keine teilnehmenden Familienmitglieder.</p>`;
+        : `<p class="muted">${isChildUser ? "Kein verknüpftes Familienmitglied gefunden." : "Noch keine teilnehmenden Kinder."}</p>`;
 
       // v0.22: Bonuspunkte für den Wochensieger (siehe
-      // CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py) oben in der
-      // Bestenliste anzeigen, sofern der Haushalt die Funktion aktiviert hat
-      // - reine Anzeige, die eigentliche Vergabe übernimmt weiterhin
-      // FamilyTasksCoordinator._async_process_weekly_winner_bonus.
+      // CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py) weiterhin
+      // oben im Abschnitt anzeigen, sofern der Haushalt die Funktion
+      // aktiviert hat - reine Anzeige, die eigentliche Vergabe übernimmt
+      // weiterhin FamilyTasksCoordinator._async_process_weekly_winner_bonus.
       const bonus = this._weeklyWinnerBonus();
 
       return `
         <div class="section-header">
-          <h3>Bestenliste</h3>
-          <button class="link" data-action="toggle-hide-leaderboard">Ausblenden</button>
+          <h3>Wochenfortschritt</h3>
+          ${canToggle ? `<button class="link" data-action="toggle-hide-progress">Ausblenden</button>` : ""}
         </div>
+        ${goal > 0 ? `<p class="muted">Wochenziel: ${pointsLabel(goal)}</p>` : ""}
         ${bonus.enabled && bonus.points > 0 ? `<p class="muted">Wochensieger-Bonus: ${pointsLabel(bonus.points)}</p>` : ""}
-        ${rankingList}
+        ${progressList}
       `;
     }
 
     // v0.22: Inhalt des "diese Woche erledigt"-Dialogs, geöffnet per Klick
-    // auf eine Bestenlisten-Zeile - siehe _openMemberCompletions.
+    // auf eine Fortschritts-Zeile - siehe _openMemberCompletions.
     _renderMemberCompletionsList() {
       if (this._memberCompletionsLoading) return `<p class="muted">Lädt…</p>`;
       if (!this._memberCompletions.length) {
@@ -2544,12 +2722,12 @@
         .join("")}</div>`;
     }
 
-    // v0.21: "Belohnungen" ausblendbar - gleiches Muster/gleiche Begründung
-    // wie _renderRankingSection oben (für alle sichtbarer Umschalter, nicht
-    // Eltern-only, standardmäßig sichtbar). Umfasst sowohl den Katalog als
-    // auch "Bisherige Einlösungen" als einen gemeinsamen Block - dessen
-    // eigener _hideFulfilled-Umschalter bleibt unverändert eine Ebene
-    // darunter bestehen.
+    // v0.21: "Belohnungen" ausblendbar - für alle sichtbarer Umschalter,
+    // nicht Eltern-only (anders als seit v0.29 bei _renderProgressSection
+    // oben), standardmäßig sichtbar. Umfasst sowohl den Katalog als auch
+    // "Bisherige Einlösungen" als einen gemeinsamen Block - dessen eigener
+    // _hideFulfilled-Umschalter bleibt unverändert eine Ebene darunter
+    // bestehen.
     _renderRewardsSection(canManageRewards, currentMemberId) {
       if (this._hideRewards) {
         return `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-rewards">Belohnungen anzeigen</button></div>`;
@@ -2677,7 +2855,7 @@
       return `
         <form class="form" data-form="reward">
           <label>Name<input type="text" data-reward-field="name" placeholder="z. B. Filmabend aussuchen" value="${esc(f.name)}" required></label>
-          <label>Icon (optional)<input type="text" data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></label>
+          <label>Icon (optional)<ha-icon-picker data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></ha-icon-picker></label>
           ${isInvestable ? "" : `
           <label>Preis (Punkte)<input type="number" min="0" data-reward-field="points_cost" value="${esc(f.points_cost)}"></label>
           `}
@@ -2735,7 +2913,7 @@
           <label>Name<input type="text" data-field="name" placeholder="z. B. Auto waschen" value="${esc(f.name)}" required></label>
           <div class="grid2">
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
-            <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:car-wash" value="${esc(f.icon)}"></label>
+            <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:car-wash" value="${esc(f.icon)}"></ha-icon-picker></label>
           </div>
           <label>Fest zugewiesen an (optional, mehrere möglich)</label>
           <div class="chips">${memberCheckboxes}</div>
@@ -2838,7 +3016,7 @@
           <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
           <div class="grid2">
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
-            <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></label>
+            <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></ha-icon-picker></label>
           </div>
 
           <label>Aufgabentyp
@@ -2908,7 +3086,7 @@
       return `
         <form class="form" data-form="own-task">
           <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
-          <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></label>
+          <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></ha-icon-picker></label>
 
           <label>Aufgabentyp
             <select data-field="kind">
@@ -3034,7 +3212,7 @@
               ${personOptions}
             </select>
           </label>
-          <label>Icon (optional)<input type="text" data-field="icon" placeholder="mdi:account" value="${esc(f.icon)}"></label>
+          <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:account" value="${esc(f.icon)}"></ha-icon-picker></label>
           <label>Rolle
             <select data-field="role">
               ${Object.entries(MEMBER_ROLE_LABELS).map(([value, label]) => `<option value="${value}" ${f.role === value ? "selected" : ""}>${label}</option>`).join("")}
@@ -3141,16 +3319,16 @@
         .task-actions-row { display: flex; justify-content: space-between; align-items: center;
                               gap: 8px; flex-wrap: wrap; }
         .task-actions-row button.add { padding: 8px 0; }
-        /* v0.22: klickbare Bestenlisten-Zeile (öffnet die "diese Woche
+        /* v0.22: klickbare Fortschritts-Zeile (öffnet die "diese Woche
            erledigt"-Übersicht für das jeweilige Mitglied, siehe
            _openMemberCompletions) - optische/Tastatur-Hinweise, dass die
            ganze Zeile ein Button ist. */
         .row.clickable { cursor: pointer; }
         .row.clickable:hover { background: var(--card-background-color, #fff); }
         .row.clickable:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
-        /* v0.23: reiner optischer Hinweis, dass eine Bestenlisten-Zeile
+        /* v0.23: reiner optischer Hinweis, dass eine Fortschritts-Zeile
            anklickbar ist (öffnet die "diese Woche erledigt"-Details) - siehe
-           _renderRankingSection. */
+           _renderProgressSection. */
         .disclosure-icon { display: inline-flex; width: 20px; height: 20px; color: var(--secondary-text-color); flex-shrink: 0; }
         .disclosure-icon svg { fill: currentColor; display: block; }
         @media (max-width: 480px) {
@@ -3186,6 +3364,10 @@
                 padding: 12px; border-radius: 8px; border: 1px solid var(--divider-color, #e0e0e0); }
         .form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
         .form label.inline { flex-direction: row; align-items: center; }
+        /* v0.29: hour/minute <select> fallback for due_time when
+           ha-time-input isn't registered - see _renderFallbackTimeInput. */
+        .fallback-time-input { display: inline-flex; align-items: center; gap: 4px; }
+        .fallback-time-input select { width: auto; }
         .form input, .form select { padding: 6px; border-radius: 4px; border: 1px solid var(--divider-color, #ccc);
                                      background: var(--card-background-color, #fff); color: inherit; }
         .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -3209,6 +3391,10 @@
         .balance { font-size: 0.8em; color: var(--secondary-text-color); }
         .bar-track { height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
         .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
+        /* v0.29: Wochenziel erreicht (siehe _renderProgressSection,
+           goalReached) - eigene Farbe, damit auf einen Blick klar ist,
+           welches Kind sein Wochenziel diese Woche schon geschafft hat. */
+        .bar-fill.goal-reached { background: var(--success-color, #43a047); }
         .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
                        border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
         /* Each collapsed-section "... anzeigen" button gets its own block-
@@ -3345,10 +3531,16 @@
           this._hideFulfilled = !this._hideFulfilled;
           this._saveUiState();
           this._render();
-        } else if (action === "toggle-hide-leaderboard") {
-          this._hideLeaderboard = !this._hideLeaderboard;
-          this._saveUiState();
-          this._render();
+        } else if (action === "toggle-hide-progress") {
+          // v0.29: Eltern-only, wie die anderen isAdmin/isChildUser-gated
+          // Actions - der Button selbst rendert für ein "Kind"-Konto ohnehin
+          // nicht (siehe _renderProgressSection), diese Prüfung ist nur eine
+          // zweite Absicherung falls der Klick trotzdem ankommt.
+          if (this._isAdmin() && !this._isChildUser()) {
+            this._hideProgress = !this._hideProgress;
+            this._saveUiState();
+            this._render();
+          }
         } else if (action === "toggle-hide-rewards") {
           this._hideRewards = !this._hideRewards;
           this._saveUiState();
@@ -3395,7 +3587,7 @@
       });
 
       // v0.22: Enter/Leertaste lösen einen [role="button"] (aktuell nur die
-      // klickbaren Bestenlisten-Zeilen, siehe _renderRankingSection) wie
+      // klickbaren Fortschritts-Zeilen, siehe _renderProgressSection) wie
       // einen Klick aus - native <button>-Elemente brauchen das nicht, ein
       // per Tastatur fokussiertes <div role="button"> aber schon, da der
       // Browser dafür keinen "click" von selbst auslöst.
@@ -3477,7 +3669,12 @@
           this._rewardForm[rewardFieldEl.dataset.rewardField] =
             rewardFieldEl.type === "checkbox" ? rewardFieldEl.checked : rewardFieldEl.value;
           const rewardForm = ev.target.closest('[data-form="reward"]');
+          const rewardFormParent = rewardForm?.parentNode;
           if (rewardForm) rewardForm.outerHTML = this._renderRewardForm();
+          // v0.29: the icon field is a <ha-icon-picker> too (see
+          // _hydrateIconPickers) - needs re-hydrating after the outerHTML
+          // swap above just like the generic data-field path below does.
+          if (rewardFormParent) this._hydrateIconPickers(rewardFormParent);
           return;
         }
 
@@ -3497,6 +3694,27 @@
         const formParent = form.parentNode;
         form.outerHTML = spec.render();
         this._hydrateDateTimeInputs(formParent);
+        this._hydrateIconPickers(formParent);
+      });
+
+      // v0.29: <ha-icon-picker> (and, defensively, <ha-date-input>/
+      // <ha-time-input>, which follow the same Home Assistant convention)
+      // report a change via a "value-changed" CustomEvent (detail.value),
+      // not necessarily a native "change" the listener above listens for.
+      // Rather than duplicate every branch above for a second event shape,
+      // this copies the picked value onto the element itself and replays it
+      // as a real "change" event - the listener above then handles it
+      // exactly like any native input, data-field vs data-reward-field
+      // included. fireEvent (Home Assistant's own dispatch helper) sends
+      // "value-changed" with composed:true, so it crosses these elements'
+      // internal shadow boundaries and reaches this listener on
+      // this.shadowRoot without further wiring.
+      this.shadowRoot.addEventListener("value-changed", (ev) => {
+        const el = ev.target;
+        if (ev.detail?.value === undefined) return;
+        if (!el.matches?.("[data-field], [data-reward-field]")) return;
+        el.value = ev.detail.value;
+        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       });
     }
 
@@ -3546,6 +3764,17 @@
       // "HH:MM" so storage keeps getting the format storage.py documents
       // ("HH:MM") and existing due_time values/tests aren't affected.
       if (leaf === "due_time") {
+        // v0.29: the hour/minute <select> fallback (see
+        // _renderFallbackTimeInput) has no single .value of its own - `el`
+        // here is the wrapping <span data-fallback-time>, read its two child
+        // selects instead. Either one still at "--" (empty) means "no time
+        // set", same as clearing the real ha-time-input.
+        if (el.dataset.fallbackTime) {
+          const hour = el.querySelector('[data-time-part="hour"]')?.value || "";
+          const minute = el.querySelector('[data-time-part="minute"]')?.value || "";
+          target.due_time = hour && minute ? `${hour}:${minute}` : "";
+          return;
+        }
         target.due_time = el.value ? el.value.slice(0, 5) : el.value;
         return;
       }

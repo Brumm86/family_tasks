@@ -190,6 +190,13 @@ class FamilyTasksMemberPointsSensor(
             # The card reads this to pre-select "Rotationstyp" when opening
             # the "+ Aufgabe hinzufügen" form.
             "default_rotation_strategy": self.coordinator.data.default_rotation_strategy,
+            # v0.29: household-wide weekly point goal (see
+            # CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py), identical on
+            # every member's points sensor - same "rides along, no dedicated
+            # entity" reasoning as the attributes above. Drives the card's
+            # "Wochenfortschritt" progress-bar target; 0 means no goal is
+            # configured (every earned point is immediately spendable).
+            "weekly_progress_goal_points": self.coordinator.data.weekly_progress_goal_points,
         }
 
 

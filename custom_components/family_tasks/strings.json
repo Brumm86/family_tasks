@@ -23,7 +23,8 @@
           "battery_warning_threshold": "Default battery warning level (%)",
           "screen_time_minutes_per_point": "Screen time minutes per invested point",
           "weekly_winner_bonus_enabled": "Award a weekly-winner bonus",
-          "weekly_winner_bonus_points": "Weekly-winner bonus points"
+          "weekly_winner_bonus_points": "Weekly-winner bonus points",
+          "weekly_progress_goal_points": "Weekly point goal (progress bar)"
         }
       }
     }

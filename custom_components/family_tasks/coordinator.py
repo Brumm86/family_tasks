@@ -31,6 +31,7 @@ from .const import (
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
+    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     CONF_WEEKLY_WINNER_BONUS_ENABLED,
     CONF_WEEKLY_WINNER_BONUS_POINTS,
     CONFIRMATION_REJECTION_PENALTY_POINTS,
@@ -38,6 +39,7 @@ from .const import (
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
+    DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
     DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
@@ -194,14 +196,17 @@ class MemberSummaryData:
     points_month: int
     points_total: int
     open_tasks: int
-    # Current spendable balance for the reward system (v0.9): points_total
-    # minus every "points_cost" this member has already redeemed (see
-    # RewardRedemptionStorageCollection in storage.py) - never a separately
-    # stored/mutated value, always computed fresh from history so it can
-    # never drift out of sync. Drives the leaderboard card's balance display
-    # and whether a given catalog reward is affordable (WS_API_REWARD_REDEEM
-    # in const.py / ws_redeem_reward in storage.py re-derives the same thing
-    # server-side before letting a redemption through).
+    # Current spendable balance for the reward system (v0.9): the member's
+    # *spendable* points (see FamilyTasksCoordinator._weekly_spendable_points
+    # - points_total itself, minus any weekly-goal quota per
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS, v0.29) minus every "points_cost" this
+    # member has already redeemed (see RewardRedemptionStorageCollection in
+    # storage.py) - never a separately stored/mutated value, always computed
+    # fresh from history so it can never drift out of sync. Drives the
+    # Wochenfortschritt/reward-shop balance display and whether a given
+    # catalog reward is affordable (WS_API_REWARD_REDEEM in const.py /
+    # ws_redeem_reward in storage.py re-derives the same thing server-side
+    # before letting a redemption through).
     points_available: int = 0
     # v0.14: whether tick-based screen-time granting should currently be
     # active for this member - True unless they have at least one
@@ -239,6 +244,14 @@ class FamilyTasksData:
     # pre-select the right "Rotationstyp" when opening the "+ Aufgabe
     # hinzufügen" form instead of always defaulting to "Reihum".
     default_rotation_strategy: str = DEFAULT_ROTATION_STRATEGY
+    # v0.29: household-wide weekly point goal (see
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py) backing the card's
+    # "Wochenfortschritt" progress bars - rides along here for the same
+    # reason default_rotation_strategy does (no dedicated entity to attach a
+    # plain options value to). 0 means the goal/surplus mechanic is off; the
+    # card then renders each bar as a plain "points earned this week" tally
+    # with no target to reach.
+    weekly_progress_goal_points: int = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
 
 
 def _current_period_date(recurrence: dict, today: date) -> date:
@@ -605,10 +618,19 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     redeemed_member_id, 0
                 ) + redemption.get("points_cost", 0)
 
+        weekly_progress_goal_points = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+        if self.config_entry:
+            weekly_progress_goal_points = self.config_entry.options.get(
+                CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+            )
+
         member_summaries: dict[str, MemberSummaryData] = {}
         for member_id, member in self.members.data.items():
             points_total = self.completions.points_since(
                 member_id, datetime.min.replace(tzinfo=dt_util.UTC)
+            )
+            spendable_points = self._weekly_spendable_points(
+                member_id, weekly_progress_goal_points
             )
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
@@ -618,7 +640,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 points_week=self.completions.points_since(member_id, start_of_week),
                 points_month=self.completions.points_since(member_id, start_of_month),
                 points_total=points_total,
-                points_available=points_total - redeemed_points.get(member_id, 0),
+                points_available=spendable_points - redeemed_points.get(member_id, 0),
                 open_tasks=open_tasks_by_member.get(member_id, 0),
                 screen_time_grant_active=member_id not in screen_time_paused_members,
             )
@@ -654,6 +676,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             weekly_winner_bonus_enabled=weekly_winner_bonus_enabled,
             weekly_winner_bonus_points=weekly_winner_bonus_points,
             default_rotation_strategy=default_rotation_strategy,
+            weekly_progress_goal_points=weekly_progress_goal_points,
         )
 
     def _current_period_key(self, task_id: str, task: dict) -> str | None:
@@ -1200,6 +1223,47 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             if start <= completed_at < end:
                 total += entry["points_awarded"]
         return total
+
+    def _weekly_spendable_points(self, member_id: str, goal_points: int) -> int:
+        """Sum a member's lifetime *spendable* points under the v0.29 weekly-goal rule.
+
+        See CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py: within each
+        calendar week (Monday 00:00 local - the same boundary start_of_week/
+        points_week already use), a member's first ``goal_points`` points
+        earned that week count only toward the "Wochenfortschritt" progress
+        bar, not toward their spendable points_available balance - only
+        points earned *beyond* the goal in that week are added to it.
+        ``goal_points <= 0`` (the default) disables the rule entirely: every
+        week's total is fully spendable, identical to the pre-v0.29
+        behavior where points_available was simply points_total minus
+        redeemed points.
+
+        Recomputed fresh from the full completion log every call, like every
+        other MemberSummaryData figure - nothing here is separately stored -
+        so changing the goal in Options immediately re-derives every past
+        week's contribution under the new value, rather than only affecting
+        weeks going forward.
+        """
+        if goal_points <= 0:
+            return self.completions.points_since(
+                member_id, datetime.min.replace(tzinfo=dt_util.UTC)
+            )
+
+        weekly_totals: dict[date, int] = {}
+        for entry in self.completions.entries:
+            if entry["completed_by_member_id"] != member_id or entry["skipped"]:
+                continue
+            completed_at = dt_util.parse_datetime(entry["completed_at"])
+            if completed_at is None:
+                continue
+            local_at = dt_util.as_local(completed_at)
+            day_start_utc = dt_util.as_utc(dt_util.start_of_local_day(local_at))
+            week_start = (day_start_utc - timedelta(days=day_start_utc.weekday())).date()
+            weekly_totals[week_start] = (
+                weekly_totals.get(week_start, 0) + entry["points_awarded"]
+            )
+
+        return sum(max(0, total - goal_points) for total in weekly_totals.values())
 
     async def _async_process_weekly_winner_bonus(self, start_of_week: datetime) -> None:
         """Award bonus points to the previous week's point leader(s), once.

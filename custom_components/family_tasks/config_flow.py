@@ -28,12 +28,14 @@ from .const import (
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     CONF_WEEKLY_WINNER_BONUS_ENABLED,
     CONF_WEEKLY_WINNER_BONUS_POINTS,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+    DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
     DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
@@ -152,6 +154,21 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     default=options.get(
                         CONF_WEEKLY_WINNER_BONUS_POINTS,
                         DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                # v0.29: weekly point goal backing each child's
+                # "Wochenfortschritt" progress bar - points earned beyond
+                # this within a calendar week become spendable, see
+                # CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py. 0 (default)
+                # disables the mechanic, keeping every earned point
+                # immediately spendable as before this option existed.
+                vol.Optional(
+                    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
+                    default=options.get(
+                        CONF_WEEKLY_PROGRESS_GOAL_POINTS,
+                        DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)

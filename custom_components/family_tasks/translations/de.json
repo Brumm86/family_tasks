@@ -23,7 +23,8 @@
           "battery_warning_threshold": "Standard-Batteriewarnschwelle (%)",
           "screen_time_minutes_per_point": "Handyzeit-Minuten pro investiertem Punkt",
           "weekly_winner_bonus_enabled": "Wochensieger-Bonus vergeben",
-          "weekly_winner_bonus_points": "Bonuspunkte für den Wochensieger"
+          "weekly_winner_bonus_points": "Bonuspunkte für den Wochensieger",
+          "weekly_progress_goal_points": "Wöchentliche Zielpunktzahl (Fortschrittsbalken)"
         }
       }
     }

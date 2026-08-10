@@ -61,12 +61,25 @@ WEEKLY_BONUS_TASK_ID: Final = "__weekly_winner_bonus__"
 # have).
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 
+# v0.29: household-wide weekly point goal backing each child's
+# "Wochenfortschritt" progress bar (replaces the flat Bestenliste ranking -
+# see family-tasks-card.js). Points a member earns within a calendar week
+# (Monday 00:00 local - Sunday 23:59, the same boundary points_week already
+# uses) up to this many points only count toward reaching the goal itself;
+# only points earned *beyond* the goal in that week are added to their
+# spendable points_available balance, redeemable in the reward shop exactly
+# as before. 0 (the default) disables the rule entirely - every point earned
+# is immediately spendable, identical to the pre-v0.29 behavior. See
+# FamilyTasksCoordinator._weekly_spendable_points in coordinator.py.
+CONF_WEEKLY_PROGRESS_GOAL_POINTS: Final = "weekly_progress_goal_points"
+
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
 DEFAULT_SCREEN_TIME_MINUTES_PER_POINT: Final = 1
 DEFAULT_WEEKLY_WINNER_BONUS_ENABLED: Final = False
 DEFAULT_WEEKLY_WINNER_BONUS_POINTS: Final = 0
+DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS: Final = 0
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
 ROTATION_STRATEGY_RANDOM: Final = "random"
