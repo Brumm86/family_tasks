@@ -22,11 +22,17 @@
           "default_rotation_strategy": "Default rotation strategy",
           "battery_warning_threshold": "Default battery warning level (%)",
           "screen_time_minutes_per_point": "Screen time minutes per invested point",
-          "weekly_winner_bonus_enabled": "Award a weekly-winner bonus",
-          "weekly_winner_bonus_points": "Weekly-winner bonus points",
-          "weekly_progress_goal_points": "Weekly point goal (progress bar)"
+          "weekly_progress_goal_points": "Weekly point goal (progress bar)",
+          "milestone_bonus_enabled": "Award a Meilensteinbonus (milestone bonus)",
+          "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",
+          "milestone_1_bonus_points": "Bonus points at threshold 1",
+          "milestone_2_threshold_percent": "Threshold 2 (% of weekly goal)",
+          "milestone_2_bonus_points": "Bonus points at threshold 2"
         }
       }
+    },
+    "error": {
+      "milestone_threshold_order": "Threshold 2 must be greater than threshold 1."
     }
   },
   "selector": {

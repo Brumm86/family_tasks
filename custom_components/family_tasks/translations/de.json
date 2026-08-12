@@ -22,11 +22,17 @@
           "default_rotation_strategy": "Standard-Rotationsstrategie",
           "battery_warning_threshold": "Standard-Batteriewarnschwelle (%)",
           "screen_time_minutes_per_point": "Handyzeit-Minuten pro investiertem Punkt",
-          "weekly_winner_bonus_enabled": "Wochensieger-Bonus vergeben",
-          "weekly_winner_bonus_points": "Bonuspunkte für den Wochensieger",
-          "weekly_progress_goal_points": "Wöchentliche Zielpunktzahl (Fortschrittsbalken)"
+          "weekly_progress_goal_points": "Wöchentliche Zielpunktzahl (Fortschrittsbalken)",
+          "milestone_bonus_enabled": "Meilensteinbonus vergeben",
+          "milestone_1_threshold_percent": "Schwelle 1 (% der Zielpunktzahl)",
+          "milestone_1_bonus_points": "Bonuspunkte bei Schwelle 1",
+          "milestone_2_threshold_percent": "Schwelle 2 (% der Zielpunktzahl)",
+          "milestone_2_bonus_points": "Bonuspunkte bei Schwelle 2"
         }
       }
+    },
+    "error": {
+      "milestone_threshold_order": "Schwelle 2 muss größer als Schwelle 1 sein."
     }
   },
   "selector": {

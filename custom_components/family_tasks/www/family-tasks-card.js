@@ -369,11 +369,21 @@
  *   current calendar week, via the new family_tasks/member/
  *   weekly_completions command - see _openMemberCompletions/
  *   _renderMemberCompletionsList.
- * - The Bestenliste shows "Wochensieger-Bonus: N Punkte" above the ranking
- *   whenever the household has the weekly-winner-bonus feature (v0.14)
- *   turned on - see _weeklyWinnerBonus, which reads it off a
- *   weekly_winner_bonus_enabled/...points attribute now carried by every
- *   member's points sensor (FamilyTasksData in coordinator.py).
+ * - Each "Wochenfortschritt" progress bar shows two "Meilensteinbonus"
+ *   threshold markers (v0.30, replaces the old weekly-winner bonus) whenever
+ *   the household has that feature turned on - see _milestoneBonus, which
+ *   reads the thresholds/bonus points off milestone_bonus_enabled/...
+ *   attributes now carried by every member's points sensor (FamilyTasksData
+ *   in coordinator.py). A short legend line above the bars spells the same
+ *   thresholds out in text for accessibility/narrow screens.
+ * - "Aufgabenpool" (v0.30): a task with no fixed assignee(s) and no rotation
+ *   (empty rotation.member_ids, see is_pool_task in coordinator.py) gets its
+ *   own always-visible section - _renderTaskPoolSection/_isPoolTask - above
+ *   the normal "Aufgaben" list, unaffected by hideNotDue/hideCompleted/the
+ *   member-filter chips and showing occurrences even before their weekday
+ *   arrives (see _pool_period_date in coordinator.py). Any active child may
+ *   reserve one via the existing "Annehmen" claim mechanism, same
+ *   canClaim/canAct logic and row markup (_renderTaskRow) as a normal task.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -1213,30 +1223,43 @@
       return Number(this._pointsSensorForMember(memberId)?.attributes?.points_available ?? 0);
     }
 
-    // v0.22: household-wide weekly-winner-bonus settings (see
-    // CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py) - rides along
-    // as an attribute on every member's points sensor (identical on all of
-    // them, see FamilyTasksMemberPointsSensor in sensor.py), so any one of
-    // them will do; "points_week" is a unique-enough discriminator to find a
-    // points sensor specifically (the open-tasks sensor also carries a bare
-    // "member_id" attribute but not this one).
-    _weeklyWinnerBonus() {
-      if (!this._hass) return { enabled: false, points: 0 };
+    // v0.30: household-wide "Meilensteinbonus" settings (see
+    // CONF_MILESTONE_BONUS_ENABLED and the CONF_MILESTONE_1_*/CONF_MILESTONE_2_*
+    // constants in const.py) - rides along as an attribute on every member's
+    // points sensor (identical on all of them, see
+    // FamilyTasksMemberPointsSensor in sensor.py), so any one of them will
+    // do; "points_week" is a unique-enough discriminator to find a points
+    // sensor specifically (the open-tasks sensor also carries a bare
+    // "member_id" attribute but not this one). Replaces the pre-v0.30
+    // _weeklyWinnerBonus() entirely.
+    _milestoneBonus() {
+      const empty = {
+        enabled: false,
+        threshold1Percent: 100,
+        bonus1: 0,
+        threshold2Percent: 200,
+        bonus2: 0,
+      };
+      if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
       );
+      if (!sensor) return empty;
       return {
-        enabled: !!sensor?.attributes?.weekly_winner_bonus_enabled,
-        points: Number(sensor?.attributes?.weekly_winner_bonus_points ?? 0),
+        enabled: !!sensor.attributes.milestone_bonus_enabled,
+        threshold1Percent: Number(sensor.attributes.milestone_1_threshold_percent ?? 100),
+        bonus1: Number(sensor.attributes.milestone_1_bonus_points ?? 0),
+        threshold2Percent: Number(sensor.attributes.milestone_2_threshold_percent ?? 200),
+        bonus2: Number(sensor.attributes.milestone_2_bonus_points ?? 0),
       };
     }
 
     // v0.23: household-wide default rotation strategy (see
     // CONF_DEFAULT_ROTATION_STRATEGY in const.py) - same "rides along on
-    // every member's points sensor" pattern as _weeklyWinnerBonus above.
-    // Used by _openTaskForm to pre-select "Rotationstyp" for a brand new
-    // task instead of always hardcoding "Reihum" - previously this option
-    // was configurable in the integration's options but never actually read
+    // every member's points sensor" pattern as _milestoneBonus above. Used
+    // by _openTaskForm to pre-select "Rotationstyp" for a brand new task
+    // instead of always hardcoding "Reihum" - previously this option was
+    // configurable in the integration's options but never actually read
     // anywhere, so it had no effect at all.
     _defaultRotationStrategy() {
       if (!this._hass) return "round_robin";
@@ -1249,7 +1272,7 @@
     // v0.29: household-wide weekly point goal backing each child's
     // "Wochenfortschritt" progress bar (see CONF_WEEKLY_PROGRESS_GOAL_POINTS
     // in const.py) - same "rides along on every member's points sensor"
-    // pattern as _weeklyWinnerBonus/_defaultRotationStrategy above. 0 (the
+    // pattern as _milestoneBonus/_defaultRotationStrategy above. 0 (the
     // default) means no goal is configured - _renderProgressSection then
     // renders each bar as a plain running tally with no target to fill.
     _weeklyProgressGoal() {
@@ -1880,6 +1903,7 @@
             ${!showVisibilityControls || controlsHidden ? "" : `<button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>`}
           </div>
         </div>
+        ${this._renderTaskPoolSection(isAdmin)}
         ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
         ${this._renderTaskList(isAdmin)}
         <div class="task-actions-row">
@@ -2219,6 +2243,11 @@
         const createdBy = this._tasks[id].created_by_member_id;
         return !createdBy || createdBy === currentMemberId;
       });
+      // v0.30: "Aufgabenpool" tasks (no fixed assignee, no rotation) get
+      // their own dedicated section below (_renderTaskPoolSection),
+      // unaffected by hideNotDue/hideCompleted/the member-filter chips - so
+      // they're excluded here to avoid showing up twice.
+      ids = ids.filter((id) => !this._isPoolTask(id));
       const totalCount = ids.length;
       // v0.28: independent of hideNotDue above (which is admin-only and
       // bundles "done" together with "idle"/waiting-for-sensor) - this
@@ -2255,7 +2284,17 @@
       }
 
       return `<div class="list">${ids
-        .map((id) => {
+        .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
+        .join("")}</div>`;
+    }
+
+    // v0.30: extracted out of _renderTaskList (which still uses this for
+    // every id it keeps after its own filtering) so _renderTaskPoolSection
+    // below can render "Aufgabenpool" rows with exactly the same markup/
+    // actions (Annehmen, Erledigt, Bearbeiten, ...) without duplicating this
+    // whole block - only which ids each section passes in differs.
+    _renderTaskRow(id, isAdmin, isParentUser, currentMemberId) {
+      {
           const task = this._tasks[id];
           const statusState = this._statusStateForTask(id);
           const status = statusState?.state ?? "pending";
@@ -2447,8 +2486,47 @@
               </div>
               ${subtaskList}
             </div>`;
-        })
-        .join("")}</div>`;
+      }
+    }
+
+    // v0.30: "Aufgabenpool" - a task with no fixed assignee(s) *and* no
+    // rotation at all (rotation.member_ids empty - see is_pool_task in
+    // coordinator.py). Read straight off the raw task definition (like
+    // isTrigger/isChecklist in _renderTaskRow above), not off the sensor
+    // attributes, since it never changes between refreshes.
+    _isPoolTask(id) {
+      const memberIds = this._tasks[id]?.rotation?.member_ids ?? [];
+      return memberIds.length === 0 && !this._tasks[id]?.confirms;
+    }
+
+    // v0.30: dedicated section for Aufgabenpool tasks, always shown
+    // regardless of hideNotDue/hideCompleted/the member-filter chips (see
+    // "Unter offenen Aufgaben sollen ungeachtet der Filtereinstellungen auch
+    // nicht fällige Aufgaben der aktuellen Woche angezeigt werden" - the
+    // whole point is that a child can see and reserve one as soon as the
+    // week starts, not only once it's actually due, and not only if they
+    // happen to have "Alle anzeigen" selected). Only "done" occurrences are
+    // left out - there's nothing left to reserve or complete on those.
+    // Reuses _renderTaskRow for the actual row markup/actions (Annehmen,
+    // Erledigt, ...), identical to a normal task's.
+    _renderTaskPoolSection(isAdmin) {
+      const currentMemberId = this._currentMemberId();
+      const isParentUser = isAdmin && !this._isChildUser();
+      const ids = Object.keys(this._tasks).filter((id) => {
+        if (!this._isPoolTask(id)) return false;
+        const status = this._statusStateForTask(id)?.state ?? "pending";
+        return status !== "done";
+      });
+      if (!ids.length) return "";
+
+      return `
+        <div class="section-header">
+          <h3>Aufgabenpool</h3>
+        </div>
+        <p class="muted">Niemandem zugewiesene Aufgaben - meldet euch mit "Annehmen" dafür.</p>
+        <div class="list">${ids
+          .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
+          .join("")}</div>`;
     }
 
     // v0.16: filter chips at the top of the "Aufgaben" section, replacing
@@ -2640,6 +2718,19 @@
 
       const goal = this._weeklyProgressGoal();
       const members = this._progressMembers(isChildUser, currentMemberId);
+      // v0.30: Meilensteinbonus - siehe _milestoneBonus. Nur wirksam, wenn
+      // zusätzlich ein Wochenziel > 0 konfiguriert ist (beide Schwellen sind
+      // Prozentsätze *davon*) - siehe
+      // FamilyTasksCoordinator._async_process_milestone_bonus.
+      const milestone = goal > 0 ? this._milestoneBonus() : null;
+      // Der Balken reicht über 100% hinaus, sobald Schwelle 2 über 100%
+      // liegt (der Normalfall, Standard 200%) - andernfalls füllte "100% vom
+      // Wochenziel" bereits die ganze Breite und die zweite Schwellen-Marke
+      // läge außerhalb des sichtbaren Balkens. barMaxPercent ist damit immer
+      // mindestens 100.
+      const barMaxPercent = milestone?.enabled
+        ? Math.max(milestone.threshold2Percent, 100)
+        : 100;
 
       // v0.22: jede Zeile öffnet per Klick einen Dialog mit den diese Woche
       // von diesem Mitglied erledigten Aufgaben - siehe
@@ -2655,8 +2746,40 @@
               const sensor = this._pointsSensorForMember(id);
               const weekPoints = Number(sensor?.attributes?.points_week ?? 0);
               const available = this._availablePointsFor(id);
-              const pct = goal > 0 ? Math.min(100, Math.round((weekPoints / goal) * 100)) : 100;
+              const pct = goal > 0
+                ? Math.min(100, Math.round((weekPoints / (goal * barMaxPercent / 100)) * 100))
+                : 100;
               const goalReached = goal > 0 && weekPoints >= goal;
+              // v0.30: Marken für die beiden Meilenstein-Schwellen, als
+              // Prozent-Position *innerhalb* des Balkens (nicht vom
+              // Wochenziel) - siehe barMaxPercent oben. Nur eine Schwelle mit
+              // Prozentsatz > 0 bekommt überhaupt eine Marke.
+              const milestone1Points = milestone && milestone.threshold1Percent > 0
+                ? Math.round((goal * milestone.threshold1Percent) / 100)
+                : null;
+              const milestone2Points = milestone && milestone.threshold2Percent > 0
+                ? Math.round((goal * milestone.threshold2Percent) / 100)
+                : null;
+              const milestone1Reached = milestone1Points !== null && weekPoints >= milestone1Points;
+              const milestone2Reached = milestone2Points !== null && weekPoints >= milestone2Points;
+              const markers = [
+                milestone1Points !== null
+                  ? { left: (milestone.threshold1Percent / barMaxPercent) * 100, points: milestone1Points, bonus: milestone.bonus1, percent: milestone.threshold1Percent, reached: milestone1Reached }
+                  : null,
+                milestone2Points !== null
+                  ? { left: (milestone.threshold2Percent / barMaxPercent) * 100, points: milestone2Points, bonus: milestone.bonus2, percent: milestone.threshold2Percent, reached: milestone2Reached }
+                  : null,
+              ].filter(Boolean);
+              const markersHtml = markers
+                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`${m.percent}% des Wochenziels (${m.points} Pkt.)${m.bonus > 0 ? ` · +${m.bonus} Bonuspunkte` : ""}`)}"></div>`)
+                .join("");
+              const barFillClass = milestone2Reached
+                ? " milestone-2-reached"
+                : milestone1Reached
+                  ? " milestone-1-reached"
+                  : goalReached
+                    ? " goal-reached"
+                    : "";
               const pointsLine = goal > 0 ? `${esc(weekPoints)} / ${esc(goal)} Pkt. diese Woche` : `${esc(weekPoints)} Pkt. diese Woche`;
               const balanceLine = goal > 0 && !goalReached
                 ? `${pointsLabel(available)} verfügbar · noch ${esc(goal - weekPoints)} bis zum Wochenziel`
@@ -2668,7 +2791,10 @@
                       <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}</span>
                       <span class="points">${pointsLine}</span>
                     </div>
-                    <div class="bar-track"><div class="bar-fill${goalReached ? " goal-reached" : ""}" style="width:${pct}%"></div></div>
+                    <div class="bar-track">
+                      <div class="bar-fill${barFillClass}" style="width:${pct}%"></div>
+                      ${markersHtml}
+                    </div>
                     <div class="balance">${balanceLine}</div>
                   </div>
                   <span class="disclosure-icon">${svgIcon("chevron-right", 20)}</span>
@@ -2677,12 +2803,24 @@
             .join("")}</div>`
         : `<p class="muted">${isChildUser ? "Kein verknüpftes Familienmitglied gefunden." : "Noch keine teilnehmenden Kinder."}</p>`;
 
-      // v0.22: Bonuspunkte für den Wochensieger (siehe
-      // CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py) weiterhin
-      // oben im Abschnitt anzeigen, sofern der Haushalt die Funktion
-      // aktiviert hat - reine Anzeige, die eigentliche Vergabe übernimmt
-      // weiterhin FamilyTasksCoordinator._async_process_weekly_winner_bonus.
-      const bonus = this._weeklyWinnerBonus();
+      // v0.30: kurze Legende der beiden Meilenstein-Schwellen samt Bonus
+      // oben im Abschnitt, sofern der Haushalt die Funktion aktiviert hat -
+      // reine Anzeige (auch für Screenreader/schmale Displays, wo die
+      // Balken-Marken selbst schlecht lesbar sind); die eigentliche Vergabe
+      // übernimmt FamilyTasksCoordinator._async_process_milestone_bonus.
+      // Ersetzt die frühere "Wochensieger-Bonus: N Punkte"-Zeile vollständig.
+      const milestoneLegend = milestone?.enabled
+        ? [
+            milestone.threshold1Percent > 0
+              ? `Meilenstein 1: ${milestone.threshold1Percent}%${milestone.bonus1 > 0 ? ` (+${pointsLabel(milestone.bonus1)})` : ""}`
+              : null,
+            milestone.threshold2Percent > 0
+              ? `Meilenstein 2: ${milestone.threshold2Percent}%${milestone.bonus2 > 0 ? ` (+${pointsLabel(milestone.bonus2)})` : ""}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : "";
 
       return `
         <div class="section-header">
@@ -2690,7 +2828,7 @@
           ${canToggle ? `<button class="link" data-action="toggle-hide-progress">Ausblenden</button>` : ""}
         </div>
         ${goal > 0 ? `<p class="muted">Wochenziel: ${pointsLabel(goal)}</p>` : ""}
-        ${bonus.enabled && bonus.points > 0 ? `<p class="muted">Wochensieger-Bonus: ${pointsLabel(bonus.points)}</p>` : ""}
+        ${milestoneLegend ? `<p class="muted">${esc(milestoneLegend)}</p>` : ""}
         ${progressList}
       `;
     }
@@ -3060,6 +3198,7 @@
             </select>
           </label>
           <div class="chips">${memberCheckboxes}</div>
+          <p class="muted">Niemanden auswählen, um die Aufgabe unzugewiesen in den "Aufgabenpool" zu legen - Kinder können sich dort per "Annehmen" dafür melden.</p>
           ${f.rotation.strategy === "least_points" ? `
           <label class="inline"><input type="checkbox" data-field="rotation.only_children" ${f.rotation.only_children ? "checked" : ""}> Nur Punkte von Kindern berücksichtigen</label>` : ""}
 
@@ -3389,12 +3528,29 @@
         .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
         .points { font-size: 0.85em; color: var(--secondary-text-color); flex-shrink: 0; }
         .balance { font-size: 0.8em; color: var(--secondary-text-color); }
-        .bar-track { height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
+        .bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
         .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
         /* v0.29: Wochenziel erreicht (siehe _renderProgressSection,
            goalReached) - eigene Farbe, damit auf einen Blick klar ist,
-           welches Kind sein Wochenziel diese Woche schon geschafft hat. */
+           welches Kind sein Wochenziel diese Woche schon geschafft hat.
+           v0.30: bei aktiviertem Meilensteinbonus wird diese Farbe nur noch
+           gezeigt, solange keine der beiden Schwellen erreicht ist - siehe
+           milestone-1-reached/milestone-2-reached direkt darunter, die
+           Vorrang haben (barFillClass in _renderProgressSection). */
         .bar-fill.goal-reached { background: var(--success-color, #43a047); }
+        /* v0.30: Meilensteinbonus-Stufen - zwei zunehmend "wertvollere"
+           Farben, damit auf einen Blick erkennbar ist, welche Schwelle ein
+           Kind diese Woche schon geschafft hat. */
+        .bar-fill.milestone-1-reached { background: #ffb300; }
+        .bar-fill.milestone-2-reached { background: #ff6f00; }
+        /* v0.30: senkrechte Marke an der Position einer Meilensteinbonus-
+           Schwelle innerhalb des Balkens (siehe barMaxPercent/markers in
+           _renderProgressSection) - "reached" nur zur Unterscheidung, falls
+           künftig gewünscht; aktuell optisch identisch, die Farbe des
+           Balkens selbst (bar-fill.milestone-*-reached oben) trägt die
+           eigentliche Information. */
+        .bar-milestone { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+                         background: var(--card-background-color, #fff); opacity: 0.9; }
         .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
                        border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
         /* Each collapsed-section "... anzeigen" button gets its own block-

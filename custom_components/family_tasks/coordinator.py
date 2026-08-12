@@ -29,23 +29,32 @@ from .const import (
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MEMBER_REWARDS_OPT_IN,
+    CONF_MILESTONE_1_BONUS_POINTS,
+    CONF_MILESTONE_1_THRESHOLD_PERCENT,
+    CONF_MILESTONE_2_BONUS_POINTS,
+    CONF_MILESTONE_2_THRESHOLD_PERCENT,
+    CONF_MILESTONE_BONUS_ENABLED,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
-    CONF_WEEKLY_WINNER_BONUS_ENABLED,
-    CONF_WEEKLY_WINNER_BONUS_POINTS,
     CONFIRMATION_REJECTION_PENALTY_POINTS,
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
+    DEFAULT_MILESTONE_1_BONUS_POINTS,
+    DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
+    DEFAULT_MILESTONE_2_BONUS_POINTS,
+    DEFAULT_MILESTONE_2_THRESHOLD_PERCENT,
+    DEFAULT_MILESTONE_BONUS_ENABLED,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
-    DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
-    DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
     MANUAL_POINTS_TASK_ID,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
+    MILESTONE_BONUS_1_TASK_ID,
+    MILESTONE_BONUS_2_TASK_ID,
+    POINTS_CORRECTION_TASK_ID,
     RECURRENCE_BATTERY,
     RECURRENCE_CONFIRMATION,
     RECURRENCE_ONCE,
@@ -63,7 +72,6 @@ from .const import (
     TASK_STATUS_IDLE,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_PENDING,
-    WEEKLY_BONUS_TASK_ID,
 )
 from .storage import (
     BatteryOverrideStorageCollection,
@@ -71,19 +79,19 @@ from .storage import (
     ClaimStateStore,
     CompletionLogStore,
     MemberStorageCollection,
+    MilestoneBonusStateStore,
     RewardRedemptionStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
-    WeeklyBonusStateStore,
+    weekly_spendable_points,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# WEEKLY_BONUS_TASK_ID now lives in const.py (v0.22) so storage.py's
-# ws_list_member_weekly_completions can exclude it too, without an import
-# cycle - see the constant's docstring there. Re-exported under its original
-# name here since the rest of this module (and its docstrings) still refer to
-# it as a coordinator-local concept.
+# MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID/POINTS_CORRECTION_TASK_ID
+# live in const.py (like WEEKLY_BONUS_TASK_ID/MANUAL_POINTS_TASK_ID before
+# them) so storage.py's ws_list_member_weekly_completions can exclude them
+# too, without an import cycle - see the constants' docstrings there.
 
 
 @dataclass(slots=True)
@@ -163,6 +171,12 @@ class TaskStatusData:
     #   "Erledigt" buttons/rows it shows), see canAct in
     #   family-tasks-card.js, which separately allows any non-child admin to
     #   act on a child-assigned task regardless of this list.
+    # - v0.30: every active MEMBER_ROLE_CHILD member, for the entire time an
+    #   "Aufgabenpool" occurrence is pending or overdue (not just once
+    #   overdue) - see is_pool_task in _async_update_data. Such an occurrence
+    #   starts with assigned_member_ids always empty (no fixed assignee, no
+    #   rotation), so without this nobody would ever be eligible to claim or
+    #   complete it at all.
     eligible_member_ids: list[str] = field(default_factory=list)
     # Only populated for recurrence type "trigger" (see RECURRENCE_TRIGGER):
     # the bound sensor's current state/value and unit of measurement, so the
@@ -227,22 +241,29 @@ class FamilyTasksData:
 
     tasks: dict[str, TaskStatusData] = field(default_factory=dict)
     members: dict[str, MemberSummaryData] = field(default_factory=dict)
-    # v0.22: household-wide weekly-winner-bonus settings (see
-    # CONF_WEEKLY_WINNER_BONUS_ENABLED/...POINTS in const.py), read fresh from
-    # the config entry's options on every refresh. Exposed as sensor
-    # attributes (see FamilyTasksMemberPointsSensor in sensor.py) purely so
-    # the card can show "the weekly winner gets N bonus points" atop the
-    # Bestenliste - there is no coordinator-level entity to attach this to
-    # otherwise, so it rides along on every member's points sensor (the value
-    # is identical on all of them, the card just reads it off whichever one).
-    weekly_winner_bonus_enabled: bool = False
-    weekly_winner_bonus_points: int = 0
+    # v0.30: household-wide Meilensteinbonus settings (see
+    # CONF_MILESTONE_BONUS_ENABLED and the CONF_MILESTONE_1_*/CONF_MILESTONE_2_*
+    # constants in const.py), read fresh from the config entry's options on
+    # every refresh. Exposed as sensor attributes (see
+    # FamilyTasksMemberPointsSensor in sensor.py) purely so the card can draw
+    # the two threshold markers on each member's "Wochenfortschritt" progress
+    # bar and label them with their bonus - there is no coordinator-level
+    # entity to attach this to otherwise, so it rides along on every member's
+    # points sensor (the value is identical on all of them, the card just
+    # reads it off whichever one). Replaces the pre-v0.30 weekly-winner-bonus
+    # settings (weekly_winner_bonus_enabled/...points) entirely - see
+    # FamilyTasksCoordinator._async_process_milestone_bonus.
+    milestone_bonus_enabled: bool = False
+    milestone_1_threshold_percent: int = DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
+    milestone_1_bonus_points: int = 0
+    milestone_2_threshold_percent: int = DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
+    milestone_2_bonus_points: int = 0
     # v0.23: household-wide default rotation strategy for new tasks (see
     # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
-    # same reason weekly_winner_bonus_enabled/...points do (no dedicated
-    # entity to attach a plain options value to). The card reads this to
-    # pre-select the right "Rotationstyp" when opening the "+ Aufgabe
-    # hinzufügen" form instead of always defaulting to "Reihum".
+    # same reason the milestone-bonus settings above do (no dedicated entity
+    # to attach a plain options value to). The card reads this to pre-select
+    # the right "Rotationstyp" when opening the "+ Aufgabe hinzufügen" form
+    # instead of always defaulting to "Reihum".
     default_rotation_strategy: str = DEFAULT_ROTATION_STRATEGY
     # v0.29: household-wide weekly point goal (see
     # CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py) backing the card's
@@ -289,6 +310,51 @@ def _current_period_date(recurrence: dict, today: date) -> date:
     return today
 
 
+def _pool_period_date(recurrence: dict, today: date) -> date:
+    """Like _current_period_date, but for an "Aufgabenpool" task (see below).
+
+    Only differs for recurrence type "weekly": _current_period_date always
+    searches *backward* from today for the most recent matching weekday, so
+    e.g. a Friday-only task viewed on Monday still resolves to *last*
+    Friday's (already-resolved) occurrence - there is no way to see or act on
+    "this Friday's" occurrence before Friday actually arrives. That is fine
+    for a normally assigned/rotated task (whoever it's assigned to gets
+    notified when it's created, not by browsing ahead), but defeats the
+    purpose of an Aufgabenpool task - see the "Aufgabenpool" section in
+    _async_update_data: nobody is assigned and there is no rotation, so the
+    *only* way anyone finds out about it at all is by seeing it in that
+    section, and a child should be able to reserve one as soon as the week
+    starts, not only once its weekday is already here.
+
+    Bounded to the *current* calendar week (Monday-Sunday, the same
+    boundary start_of_week uses): prefers the most recent matching weekday
+    within this week if one has already occurred (today included), and
+    otherwise looks *forward* to the earliest still-upcoming matching
+    weekday later this same week - never reaching back into a previous week
+    the way _current_period_date's unbounded backward search would.
+    """
+    if recurrence["type"] != "weekly":
+        return _current_period_date(recurrence, today)
+
+    weekdays = recurrence.get("weekdays") or [0]
+    week_start = today - timedelta(days=today.weekday())
+
+    latest_so_far: date | None = None
+    for offset in range(today.weekday() + 1):  # Monday of this week .. today
+        candidate = week_start + timedelta(days=offset)
+        if candidate.weekday() in weekdays:
+            latest_so_far = candidate
+    if latest_so_far is not None:
+        return latest_so_far
+
+    for offset in range(today.weekday() + 1, 7):  # tomorrow .. Sunday of this week
+        candidate = week_start + timedelta(days=offset)
+        if candidate.weekday() in weekdays:
+            return candidate
+
+    return today
+
+
 def _due_at(period_start: date, due_time: str | None) -> datetime:
     """Combine a period's date with an optional time-of-day into a datetime.
 
@@ -331,7 +397,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         battery_overrides: BatteryOverrideStorageCollection,
         checklist_state: ChecklistStateStore,
         reward_redemptions: RewardRedemptionStorageCollection,
-        weekly_bonus_state: WeeklyBonusStateStore,
+        milestone_bonus_state: MilestoneBonusStateStore,
         claim_state: ClaimStateStore,
     ) -> None:
         super().__init__(
@@ -348,7 +414,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.battery_overrides = battery_overrides
         self.checklist_state = checklist_state
         self.reward_redemptions = reward_redemptions
-        self.weekly_bonus_state = weekly_bonus_state
+        self.milestone_bonus_state = milestone_bonus_state
         self.claim_state = claim_state
 
     async def _async_update_data(self) -> FamilyTasksData:
@@ -356,14 +422,20 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         today = dt_util.now().date()
 
         # Moved up from further down (was only computed just before the
-        # member-summaries loop) so _async_process_weekly_winner_bonus below
-        # can use start_of_week too.
+        # member-summaries loop) so _async_process_milestone_bonus/
+        # _async_correct_negative_balances below can use start_of_week and
+        # weekly_progress_goal_points too.
         local_now = dt_util.now()
         start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
         start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
         start_of_month = dt_util.as_utc(
             dt_util.start_of_local_day(local_now.replace(day=1))
         )
+        weekly_progress_goal_points = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+        if self.config_entry:
+            weekly_progress_goal_points = self.config_entry.options.get(
+                CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+            )
 
         # Computed once per refresh and shared by every recurrence-"battery"
         # task below (see RECURRENCE_BATTERY in const.py) - which batteries
@@ -383,9 +455,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self._async_raise_battery_alerts(low_batteries)
 
         # Also raised before the main loop, same reasoning: a bonus awarded
-        # this refresh should already be reflected in this same refresh's
-        # member_summaries below, not just after a second refresh.
-        await self._async_process_weekly_winner_bonus(start_of_week)
+        # (or a negative-balance correction applied) this refresh should
+        # already be reflected in this same refresh's member_summaries below,
+        # not just after a second refresh.
+        await self._async_correct_negative_balances(weekly_progress_goal_points)
+        await self._async_process_milestone_bonus(start_of_week, weekly_progress_goal_points)
 
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
@@ -421,6 +495,20 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             member_ids = rotation.get("member_ids") or []
             assigned_member_id = self._assigned_member_id(rotation, member_ids)
             assigned_member_ids = self._assigned_member_ids(rotation, member_ids)
+            # v0.30: "Aufgabenpool" - a task with no fixed assignee(s) *and*
+            # no rotation at all (member_ids empty either way, regardless of
+            # "strategy" - see ROTATION_SCHEMA in storage.py). Nobody is
+            # responsible for it by default; instead any active child may
+            # reserve ("Annehmen") it via the existing claim mechanism - see
+            # the eligible_member_ids/_pool_period_date handling below and
+            # the card's "Aufgabenpool" section (family-tasks-card.js), which
+            # shows these regardless of the normal due/filter settings.
+            # Excludes an auto-generated parent-confirmation task (see
+            # RECURRENCE_CONFIRMATION in const.py) even in the degenerate
+            # case of a household with no active parent at all (member_ids
+            # would then also be empty there) - that task is never something
+            # a child should see offered up for "Annehmen".
+            is_pool_task = not member_ids and not task.get("confirms")
 
             trigger_sensor_value: str | None = None
             trigger_sensor_unit: str | None = None
@@ -462,7 +550,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 period_key = open_occurrence["period_key"]
                 due_at = dt_util.parse_datetime(open_occurrence["triggered_at"])
             else:
-                period_start = _current_period_date(recurrence, today)
+                period_start = (
+                    _pool_period_date(recurrence, today)
+                    if is_pool_task
+                    else _current_period_date(recurrence, today)
+                )
                 period_key = period_start.isoformat()
                 due_at = _due_at(period_start, task.get("due_time"))
 
@@ -498,6 +590,23 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             if status == TASK_STATUS_OVERDUE and any(
                 self._member_role(mid) == MEMBER_ROLE_CHILD for mid in assigned_member_ids
             ):
+                for other_id, other_member in self.members.data.items():
+                    if (
+                        other_id not in eligible_member_ids
+                        and other_member.get("active", True)
+                        and self._member_role(other_id) == MEMBER_ROLE_CHILD
+                    ):
+                        eligible_member_ids.append(other_id)
+
+            # v0.30: an Aufgabenpool task (is_pool_task, see above) starts
+            # with nobody assigned at all - assigned_member_ids is always
+            # empty, so the overdue-only expansion just above never triggers
+            # for it. Every active child is eligible for as long as it's
+            # actionable (pending or overdue), not just once overdue -
+            # letting a child reserve ("Annehmen") it from the very start of
+            # the week, before it's even due, is the entire point of the
+            # pool - see _pool_period_date.
+            if is_pool_task and status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE):
                 for other_id, other_member in self.members.data.items():
                     if (
                         other_id not in eligible_member_ids
@@ -618,12 +727,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     redeemed_member_id, 0
                 ) + redemption.get("points_cost", 0)
 
-        weekly_progress_goal_points = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
-        if self.config_entry:
-            weekly_progress_goal_points = self.config_entry.options.get(
-                CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
-            )
-
         member_summaries: dict[str, MemberSummaryData] = {}
         for member_id, member in self.members.data.items():
             points_total = self.completions.points_since(
@@ -645,36 +748,51 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 screen_time_grant_active=member_id not in screen_time_paused_members,
             )
 
-        weekly_winner_bonus_enabled = False
-        weekly_winner_bonus_points = 0
+        milestone_bonus_enabled = False
+        milestone_1_threshold_percent = DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
+        milestone_1_bonus_points = DEFAULT_MILESTONE_1_BONUS_POINTS
+        milestone_2_threshold_percent = DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
+        milestone_2_bonus_points = DEFAULT_MILESTONE_2_BONUS_POINTS
         # Household-wide default rotation strategy (see
         # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - read fresh from the
-        # config entry's options every refresh, same pattern as the weekly-
-        # winner-bonus settings right below. Previously this option was only
-        # ever written by the options flow and never actually read anywhere,
-        # so the card's "+ Aufgabe hinzufügen" form always pre-selected
-        # "Reihum" regardless of what a household had configured here - see
-        # default_rotation_strategy below and FamilyTasksMemberPointsSensor in
-        # sensor.py for how it now reaches the card.
+        # config entry's options every refresh, same pattern as the
+        # Meilensteinbonus settings right below. Previously this option was
+        # only ever written by the options flow and never actually read
+        # anywhere, so the card's "+ Aufgabe hinzufügen" form always
+        # pre-selected "Reihum" regardless of what a household had configured
+        # here - see default_rotation_strategy below and
+        # FamilyTasksMemberPointsSensor in sensor.py for how it now reaches
+        # the card.
         default_rotation_strategy = DEFAULT_ROTATION_STRATEGY
         if self.config_entry:
-            weekly_winner_bonus_enabled = bool(
-                self.config_entry.options.get(
-                    CONF_WEEKLY_WINNER_BONUS_ENABLED, DEFAULT_WEEKLY_WINNER_BONUS_ENABLED
-                )
+            options = self.config_entry.options
+            milestone_bonus_enabled = bool(
+                options.get(CONF_MILESTONE_BONUS_ENABLED, DEFAULT_MILESTONE_BONUS_ENABLED)
             )
-            weekly_winner_bonus_points = self.config_entry.options.get(
-                CONF_WEEKLY_WINNER_BONUS_POINTS, DEFAULT_WEEKLY_WINNER_BONUS_POINTS
+            milestone_1_threshold_percent = options.get(
+                CONF_MILESTONE_1_THRESHOLD_PERCENT, DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
             )
-            default_rotation_strategy = self.config_entry.options.get(
+            milestone_1_bonus_points = options.get(
+                CONF_MILESTONE_1_BONUS_POINTS, DEFAULT_MILESTONE_1_BONUS_POINTS
+            )
+            milestone_2_threshold_percent = options.get(
+                CONF_MILESTONE_2_THRESHOLD_PERCENT, DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
+            )
+            milestone_2_bonus_points = options.get(
+                CONF_MILESTONE_2_BONUS_POINTS, DEFAULT_MILESTONE_2_BONUS_POINTS
+            )
+            default_rotation_strategy = options.get(
                 CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
             )
 
         return FamilyTasksData(
             tasks=task_statuses,
             members=member_summaries,
-            weekly_winner_bonus_enabled=weekly_winner_bonus_enabled,
-            weekly_winner_bonus_points=weekly_winner_bonus_points,
+            milestone_bonus_enabled=milestone_bonus_enabled,
+            milestone_1_threshold_percent=milestone_1_threshold_percent,
+            milestone_1_bonus_points=milestone_1_bonus_points,
+            milestone_2_threshold_percent=milestone_2_threshold_percent,
+            milestone_2_bonus_points=milestone_2_bonus_points,
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
         )
@@ -685,11 +803,22 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         For trigger-based (and confirmation) tasks this is ``None`` while
         idle (no sensor event / confirmation request has opened an occurrence
         yet); for calendar-based tasks there is always a current period.
+
+        v0.30: an Aufgabenpool task (no fixed assignee(s), no rotation - see
+        is_pool_task in _async_update_data) uses _pool_period_date instead of
+        _current_period_date, exactly like _async_update_data itself does -
+        this must stay in lockstep with that computation, since every
+        claim/complete/skip/release/toggle-subtask call site below resolves
+        "the current occurrence" through this method. Using the wrong one
+        here would let a claim/completion be recorded against a different
+        period_key than the one the last refresh actually showed the card.
         """
         if task["recurrence"]["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
             open_occurrence = self.trigger_state.get(task_id)
             return open_occurrence["period_key"] if open_occurrence else None
-        return _current_period_date(task["recurrence"], dt_util.now().date()).isoformat()
+        is_pool_task = not (task["rotation"].get("member_ids") or [])
+        period_date_fn = _pool_period_date if is_pool_task else _current_period_date
+        return period_date_fn(task["recurrence"], dt_util.now().date()).isoformat()
 
     async def async_complete_task(
         self, task_id: str, member_id: str | None = None
@@ -1195,35 +1324,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
 
-    def _points_earned_in_range(
-        self, member_id: str, start: datetime, end: datetime
-    ) -> int:
-        """Sum a member's awarded points within [start, end), for ranking purposes.
-
-        Like CompletionLogStore.points_since, but bounded on both ends and
-        deliberately excluding WEEKLY_BONUS_TASK_ID entries - a previous
-        weekly-winner bonus is real, spendable points (see
-        MemberSummaryData.points_total/points_available, which do include
-        it), but must not itself count towards *this* determination, per
-        CONF_WEEKLY_WINNER_BONUS_ENABLED in const.py. Excluding by task_id
-        rather than by date range is deliberate: a bonus entry's
-        "completed_at" timestamp falls at the moment it was awarded (this
-        week), even though period_key names the week it was awarded *for*
-        (last week) - filtering on task_id sidesteps that mismatch entirely.
-        """
-        total = 0
-        for entry in self.completions.entries:
-            if (
-                entry["completed_by_member_id"] != member_id
-                or entry["skipped"]
-                or entry["task_id"] == WEEKLY_BONUS_TASK_ID
-            ):
-                continue
-            completed_at = dt_util.parse_datetime(entry["completed_at"])
-            if start <= completed_at < end:
-                total += entry["points_awarded"]
-        return total
-
     def _weekly_spendable_points(self, member_id: str, goal_points: int) -> int:
         """Sum a member's lifetime *spendable* points under the v0.29 weekly-goal rule.
 
@@ -1243,96 +1343,165 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         so changing the goal in Options immediately re-derives every past
         week's contribution under the new value, rather than only affecting
         weeks going forward.
+
+        v0.30: the actual computation now lives in storage.weekly_spendable_points
+        - storage.py's _available_points (the server-side redemption check in
+        ws_redeem_reward) needs the exact same rule and used to have its own,
+        stale copy that never got updated for it, which is what let a
+        redemption push a member's points_available negative. This method is
+        kept as a thin wrapper so every existing call site here is unaffected.
         """
-        if goal_points <= 0:
-            return self.completions.points_since(
-                member_id, datetime.min.replace(tzinfo=dt_util.UTC)
-            )
+        return weekly_spendable_points(self.completions, member_id, goal_points)
 
-        weekly_totals: dict[date, int] = {}
-        for entry in self.completions.entries:
-            if entry["completed_by_member_id"] != member_id or entry["skipped"]:
-                continue
-            completed_at = dt_util.parse_datetime(entry["completed_at"])
-            if completed_at is None:
-                continue
-            local_at = dt_util.as_local(completed_at)
-            day_start_utc = dt_util.as_utc(dt_util.start_of_local_day(local_at))
-            week_start = (day_start_utc - timedelta(days=day_start_utc.weekday())).date()
-            weekly_totals[week_start] = (
-                weekly_totals.get(week_start, 0) + entry["points_awarded"]
-            )
+    async def _async_process_milestone_bonus(
+        self, start_of_week: datetime, goal_points: int
+    ) -> None:
+        """Award "Meilensteinbonus" points live, the moment a member crosses a threshold.
 
-        return sum(max(0, total - goal_points) for total in weekly_totals.values())
+        v0.30, replaces the old weekly-winner bonus entirely - see
+        CONF_MILESTONE_BONUS_ENABLED and the CONF_MILESTONE_1_*/
+        CONF_MILESTONE_2_* constants in const.py. Off unless a parent turns
+        it on. Also a no-op if ``goal_points`` (CONF_WEEKLY_PROGRESS_GOAL_POINTS)
+        is 0 - both thresholds are defined as a percentage *of* the weekly
+        goal, so without a goal there is nothing for them to be a percentage
+        of.
 
-    async def _async_process_weekly_winner_bonus(self, start_of_week: datetime) -> None:
-        """Award bonus points to the previous week's point leader(s), once.
-
-        See CONF_WEEKLY_WINNER_BONUS_ENABLED/CONF_WEEKLY_WINNER_BONUS_POINTS
-        in const.py: off unless a parent turns it on and sets a bonus > 0.
-        Runs on every refresh but only actually does anything the first time
-        a refresh happens after a calendar week ends (Monday 00:00 local,
-        i.e. "mit Ablauf des Sonntags") - self.weekly_bonus_state tracks the
-        last week already processed so this never double-awards, and never
-        chains through more than the single most-recently-completed week
-        even if the feature was off (or Home Assistant was down) for a
-        while - only ever "the week that just ended", never older ones.
+        Unlike the old bonus (a single household-wide "winner" determined
+        retroactively once a week ended), every participating, active member
+        who reaches threshold 1 or 2 *during* the current week is credited
+        that threshold's bonus immediately, the first refresh after they
+        cross it - so it shows up on their "Wochenfortschritt" progress bar
+        right away rather than waiting for Monday. self.milestone_bonus_state
+        tracks, per member and per threshold, whether this week's crossing
+        has already been awarded, so a refresh that runs again minutes later
+        (nothing having changed) never double-awards; that tracking resets
+        itself automatically once the calendar week rolls over - see
+        MilestoneBonusStateStore in storage.py.
 
         Eligibility mirrors the leaderboard: only members who participate in
-        the reward system (CONF_MEMBER_REWARDS_OPT_IN) and are active. Ties
-        split the bonus evenly (floor division) rather than each tied member
-        getting the full amount; nobody wins with 0 points. The awarded
-        points are logged via the normal completion log (so they show up in
-        points_total/points_week/points_available/history like any other
-        points) under the internal WEEKLY_BONUS_TASK_ID sentinel, which
-        _points_earned_in_range excludes so this bonus never counts towards
-        determining a *future* week's winner.
+        the reward system (CONF_MEMBER_REWARDS_OPT_IN) and are active. The
+        awarded points are logged via the normal completion log (so they
+        show up in points_total/points_week/points_available/history like
+        any other points) under the internal MILESTONE_BONUS_1_TASK_ID/
+        MILESTONE_BONUS_2_TASK_ID sentinels.
         """
-        if not self.config_entry:
+        if not self.config_entry or goal_points <= 0:
             return
         options = self.config_entry.options
-        if not options.get(
-            CONF_WEEKLY_WINNER_BONUS_ENABLED, DEFAULT_WEEKLY_WINNER_BONUS_ENABLED
-        ):
+        if not options.get(CONF_MILESTONE_BONUS_ENABLED, DEFAULT_MILESTONE_BONUS_ENABLED):
             return
-        bonus_points = options.get(
-            CONF_WEEKLY_WINNER_BONUS_POINTS, DEFAULT_WEEKLY_WINNER_BONUS_POINTS
+
+        period_key = start_of_week.date().isoformat()
+        thresholds = (
+            (
+                1,
+                MILESTONE_BONUS_1_TASK_ID,
+                options.get(
+                    CONF_MILESTONE_1_THRESHOLD_PERCENT, DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
+                ),
+                options.get(CONF_MILESTONE_1_BONUS_POINTS, DEFAULT_MILESTONE_1_BONUS_POINTS),
+            ),
+            (
+                2,
+                MILESTONE_BONUS_2_TASK_ID,
+                options.get(
+                    CONF_MILESTONE_2_THRESHOLD_PERCENT, DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
+                ),
+                options.get(CONF_MILESTONE_2_BONUS_POINTS, DEFAULT_MILESTONE_2_BONUS_POINTS),
+            ),
         )
-        if bonus_points <= 0:
-            return
 
-        previous_week_start = start_of_week - timedelta(days=7)
-        period_key = previous_week_start.date().isoformat()
-        if self.weekly_bonus_state.last_awarded_week() == period_key:
-            return
-
-        candidates = {
-            member_id: self._points_earned_in_range(
-                member_id, previous_week_start, start_of_week
-            )
-            for member_id, member in self.members.data.items()
-            if member.get(CONF_MEMBER_REWARDS_OPT_IN, True) and member.get("active", True)
-        }
-        max_points = max(candidates.values(), default=0)
-        if max_points > 0:
-            winners = [m for m, p in candidates.items() if p == max_points]
-            share = bonus_points // len(winners)
-            if share > 0:
-                for winner_id in winners:
-                    await self.completions.async_add_entry(
-                        task_id=WEEKLY_BONUS_TASK_ID,
-                        period_key=period_key,
-                        member_id=winner_id,
-                        points_awarded=share,
-                    )
+        for member_id, member in self.members.data.items():
+            if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or not member.get(
+                "active", True
+            ):
+                continue
+            points_week = self.completions.points_since(member_id, start_of_week)
+            for threshold_index, task_id, threshold_percent, bonus_points in thresholds:
+                if threshold_percent <= 0 or bonus_points <= 0:
+                    continue
+                threshold_points = round(goal_points * threshold_percent / 100)
+                if points_week < threshold_points:
+                    continue
+                if await self.milestone_bonus_state.async_has_awarded(
+                    period_key, threshold_index, member_id
+                ):
+                    continue
+                await self.completions.async_add_entry(
+                    task_id=task_id,
+                    period_key=period_key,
+                    member_id=member_id,
+                    points_awarded=bonus_points,
+                    task_name=f"Meilensteinbonus: {threshold_percent}% des Wochenziels erreicht",
+                )
+                await self.milestone_bonus_state.async_mark_awarded(
+                    period_key, threshold_index, member_id
+                )
                 _LOGGER.debug(
-                    "Awarded %s weekly-winner bonus points each to %s for week %s",
-                    share,
-                    winners,
+                    "Awarded %s Meilensteinbonus point(s) to %s for threshold %s (%s%%) in week %s",
+                    bonus_points,
+                    member_id,
+                    threshold_index,
+                    threshold_percent,
                     period_key,
                 )
 
-        await self.weekly_bonus_state.async_set_last_awarded_week(period_key)
+    async def _async_correct_negative_balances(self, goal_points: int) -> None:
+        """One-time, per-member top-up for balances left negative by a v0.29/v0.30 bug.
+
+        Before v0.30, storage._available_points (the server-side check in
+        ws_redeem_reward that a redemption doesn't exceed a member's
+        balance) used a stale copy of the spendable-points rule that never
+        picked up the v0.29 weekly-goal restriction applied everywhere else
+        (see storage.weekly_spendable_points) - so a redemption could be
+        accepted for more than a member's true spendable balance, which then
+        showed up as a negative MemberSummaryData.points_available. That
+        validation is fixed now (both call sites share one implementation),
+        so this can no longer happen for a *new* redemption - but a
+        household that already had a member go negative before upgrading
+        needs that historical shortfall corrected, not just prevented going
+        forward.
+
+        Runs every refresh, but only ever tops up a given member once: a
+        member who already has a POINTS_CORRECTION_TASK_ID entry is skipped
+        outright, regardless of their current balance - this is a one-time
+        historical correction, not a standing "never let this go negative"
+        rule that would risk silently masking some future, different bug the
+        same way. The credited amount is exactly the shortfall (redeemed
+        points minus what was actually spendable), which brings
+        points_available to precisely 0, never higher.
+        """
+        for member_id in self.members.data:
+            already_corrected = any(
+                entry["completed_by_member_id"] == member_id
+                and entry["task_id"] == POINTS_CORRECTION_TASK_ID
+                for entry in self.completions.entries
+            )
+            if already_corrected:
+                continue
+
+            spendable = self._weekly_spendable_points(member_id, goal_points)
+            redeemed = sum(
+                redemption.get("points_cost", 0)
+                for redemption in self.reward_redemptions.data.values()
+                if redemption.get("member_id") == member_id
+            )
+            deficit = redeemed - spendable
+            if deficit <= 0:
+                continue
+
+            await self.completions.async_add_entry(
+                task_id=POINTS_CORRECTION_TASK_ID,
+                period_key=dt_util.utcnow().date().isoformat(),
+                member_id=member_id,
+                points_awarded=deficit,
+                task_name="Korrektur: rückwirkender Ausgleich (v0.30)",
+            )
+            _LOGGER.info(
+                "Corrected negative points_available for member %s: credited %s point(s)",
+                member_id,
+                deficit,
+            )
 
     async def _async_admin_member_ids(self) -> list[str]:
         """Family members linked (via person_entity_id) to a HA admin account.

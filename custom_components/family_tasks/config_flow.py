@@ -26,18 +26,24 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_DEFAULT_ROTATION_STRATEGY,
+    CONF_MILESTONE_1_BONUS_POINTS,
+    CONF_MILESTONE_1_THRESHOLD_PERCENT,
+    CONF_MILESTONE_2_BONUS_POINTS,
+    CONF_MILESTONE_2_THRESHOLD_PERCENT,
+    CONF_MILESTONE_BONUS_ENABLED,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
-    CONF_WEEKLY_WINNER_BONUS_ENABLED,
-    CONF_WEEKLY_WINNER_BONUS_POINTS,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
+    DEFAULT_MILESTONE_1_BONUS_POINTS,
+    DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
+    DEFAULT_MILESTONE_2_BONUS_POINTS,
+    DEFAULT_MILESTONE_2_THRESHOLD_PERCENT,
+    DEFAULT_MILESTONE_BONUS_ENABLED,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
-    DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
-    DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
     DOMAIN,
     ROTATION_STRATEGIES,
 )
@@ -90,15 +96,31 @@ class FamilyTasksOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage the options."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            # v0.30: threshold 2 must exceed threshold 1 - the Meilensteinbonus
+            # awards each threshold independently as points_week crosses it
+            # (see FamilyTasksCoordinator._async_process_milestone_bonus), so
+            # a threshold 2 at or below threshold 1 would make it either
+            # unreachable in a meaningful order or award both simultaneously
+            # every time, neither of which matches "two distinct milestones".
+            if (
+                user_input[CONF_MILESTONE_2_THRESHOLD_PERCENT]
+                <= user_input[CONF_MILESTONE_1_THRESHOLD_PERCENT]
+            ):
+                errors["base"] = "milestone_threshold_order"
+            else:
+                return self.async_create_entry(data=user_input)
 
-        options = self.config_entry.options
+        # On a validation error, re-show the form pre-filled with what the
+        # user just submitted (not the previously saved options) so a typo'd
+        # field doesn't reset every other field back to its old value too.
+        current = user_input if user_input is not None else self.config_entry.options
         schema = vol.Schema(
             {
                 vol.Optional(
                     CONF_OVERDUE_AFTER_MINUTES,
-                    default=options.get(
+                    default=current.get(
                         CONF_OVERDUE_AFTER_MINUTES, DEFAULT_OVERDUE_AFTER_MINUTES
                     ),
                 ): NumberSelector(
@@ -106,7 +128,7 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(
                     CONF_DEFAULT_ROTATION_STRATEGY,
-                    default=options.get(
+                    default=current.get(
                         CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
                     ),
                 ): SelectSelector(
@@ -117,7 +139,7 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 # battery-monitoring section.
                 vol.Optional(
                     CONF_BATTERY_WARNING_THRESHOLD,
-                    default=options.get(
+                    default=current.get(
                         CONF_BATTERY_WARNING_THRESHOLD, DEFAULT_BATTERY_WARNING_THRESHOLD
                     ),
                 ): NumberSelector(
@@ -130,7 +152,7 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 # reward is worth - see ws_redeem_reward in storage.py.
                 vol.Optional(
                     CONF_SCREEN_TIME_MINUTES_PER_POINT,
-                    default=options.get(
+                    default=current.get(
                         CONF_SCREEN_TIME_MINUTES_PER_POINT,
                         DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
                     ),
@@ -138,25 +160,6 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     NumberSelectorConfig(
                         min=1, max=120, mode=NumberSelectorMode.BOX, unit_of_measurement="min"
                     )
-                ),
-                # v0.14: whether/how many bonus points the current week's
-                # point leader(s) get, credited once the week ends - see
-                # FamilyTasksCoordinator._async_process_weekly_winner_bonus.
-                vol.Optional(
-                    CONF_WEEKLY_WINNER_BONUS_ENABLED,
-                    default=options.get(
-                        CONF_WEEKLY_WINNER_BONUS_ENABLED,
-                        DEFAULT_WEEKLY_WINNER_BONUS_ENABLED,
-                    ),
-                ): BooleanSelector(),
-                vol.Optional(
-                    CONF_WEEKLY_WINNER_BONUS_POINTS,
-                    default=options.get(
-                        CONF_WEEKLY_WINNER_BONUS_POINTS,
-                        DEFAULT_WEEKLY_WINNER_BONUS_POINTS,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
                 # v0.29: weekly point goal backing each child's
                 # "Wochenfortschritt" progress bar - points earned beyond
@@ -166,13 +169,64 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 # immediately spendable as before this option existed.
                 vol.Optional(
                     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
-                    default=options.get(
+                    default=current.get(
                         CONF_WEEKLY_PROGRESS_GOAL_POINTS,
                         DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
+                # v0.30: "Meilensteinbonus" - replaces the old weekly-winner
+                # bonus. Whether/how many bonus points a member earns, live,
+                # the moment they cross each of two progress thresholds
+                # (percentages of the weekly goal just above) - see
+                # FamilyTasksCoordinator._async_process_milestone_bonus. Only
+                # takes effect if the weekly goal above is > 0, since both
+                # thresholds are defined as a percentage of it.
+                vol.Optional(
+                    CONF_MILESTONE_BONUS_ENABLED,
+                    default=current.get(
+                        CONF_MILESTONE_BONUS_ENABLED, DEFAULT_MILESTONE_BONUS_ENABLED
+                    ),
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_MILESTONE_1_THRESHOLD_PERCENT,
+                    default=current.get(
+                        CONF_MILESTONE_1_THRESHOLD_PERCENT,
+                        DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1, max=1000, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
+                    )
+                ),
+                vol.Optional(
+                    CONF_MILESTONE_1_BONUS_POINTS,
+                    default=current.get(
+                        CONF_MILESTONE_1_BONUS_POINTS, DEFAULT_MILESTONE_1_BONUS_POINTS
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_MILESTONE_2_THRESHOLD_PERCENT,
+                    default=current.get(
+                        CONF_MILESTONE_2_THRESHOLD_PERCENT,
+                        DEFAULT_MILESTONE_2_THRESHOLD_PERCENT,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1, max=1000, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
+                    )
+                ),
+                vol.Optional(
+                    CONF_MILESTONE_2_BONUS_POINTS,
+                    default=current.get(
+                        CONF_MILESTONE_2_BONUS_POINTS, DEFAULT_MILESTONE_2_BONUS_POINTS
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

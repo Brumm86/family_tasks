@@ -175,20 +175,25 @@ class FamilyTasksMemberPointsSensor(
             # the leaderboard card's balance display and reward-affordability
             # check.
             "points_available": member.points_available,
-            # v0.22: household-wide weekly-winner-bonus settings, identical on
+            # v0.30: household-wide Meilensteinbonus settings, identical on
             # every member's points sensor - see
-            # FamilyTasksData.weekly_winner_bonus_enabled/...points in
-            # coordinator.py for why this rides along here instead of living
-            # on a dedicated entity. Drives the Bestenliste's "Wochensieger-
-            # Bonus: N Punkte" line.
-            "weekly_winner_bonus_enabled": self.coordinator.data.weekly_winner_bonus_enabled,
-            "weekly_winner_bonus_points": self.coordinator.data.weekly_winner_bonus_points,
+            # FamilyTasksData.milestone_bonus_enabled/... in coordinator.py
+            # for why this rides along here instead of living on a dedicated
+            # entity. Drives the two threshold markers (and their bonus
+            # labels) the card draws on each "Wochenfortschritt" progress
+            # bar. Replaces the pre-v0.30 weekly_winner_bonus_enabled/...points
+            # attributes entirely.
+            "milestone_bonus_enabled": self.coordinator.data.milestone_bonus_enabled,
+            "milestone_1_threshold_percent": self.coordinator.data.milestone_1_threshold_percent,
+            "milestone_1_bonus_points": self.coordinator.data.milestone_1_bonus_points,
+            "milestone_2_threshold_percent": self.coordinator.data.milestone_2_threshold_percent,
+            "milestone_2_bonus_points": self.coordinator.data.milestone_2_bonus_points,
             # v0.23: household-wide default rotation strategy (see
             # CONF_DEFAULT_ROTATION_STRATEGY in const.py), identical on every
             # member's points sensor - same "rides along, no dedicated
-            # entity" reasoning as the weekly-winner-bonus attributes above.
-            # The card reads this to pre-select "Rotationstyp" when opening
-            # the "+ Aufgabe hinzufügen" form.
+            # entity" reasoning as the Meilensteinbonus attributes above. The
+            # card reads this to pre-select "Rotationstyp" when opening the
+            # "+ Aufgabe hinzufügen" form.
             "default_rotation_strategy": self.coordinator.data.default_rotation_strategy,
             # v0.29: household-wide weekly point goal (see
             # CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py), identical on

@@ -6,12 +6,6 @@
   CONF_SCREEN_TIME_MINUTES_PER_POINT (see ws_redeem_reward in storage.py).
   Existing rewards that already had a fixed screen_time_minutes are migrated
   to this flag on load (see _async_migrate_screen_time_investable).
-- Weekly-winner bonus (CONF_WEEKLY_WINNER_BONUS_ENABLED/
-  CONF_WEEKLY_WINNER_BONUS_POINTS): the previous week's point leader(s) get a
-  configurable bonus credited once the week rolls over, split on a tie, and
-  excluded from the *next* week's winner determination (see
-  FamilyTasksCoordinator._async_process_weekly_winner_bonus in
-  coordinator.py).
 - The new "mandatory" task kind (TASK_KIND_MANDATORY, "Pflichtaufgabe"): an
   overdue occurrence pauses the per-member screen_time_grant_active flag
   (MemberSummaryData.screen_time_grant_active / the new binary_sensor.py
@@ -31,8 +25,6 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.family_tasks.const import (
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
-    CONF_WEEKLY_WINNER_BONUS_ENABLED,
-    CONF_WEEKLY_WINNER_BONUS_POINTS,
     EVENT_TASK_ASSIGNED,
     TASK_STATUS_OVERDUE,
 )
@@ -204,125 +196,6 @@ async def test_existing_screen_time_reward_is_migrated_to_investable(hass, init_
     await _async_migrate_screen_time_investable(runtime.rewards)
 
     assert runtime.rewards.data[reward["id"]]["screen_time_investable"] is True
-
-
-# --- Weekly-winner bonus -----------------------------------------------------
-
-
-def _start_of_week_utc(offset_weeks: int = 0):
-    """Mirror FamilyTasksCoordinator._async_update_data's start_of_week math.
-
-    Deriving the reference Monday from the exact same
-    now -> start_of_local_day -> as_utc -> subtract-weekday formula the
-    coordinator itself uses (rather than approximating it independently)
-    means these tests stay correct regardless of the test environment's
-    configured timezone.
-    """
-    local_now = dt_util.now()
-    start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
-    start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
-    return start_of_week + timedelta(weeks=offset_weeks)
-
-
-async def _refresh_at_utc(runtime, utc_dt) -> None:
-    local_dt = dt_util.as_local(utc_dt)
-    with (
-        patch.object(dt_util, "now", return_value=local_dt),
-        patch.object(dt_util, "utcnow", return_value=utc_dt),
-    ):
-        await runtime.coordinator.async_refresh()
-
-
-async def _complete_at_utc(runtime, task_id, utc_dt) -> None:
-    local_dt = dt_util.as_local(utc_dt)
-    with (
-        patch.object(dt_util, "now", return_value=local_dt),
-        patch.object(dt_util, "utcnow", return_value=utc_dt),
-    ):
-        await runtime.coordinator.async_complete_task(task_id)
-
-
-async def test_weekly_winner_bonus_awarded_and_excluded_from_next_week(
-    hass, init_integration
-) -> None:
-    """The higher scorer of week W0 gets the bonus once week W0 ends; that
-    bonus must not itself count when determining week W1's winner."""
-    runtime = init_integration.runtime_data
-    hass.config_entries.async_update_entry(
-        init_integration,
-        options={CONF_WEEKLY_WINNER_BONUS_ENABLED: True, CONF_WEEKLY_WINNER_BONUS_POINTS: 10},
-    )
-    anna = await runtime.members.async_create_item({"name": "Anna"})
-    ben = await runtime.members.async_create_item({"name": "Ben"})
-    task_anna = await _add_task(runtime, member_ids=[anna["id"]], points=10)
-    task_ben = await _add_task(runtime, member_ids=[ben["id"]], points=5)
-
-    monday_b = _start_of_week_utc(0)  # start of "this" week, W1
-    monday_a = _start_of_week_utc(-1)  # W0, the week that just ended
-
-    # W0: Anna earns more than Ben.
-    await _complete_at_utc(runtime, task_anna["id"], monday_a + timedelta(days=2, hours=10))
-    await _complete_at_utc(runtime, task_ben["id"], monday_a + timedelta(days=2, hours=11))
-
-    # Refresh just after W1 begins - awards the W0 bonus to Anna.
-    await _refresh_at_utc(runtime, monday_b + timedelta(hours=1))
-
-    assert runtime.coordinator.data.members[anna["id"]].points_total == 10 + 10
-    assert runtime.coordinator.data.members[ben["id"]].points_total == 5
-    assert runtime.weekly_bonus_state.last_awarded_week() == monday_a.date().isoformat()
-
-    # W1: Ben now earns real points; Anna earns none, but her W0 bonus
-    # completion entry's timestamp falls inside W1 - it must not make her
-    # look like the W1 leader.
-    task_ben_2 = await _add_task(runtime, member_ids=[ben["id"]], points=6, name="Zweite Aufgabe")
-    await _complete_at_utc(runtime, task_ben_2["id"], monday_b + timedelta(days=2, hours=10))
-
-    monday_c = monday_b + timedelta(days=7)
-    await _refresh_at_utc(runtime, monday_c + timedelta(hours=1))
-
-    assert runtime.weekly_bonus_state.last_awarded_week() == monday_b.date().isoformat()
-    # Ben wins W1 (6 real points beats Anna's 0 real points that week).
-    assert runtime.coordinator.data.members[ben["id"]].points_total == 5 + 6 + 10
-    # Anna gets nothing further - still exactly her W0 total.
-    assert runtime.coordinator.data.members[anna["id"]].points_total == 10 + 10
-
-
-async def test_weekly_winner_bonus_split_on_tie(hass, init_integration) -> None:
-    runtime = init_integration.runtime_data
-    hass.config_entries.async_update_entry(
-        init_integration,
-        options={CONF_WEEKLY_WINNER_BONUS_ENABLED: True, CONF_WEEKLY_WINNER_BONUS_POINTS: 10},
-    )
-    anna = await runtime.members.async_create_item({"name": "Anna"})
-    ben = await runtime.members.async_create_item({"name": "Ben"})
-    task_anna = await _add_task(runtime, member_ids=[anna["id"]], points=7)
-    task_ben = await _add_task(runtime, member_ids=[ben["id"]], points=7)
-
-    monday_b = _start_of_week_utc(0)
-    monday_a = _start_of_week_utc(-1)
-
-    await _complete_at_utc(runtime, task_anna["id"], monday_a + timedelta(days=1))
-    await _complete_at_utc(runtime, task_ben["id"], monday_a + timedelta(days=1, hours=1))
-
-    await _refresh_at_utc(runtime, monday_b + timedelta(hours=1))
-
-    # 10 bonus points split between two tied winners -> 5 each.
-    assert runtime.coordinator.data.members[anna["id"]].points_total == 7 + 5
-    assert runtime.coordinator.data.members[ben["id"]].points_total == 7 + 5
-
-
-async def test_weekly_winner_bonus_disabled_by_default(hass, init_integration) -> None:
-    runtime = init_integration.runtime_data
-    anna = await runtime.members.async_create_item({"name": "Anna"})
-    task_anna = await _add_task(runtime, member_ids=[anna["id"]], points=10)
-
-    monday_b = _start_of_week_utc(0)
-    monday_a = _start_of_week_utc(-1)
-    await _complete_at_utc(runtime, task_anna["id"], monday_a + timedelta(days=1))
-    await _refresh_at_utc(runtime, monday_b + timedelta(hours=1))
-
-    assert runtime.coordinator.data.members[anna["id"]].points_total == 10
-    assert runtime.weekly_bonus_state.last_awarded_week() is None
 
 
 # --- Mandatory tasks / screen_time_grant_active -----------------------------

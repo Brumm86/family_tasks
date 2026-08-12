@@ -44,21 +44,21 @@ from .storage import (
     CompletionLogStore,
     FavoriteStorageCollection,
     MemberStorageCollection,
+    MilestoneBonusStateStore,
     RewardRedemptionStorageCollection,
     RewardStorageCollection,
     TaskStorageCollection,
     TriggerStateStore,
-    WeeklyBonusStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_claim_state_store,
     async_create_favorites_collection,
     async_create_members_collection,
+    async_create_milestone_bonus_state_store,
     async_create_reward_redemptions_collection,
     async_create_rewards_collection,
     async_create_tasks_collection,
     async_create_trigger_state_store,
-    async_create_weekly_bonus_state_store,
     async_member_id_for_context,
     async_setup_websocket_api,
 )
@@ -106,7 +106,7 @@ class FamilyTasksRuntimeData:
     checklist_state: ChecklistStateStore
     rewards: RewardStorageCollection
     reward_redemptions: RewardRedemptionStorageCollection
-    weekly_bonus_state: WeeklyBonusStateStore
+    milestone_bonus_state: MilestoneBonusStateStore
     favorites: FavoriteStorageCollection
     claim_state: ClaimStateStore
 
@@ -146,7 +146,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
 
     trigger_state = await async_create_trigger_state_store(hass)
     checklist_state = await async_create_checklist_state_store(hass)
-    weekly_bonus_state = await async_create_weekly_bonus_state_store(hass)
+    milestone_bonus_state = await async_create_milestone_bonus_state_store(hass)
     claim_state = await async_create_claim_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
@@ -159,7 +159,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         battery_overrides,
         checklist_state,
         reward_redemptions,
-        weekly_bonus_state,
+        milestone_bonus_state,
         claim_state,
     )
     await coordinator.async_config_entry_first_refresh()
@@ -173,7 +173,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         checklist_state=checklist_state,
         rewards=rewards,
         reward_redemptions=reward_redemptions,
-        weekly_bonus_state=weekly_bonus_state,
+        milestone_bonus_state=milestone_bonus_state,
         favorites=favorites,
         claim_state=claim_state,
     )

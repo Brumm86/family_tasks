@@ -11,7 +11,7 @@ StorageCollection (there is nothing to edit, only to append and prune).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -38,15 +38,20 @@ from .const import (
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
+    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+    DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     EVENT_REWARD_REDEEMED,
     MANUAL_POINTS_TASK_ID,
     MAX_COMPLETION_LOG_ENTRIES,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
     MEMBER_ROLES,
+    MILESTONE_BONUS_1_TASK_ID,
+    MILESTONE_BONUS_2_TASK_ID,
     OWN_TASK_KINDS,
+    POINTS_CORRECTION_TASK_ID,
     RECURRENCE_INTERVAL_DAYS,
     RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
@@ -73,7 +78,6 @@ from .const import (
     TASK_TRIGGER_KINDS,
     TASK_TRIGGER_NUMERIC_STATE,
     TASK_TRIGGER_STATE,
-    WEEKLY_BONUS_TASK_ID,
     WS_API_FAVORITE_INSTANTIATE,
     WS_API_MEMBER_WEEKLY_COMPLETIONS,
     WS_API_POINTS_AWARD,
@@ -980,8 +984,9 @@ def _available_points(
     completions: CompletionLogStore,
     reward_redemptions: RewardRedemptionStorageCollection,
     member_id: str,
+    goal_points: int,
 ) -> int:
-    """A member's current spendable balance: all-time points minus redemptions.
+    """A member's current spendable balance: spendable points minus redemptions.
 
     Mirrors FamilyTasksCoordinator._async_update_data's points_available
     computation (MemberSummaryData.points_available in coordinator.py) -
@@ -990,15 +995,22 @@ def _available_points(
     so a redemption is always validated against the authoritative source
     (the completion log + redemption history) rather than a value the client
     happens to have cached.
+
+    v0.30 bugfix: this used to sum all-time points regardless of the v0.29
+    weekly-goal rule (``goal_points`` - see CONF_WEEKLY_PROGRESS_GOAL_POINTS
+    in const.py), so a redemption could be accepted for more than a member's
+    true spendable balance under that rule, which then surfaced as a
+    negative points_available on the coordinator's next refresh. Now uses
+    the same shared weekly_spendable_points() the coordinator does, so the
+    two can never drift apart again.
     """
-    since = datetime.min.replace(tzinfo=dt_util.UTC)
-    total = completions.points_since(member_id, since)
+    spendable = weekly_spendable_points(completions, member_id, goal_points)
     spent = sum(
         r.get("points_cost", 0)
         for r in reward_redemptions.data.values()
         if r.get("member_id") == member_id
     )
-    return total - spent
+    return spendable - spent
 
 
 @callback
@@ -1172,7 +1184,14 @@ def async_setup_websocket_api(
                 )
                 return
 
-        available = _available_points(completions, reward_redemptions, member_id)
+        goal_points = (
+            entry.options.get(
+                CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+            )
+            if entry is not None
+            else DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+        )
+        available = _available_points(completions, reward_redemptions, member_id, goal_points)
         if available < points_cost:
             connection.send_error(
                 msg["id"],
@@ -1245,7 +1264,7 @@ def async_setup_websocket_api(
         reward-redemption "fulfilled", member management). Logged via the
         normal completion log under the internal MANUAL_POINTS_TASK_ID
         sentinel (same mechanism CompletionLogStore already uses for the
-        weekly-winner bonus) so it counts toward the member's points_total/
+        Meilensteinbonus) so it counts toward the member's points_total/
         points_week/points_month/points_available exactly like a real task
         completion - there is no separate "adjustments" ledger.
 
@@ -1365,9 +1384,11 @@ def async_setup_websocket_api(
         figure already shown on the leaderboard. Not admin-restricted - any
         logged-in user may look up any member's completions, same as the
         leaderboard/points sensors themselves are already visible to
-        everyone regardless of role. Excludes WEEKLY_BONUS_TASK_ID and
-        MANUAL_POINTS_TASK_ID entries (v0.24) - neither is a completed task,
-        even though both count normally toward the member's point totals.
+        everyone regardless of role. Excludes MANUAL_POINTS_TASK_ID (v0.24),
+        MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID, and
+        POINTS_CORRECTION_TASK_ID (v0.30) entries - none of these is a
+        completed task, even though all count normally toward the member's
+        point totals.
         """
         member_id = msg["member_id"]
         if member_id not in members.data:
@@ -1385,8 +1406,10 @@ def async_setup_websocket_api(
             if entry.get("completed_by_member_id") != member_id:
                 continue
             if entry.get("skipped") or entry.get("task_id") in (
-                WEEKLY_BONUS_TASK_ID,
                 MANUAL_POINTS_TASK_ID,
+                MILESTONE_BONUS_1_TASK_ID,
+                MILESTONE_BONUS_2_TASK_ID,
+                POINTS_CORRECTION_TASK_ID,
             ):
                 continue
             completed_at = dt_util.parse_datetime(entry.get("completed_at", ""))
@@ -1736,6 +1759,52 @@ class CompletionLogStore:
         return total
 
 
+def weekly_spendable_points(
+    completions: CompletionLogStore, member_id: str, goal_points: int
+) -> int:
+    """A member's lifetime *spendable* points under the v0.29 weekly-goal rule.
+
+    Within each calendar week (Monday 00:00 local), a member's first
+    ``goal_points`` points earned that week count only toward the
+    "Wochenfortschritt" progress bar, not toward their spendable balance -
+    only points earned *beyond* the goal in that week are spendable.
+    ``goal_points <= 0`` (the default) disables the rule entirely: every
+    week's total is fully spendable.
+
+    Shared by FamilyTasksCoordinator._weekly_spendable_points (which computes
+    MemberSummaryData.points_available for display) and _available_points
+    below (which validates a redemption server-side, ws_redeem_reward) -
+    living here rather than in coordinator.py so storage.py, which
+    coordinator.py already imports from, can use it too without an import
+    cycle.
+
+    v0.30 bugfix: before this was extracted, _available_points had its own,
+    older copy of this rule that never actually applied the weekly-goal
+    clamp (it just summed all-time points minus redemptions, the pre-v0.29
+    behavior) - so a redemption could be accepted for more than a member's
+    true spendable balance, which then showed up as a negative
+    points_available on the next coordinator refresh once the clamp was
+    applied there. Using one shared implementation for both makes that kind
+    of drift impossible going forward.
+    """
+    if goal_points <= 0:
+        return completions.points_since(member_id, datetime.min.replace(tzinfo=dt_util.UTC))
+
+    weekly_totals: dict[date, int] = {}
+    for entry in completions.entries:
+        if entry["completed_by_member_id"] != member_id or entry["skipped"]:
+            continue
+        completed_at = dt_util.parse_datetime(entry["completed_at"])
+        if completed_at is None:
+            continue
+        local_at = dt_util.as_local(completed_at)
+        day_start_utc = dt_util.as_utc(dt_util.start_of_local_day(local_at))
+        week_start = (day_start_utc - timedelta(days=day_start_utc.weekday())).date()
+        weekly_totals[week_start] = weekly_totals.get(week_start, 0) + entry["points_awarded"]
+
+    return sum(max(0, total - goal_points) for total in weekly_totals.values())
+
+
 class TriggerStateStore:
     """Tracks the currently open occurrence of sensor-triggered tasks.
 
@@ -1900,17 +1969,22 @@ async def async_create_claim_state_store(hass: HomeAssistant) -> ClaimStateStore
     return store
 
 
-class WeeklyBonusStateStore:
-    """Tracks the last calendar week the weekly-winner bonus was awarded for.
+class MilestoneBonusStateStore:
+    """Tracks which members have already been awarded this week's Meilensteinbonus thresholds.
 
-    See CONF_WEEKLY_WINNER_BONUS_ENABLED/CONF_WEEKLY_WINNER_BONUS_POINTS in
-    const.py and FamilyTasksCoordinator._async_process_weekly_winner_bonus in
-    coordinator.py: at most one award happens per completed calendar week,
-    computed from the *previous* week's points the first time a refresh
-    happens after that week ends (Monday 00:00 local, i.e. "mit Ablauf des
-    Sonntags"). "last_awarded_week" is the Monday-date (ISO) of the most
-    recently awarded week - not a StorageCollection, this is coordinator-
-    internal bookkeeping, never edited by the user, same as TriggerStateStore.
+    See CONF_MILESTONE_BONUS_ENABLED/CONF_MILESTONE_1_THRESHOLD_PERCENT/
+    CONF_MILESTONE_2_THRESHOLD_PERCENT in const.py and
+    FamilyTasksCoordinator._async_process_milestone_bonus in coordinator.py:
+    unlike the old weekly-winner bonus this replaces, a threshold is awarded
+    live, the moment a member crosses it - so idempotency has to be tracked
+    per (member, threshold) for the *current* week rather than "has this week
+    been processed at all yet". Only ever holds the current week's data:
+    "period_key" is the Monday-date (ISO) this state applies to, and the two
+    award sets are simply reset to empty the first time a refresh notices
+    period_key has rolled over to a new week - there is no need to remember
+    older weeks once they're over. Not a StorageCollection, this is
+    coordinator-internal bookkeeping, never edited by the user, same as
+    TriggerStateStore.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -1920,21 +1994,36 @@ class WeeklyBonusStateStore:
         self._state: dict[str, Any] = {}
 
     async def async_load(self) -> None:
-        """Load the last-awarded-week marker from disk."""
+        """Load this week's award-tracking state from disk."""
         self._state = await self._store.async_load() or {}
 
-    def last_awarded_week(self) -> str | None:
-        """Return the Monday-date (ISO) of the last week a bonus was awarded for."""
-        return self._state.get("last_awarded_week")
+    async def _async_ensure_current_week(self, period_key: str) -> None:
+        """Reset the tracked award sets whenever the current week changes.
 
-    async def async_set_last_awarded_week(self, period_key: str) -> None:
-        """Record that a given week has now been processed (win or no winner)."""
-        self._state["last_awarded_week"] = period_key
-        await self._store.async_save(self._state)
+        Also transparently absorbs a pre-v0.30 "last_awarded_week"-shaped
+        payload (the old weekly-winner-bonus state) - that key is simply
+        dropped once this resets state for a period_key it doesn't recognize.
+        """
+        if self._state.get("period_key") != period_key:
+            self._state = {"period_key": period_key, "threshold_1": [], "threshold_2": []}
+            await self._store.async_save(self._state)
+
+    async def async_has_awarded(self, period_key: str, threshold: int, member_id: str) -> bool:
+        """Whether ``member_id`` already received threshold 1 or 2 this week."""
+        await self._async_ensure_current_week(period_key)
+        return member_id in self._state.get(f"threshold_{threshold}", [])
+
+    async def async_mark_awarded(self, period_key: str, threshold: int, member_id: str) -> None:
+        """Record that ``member_id`` has now been awarded threshold 1 or 2 this week."""
+        await self._async_ensure_current_week(period_key)
+        key = f"threshold_{threshold}"
+        if member_id not in self._state[key]:
+            self._state[key].append(member_id)
+            await self._store.async_save(self._state)
 
 
-async def async_create_weekly_bonus_state_store(hass: HomeAssistant) -> WeeklyBonusStateStore:
-    """Create and load the weekly-winner-bonus state store."""
-    store = WeeklyBonusStateStore(hass)
+async def async_create_milestone_bonus_state_store(hass: HomeAssistant) -> MilestoneBonusStateStore:
+    """Create and load the Meilensteinbonus award-tracking state store."""
+    store = MilestoneBonusStateStore(hass)
     await store.async_load()
     return store

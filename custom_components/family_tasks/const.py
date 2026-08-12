@@ -30,35 +30,63 @@ CONF_BATTERY_WARNING_THRESHOLD: Final = "battery_warning_threshold"
 # redemption without needing a restart.
 CONF_SCREEN_TIME_MINUTES_PER_POINT: Final = "screen_time_minutes_per_point"
 
-# v0.14: whether awarding bonus points to the current week's point leader(s)
-# is turned on at all, and how many bonus points that is - see
-# FamilyTasksCoordinator._async_process_weekly_winner_bonus in coordinator.py.
+# v0.30: replaces the old weekly-winner bonus. Rather than a single
+# household-wide "winner" taking all, every participating member who crosses
+# one of two configurable progress thresholds *during* the current week
+# (percentages of CONF_WEEKLY_PROGRESS_GOAL_POINTS - see
+# CONF_MILESTONE_1_THRESHOLD_PERCENT/CONF_MILESTONE_2_THRESHOLD_PERCENT below)
+# earns that threshold's "Meilensteinbonus" points immediately, live, the
+# first refresh after they cross it - see
+# FamilyTasksCoordinator._async_process_milestone_bonus in coordinator.py.
 # Off by default so nothing changes for a household that doesn't opt in.
-CONF_WEEKLY_WINNER_BONUS_ENABLED: Final = "weekly_winner_bonus_enabled"
-CONF_WEEKLY_WINNER_BONUS_POINTS: Final = "weekly_winner_bonus_points"
+CONF_MILESTONE_BONUS_ENABLED: Final = "milestone_bonus_enabled"
+# Threshold 1, as a percentage of CONF_WEEKLY_PROGRESS_GOAL_POINTS (default
+# 100%, i.e. "reached the weekly goal") - vol.Range(min=1) both here and in
+# its NumberSelector, since a 0% threshold would trigger before any points
+# were earned at all.
+CONF_MILESTONE_1_THRESHOLD_PERCENT: Final = "milestone_1_threshold_percent"
+CONF_MILESTONE_1_BONUS_POINTS: Final = "milestone_1_bonus_points"
+# Threshold 2 (default 200%, i.e. "double the weekly goal"). Must exceed
+# threshold 1 - enforced by the options flow's schema, not just the default
+# ordering, so the "first still-uncrossed threshold this week" logic in
+# _async_process_milestone_bonus can rely on threshold 1 < threshold 2.
+CONF_MILESTONE_2_THRESHOLD_PERCENT: Final = "milestone_2_threshold_percent"
+CONF_MILESTONE_2_BONUS_POINTS: Final = "milestone_2_bonus_points"
 
-# Internal-only sentinel task_id for completion-log entries created by
-# FamilyTasksCoordinator._async_process_weekly_winner_bonus - never a real
-# task, so it never shows up in the task list, and is excluded from the
+# Internal-only sentinel task_ids for completion-log entries created by
+# FamilyTasksCoordinator._async_process_milestone_bonus - never a real task,
+# so neither shows up in the task list, and both are excluded from the
 # per-member weekly completion history the card shows when a Bestenliste row
 # is clicked (see WS_API_MEMBER_WEEKLY_COMPLETIONS below) even though the
-# points themselves count normally toward that member's totals. Lives here
-# (not in coordinator.py, where it originated) so storage.py's websocket
-# handler for that history can exclude it too without an import cycle.
-WEEKLY_BONUS_TASK_ID: Final = "__weekly_winner_bonus__"
+# points themselves count normally toward that member's totals. Two distinct
+# sentinels (not one) so a member who crosses both thresholds in the same
+# week gets two independent completion-log entries rather than one
+# overwriting/ambiguous with the other. Lives here (not in coordinator.py,
+# where it originated) so storage.py's websocket handler for that history
+# can exclude it too without an import cycle.
+MILESTONE_BONUS_1_TASK_ID: Final = "__milestone_bonus_1__"
+MILESTONE_BONUS_2_TASK_ID: Final = "__milestone_bonus_2__"
 
-# v0.24: same sentinel pattern as WEEKLY_BONUS_TASK_ID above, for a manual
+# v0.30 bugfix: internal-only sentinel for the one-time retroactive
+# correction FamilyTasksCoordinator._async_correct_negative_balances applies
+# to any member whose points_available had already gone negative because of
+# the _available_points/weekly_spendable_points drift fixed in storage.py
+# (see weekly_spendable_points there) - see that method's docstring for the
+# full story. Guarded so it only ever tops a member up once, ever: excluded
+# from the weekly completion history for the same reason as the sentinels
+# above (it isn't a completed task).
+POINTS_CORRECTION_TASK_ID: Final = "__points_correction__"
+
+# v0.24: same sentinel pattern as MILESTONE_BONUS_1_TASK_ID/
+# MILESTONE_BONUS_2_TASK_ID/POINTS_CORRECTION_TASK_ID above, for a manual
 # points award/deduction a parent makes independent of any task (see
 # WS_API_POINTS_AWARD/ws_award_points in storage.py) - never a real task, and
 # excluded from the per-member weekly completion history for the same reason
 # (it isn't a completed task), while still counting normally toward the
-# member's points_total/points_week/points_month/points_available and toward
-# who's currently leading for the *next* weekly-winner-bonus determination
-# (unlike WEEKLY_BONUS_TASK_ID, deliberately not excluded there - see
-# FamilyTasksCoordinator._points_earned_in_range in coordinator.py -  a
-# manually-awarded point is just as "real" as a task-completion one, with
-# none of the self-reinforcing-bonus problem a previous week's bonus would
-# have).
+# member's points_total/points_week/points_month/points_available - and,
+# since v0.30, toward points_week for Meilensteinbonus threshold-crossing
+# purposes too (see FamilyTasksCoordinator._async_process_milestone_bonus) -
+# a manually-awarded point is just as "real" as a task-completion one.
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 
 # v0.29: household-wide weekly point goal backing each child's
@@ -77,8 +105,11 @@ DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
 DEFAULT_SCREEN_TIME_MINUTES_PER_POINT: Final = 1
-DEFAULT_WEEKLY_WINNER_BONUS_ENABLED: Final = False
-DEFAULT_WEEKLY_WINNER_BONUS_POINTS: Final = 0
+DEFAULT_MILESTONE_BONUS_ENABLED: Final = False
+DEFAULT_MILESTONE_1_THRESHOLD_PERCENT: Final = 100
+DEFAULT_MILESTONE_1_BONUS_POINTS: Final = 0
+DEFAULT_MILESTONE_2_THRESHOLD_PERCENT: Final = 200
+DEFAULT_MILESTONE_2_BONUS_POINTS: Final = 0
 DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS: Final = 0
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
@@ -349,10 +380,16 @@ STORAGE_KEY_REWARDS: Final = f"{DOMAIN}.reward_groups"
 # first time this collection loads under v0.9 - see
 # _async_migrate_reward_redemptions.
 STORAGE_KEY_REWARD_REDEMPTIONS: Final = f"{DOMAIN}.rewards"
-# v0.14: tracks the last calendar week (Monday's ISO date) the weekly-winner
-# bonus was already awarded for, so FamilyTasksCoordinator only ever awards it
-# once per week, regardless of how often the coordinator refreshes. See
-# storage.WeeklyBonusStateStore.
+# v0.30: tracks, for the current calendar week only, which members have
+# already been awarded each Meilensteinbonus threshold - so
+# FamilyTasksCoordinator only ever awards a given member/threshold/week combo
+# once, regardless of how often the coordinator refreshes. Reset (pruned)
+# automatically whenever the current week rolls over - see
+# storage.MilestoneBonusStateStore. Physical storage key/file unchanged since
+# v0.14, where it tracked the (now removed) weekly-winner bonus instead - the
+# old "last_awarded_week" shape is simply ignored by the new code the first
+# time it loads under v0.30, same as any Store.async_load() encountering keys
+# it doesn't recognize.
 STORAGE_KEY_WEEKLY_BONUS_STATE: Final = f"{DOMAIN}.weekly_bonus_state"
 # v0.17: the parent-maintained Favoriten template catalog - see
 # WS_API_PREFIX_FAVORITES above.
@@ -492,7 +529,7 @@ EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
 # having to fabricate a fake task for it. Not a StorageCollection: creating
 # one just appends to the existing completion log (see
 # MANUAL_POINTS_TASK_ID/CompletionLogStore.async_add_entry, same mechanism
-# the weekly-winner bonus already uses) rather than being its own persisted,
+# the Meilensteinbonus already uses) rather than being its own persisted,
 # editable entity - there's nothing to later edit/delete, only ever more
 # awards on top, same as a task completion itself is never edited after the
 # fact. Parent-only (not a child, regardless of HA admin flag - same

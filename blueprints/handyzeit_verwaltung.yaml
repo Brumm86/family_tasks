@@ -1,0 +1,260 @@
+blueprint:
+  name: Handyzeit-Verwaltung (Family Link + family_tasks-Belohnungen)
+  description: >-
+    Verwaltet das tägliche Handyzeit-Guthaben eines Kindes über die
+    Google-Family-Link-Integration: Reset um Mitternacht, automatische
+    Erhöhung zu festen Uhrzeiten, manuelle Plus-/Minus-Buttons (nur für
+    Admin-Accounts) und sofortige Erhöhung, sobald das Kind im
+    family_tasks-Punkte-Shop eine Belohnung mit "Zusätzliche Bildschirmzeit
+    in Minuten" einlöst (Event family_tasks_reward_redeemed). Eine Instanz
+    pro Kind - neues Kind = neue Automatisierung aus diesem Blueprint mit
+    eigenen Werten, keine Logikänderung nötig.
+
+    Die automatischen Zeit-Ticks pausieren, solange entweder der
+    Pause-Schalter unten manuell "aus" ist, ODER (neu) solange
+    family_tasks für dieses Kind eine überfällige Pflichtaufgabe
+    ("TASK_KIND_MANDATORY") führt - siehe "family_tasks:
+    Handyzeitgewährung-aktiv-Sensor" unten. Beide Bedingungen wirken
+    unabhängig voneinander und betreffen ausschließlich die automatischen
+    Ticks, nicht die manuellen Buttons und nicht Belohnungs-Einlösungen.
+  domain: automation
+  input:
+    child_name:
+      name: Name des Kindes
+      description: Nur für Alias/Benachrichtigungstexte.
+      selector:
+        text:
+
+    member_id:
+      name: family_tasks Mitglieds-ID
+      description: >-
+        Die interne Mitglieds-ID in der family_tasks-Integration - siehe
+        Attribut "member_id" am Punkte-Sensor des Mitglieds
+        (sensor.<name>_punkte). Wird gegen event_data.member_id aus
+        family_tasks_reward_redeemed verglichen.
+      selector:
+        text:
+
+    switch_entity:
+      name: Family-Link-Schalter
+      selector:
+        entity:
+          domain: switch
+
+    daily_limit_sensor:
+      name: Family-Link-Tageslimit-Sensor
+      selector:
+        entity:
+          domain: sensor
+
+    button_entities:
+      name: Plus-/Minus-Buttons (beide zusammen, für den Trigger)
+      description: >-
+        Leer lassen, solange es für dieses Kind noch keine Buttons gibt -
+        der Buttons-Trigger bleibt dann einfach untätig, der Rest
+        (Zeitplan, Reset, Belohnungs-Event) funktioniert unverändert.
+      default: []
+      selector:
+        entity:
+          domain: input_button
+          multiple: true
+
+    plus_button_entity:
+      name: "davon: Plus-Button"
+      description: Muss auch oben in "Plus-/Minus-Buttons" enthalten sein.
+      default: ""
+      selector:
+        entity:
+          domain: input_button
+
+    minus_button_entity:
+      name: "davon: Minus-Button"
+      description: Muss auch oben in "Plus-/Minus-Buttons" enthalten sein.
+      default: ""
+      selector:
+        entity:
+          domain: input_button
+
+    admin_user_ids:
+      name: Admin-User-IDs
+      description: >-
+        Diese HA-Nutzer dürfen die Buttons bedienen - alle anderen werden
+        geblockt und per persistent_notification gemeldet.
+      default:
+        - 74920404dcbc436ca01c7972f657e48a
+        - d555f81fabab410789565e2df189d540
+      selector:
+        text:
+          multiple: true
+
+    automation_toggle_entity:
+      name: Pause-Schalter für die automatischen Zeit-Ticks
+      description: >-
+        input_boolean, das nur die zeitgesteuerten Plus-Ticks pausiert,
+        wenn "aus". Betrifft NICHT die manuellen Buttons und NICHT
+        Belohnungs-Einlösungen - beide wirken immer sofort, unabhängig von
+        diesem Schalter. Rein manuell bedient - wird von dieser
+        Automatisierung selbst nirgends automatisch umgeschaltet (auch
+        nicht vom Pflichtaufgaben-Sensor unten, siehe dessen Beschreibung).
+      default: input_boolean.handyzeit_automation
+      selector:
+        entity:
+          domain: input_boolean
+
+    screen_time_grant_active_entity:
+      name: "family_tasks: Handyzeitgewährung-aktiv-Sensor (optional)"
+      description: >-
+        Der von der family_tasks-Integration automatisch je Mitglied
+        angelegte binary_sensor "<Name> Handyzeitgewährung aktiv"
+        (screen_time_grant_active in coordinator.py/binary_sensor.py) -
+        wird "aus", solange dieses Kind mindestens eine überfällige
+        Pflichtaufgabe ("TASK_KIND_MANDATORY") hat, und automatisch
+        wieder "an", sobald sie erledigt bzw. von einem Elternteil
+        bestätigt ist. Pausiert die automatischen Zeit-Ticks zusätzlich
+        zum Pause-Schalter oben, unabhängig davon - beide Bedingungen
+        werden mit ODER verknüpft, jede für sich reicht zum Pausieren.
+        Bewusst ein separater Sensor statt eines Spiegelns in den
+        Pause-Schalter selbst: so bleibt ein manuell gesetzter
+        Pause-Schalter unberührt, wenn eine Pflichtaufgabe zwischendurch
+        erledigt wird, und umgekehrt. Leer lassen, um Pflichtaufgaben für
+        dieses Kind nicht zu berücksichtigen (z. B. wenn es keine hat).
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+    plus_times:
+      name: Automatische Plus-Uhrzeiten
+      default:
+        - "07:20:00"
+        - "08:00:00"
+        - "09:00:00"
+        - "10:00:00"
+        - "11:00:00"
+        - "12:00:00"
+        - "13:00:00"
+        - "14:00:00"
+        - "15:00:00"
+        - "16:00:00"
+        - "17:00:00"
+        - "18:00:00"
+        - "19:00:00"
+        - "20:00:00"
+        - "21:15:00"
+      selector:
+        text:
+          multiple: true
+
+    increment_minutes:
+      name: Erhöhung pro Tick (Minuten)
+      description: >-
+        Gilt für automatische Zeit-Ticks und für beide Buttons (ein
+        einziger Wert, damit "Plus-Button fügt X hinzu" nie wieder vom
+        tatsächlichen Wert abweichen kann). Wirkt sich NICHT auf
+        Belohnungs-Einlösungen aus - dort zählt direkt der
+        screen_time_minutes-Wert aus dem Event.
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 60
+          mode: box
+
+triggers:
+  - id: reset
+    trigger: time
+    at: "00:00:00"
+  - id: plus_tick
+    trigger: time
+    at: !input plus_times
+  - id: buttons
+    trigger: state
+    entity_id: !input button_entities
+  - id: family_event
+    trigger: event
+    event_type: family_tasks_reward_redeemed
+
+conditions: []
+
+actions:
+  - variables:
+      child_name: !input child_name
+      member_id: !input member_id
+      daily_limit_sensor: !input daily_limit_sensor
+      plus_button_entity: !input plus_button_entity
+      minus_button_entity: !input minus_button_entity
+      admin_user_ids: !input admin_user_ids
+      automation_toggle_entity: !input automation_toggle_entity
+      screen_time_grant_active_entity: !input screen_time_grant_active_entity
+      increment_minutes: !input increment_minutes
+
+  # Frühe Ausstiege, bevor überhaupt eine neue Handyzeit berechnet wird -
+  # derselbe "stop"-Stil wie in der ursprünglichen Automation.
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{ trigger.id == 'buttons'
+                 and (trigger.to_state.context.user_id | default('')) not in admin_user_ids }}
+        sequence:
+          - action: persistent_notification.create
+            data:
+              title: "Handyzeit-Button blockiert (Nicht-Admin)"
+              message: >-
+                Ein Nicht-Admin hat versucht, die Handyzeit von {{ child_name }} zu ändern.
+                Zeit: {{ now().strftime('%Y-%m-%d %H:%M:%S') }}
+                Button: {{ trigger.entity_id }}
+                user_id: {{ trigger.to_state.context.user_id | default('unbekannt') }}
+              notification_id: "handyzeit_{{ member_id }}_blockiert"
+          - stop: "Ignoriert: Button wurde von Nicht-Admin ausgelöst."
+
+      # v2: zweite Pausier-Quelle neben dem manuellen Pause-Schalter -
+      # siehe screen_time_grant_active_entity oben. "| default('') != ''"
+      # macht den Sensor optional, ohne bei leerem Input einen unnötigen
+      # states()-Aufruf mit leerer Entity-ID auszulösen.
+      - conditions:
+          - condition: template
+            value_template: |-
+              {{ trigger.id == 'plus_tick'
+                 and (states(automation_toggle_entity) == 'off'
+                      or (screen_time_grant_active_entity | default('') != ''
+                          and states(screen_time_grant_active_entity) == 'off')) }}
+        sequence:
+          - stop: >-
+              Ignoriert: automatischer Plus-Tick bei deaktiviertem
+              Pause-Schalter oder überfälliger Pflichtaufgabe
+              (family_tasks Handyzeitgewährung-aktiv-Sensor).
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'family_event'
+                 and (trigger.event.data.member_id != member_id
+                      or trigger.event.data.screen_time_minutes is none) }}
+        sequence:
+          - stop: "Ignoriert: Belohnungs-Event betrifft ein anderes Kind oder trägt keine Bildschirmzeit-Minuten."
+
+  - variables:
+      daily_minutes: >-
+        {% set current = states(daily_limit_sensor) | int(0) %}
+        {% if trigger.id == 'reset' %}
+          {{ 0 }}
+        {% elif trigger.id == 'plus_tick' %}
+          {{ current + (increment_minutes | int) }}
+        {% elif trigger.id == 'buttons' and trigger.entity_id == plus_button_entity %}
+          {{ current + (increment_minutes | int) }}
+        {% elif trigger.id == 'buttons' and trigger.entity_id == minus_button_entity %}
+          {{ [current - (increment_minutes | int), 0] | max }}
+        {% elif trigger.id == 'family_event' %}
+          {{ current + (trigger.event.data.screen_time_minutes | int) }}
+        {% else %}
+          {{ current }}
+        {% endif %}
+
+  - action: familylink.set_daily_limit
+    data:
+      entity_id: !input switch_entity
+      daily_minutes: "{{ daily_minutes }}"
+
+mode: queued
+max: 10
