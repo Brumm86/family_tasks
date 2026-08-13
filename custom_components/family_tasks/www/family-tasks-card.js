@@ -615,6 +615,14 @@
       icon: "",
       enabled: true,
       due_time: "",
+      // v0.31: paired with the "Fällig um" <ha-time-input>'s hour/minute
+      // <select> fallback (see _renderFallbackTimeInput) - holds whichever
+      // half (hour/minute) the user has picked so far even while due_time
+      // itself is still "" (incomplete). Without this, picking just the
+      // hour got wiped out on the very next re-render because due_time was
+      // still empty - see _applyFieldChange's due_time branch for the fix.
+      _dueTimeHour: "",
+      _dueTimeMinute: "",
       overdue_after_minutes: 60,
       requires_confirmation: true,
       kind: "standard",
@@ -647,6 +655,9 @@
       name: "",
       icon: "",
       due_time: "",
+      // v0.31: see the matching comment in emptyTaskForm above.
+      _dueTimeHour: "",
+      _dueTimeMinute: "",
       overdue_after_minutes: 60,
       requires_confirmation: true,
       kind: "standard",
@@ -675,6 +686,13 @@
       icon: task.icon ?? "",
       enabled: task.enabled !== false,
       due_time: task.due_time ?? "",
+      // v0.31: see the matching comment in emptyTaskForm above. Starts empty
+      // even when editing a task that already has a due_time - the fallback
+      // reads the complete hour/minute straight out of due_time itself in
+      // that case (see _renderFallbackTimeInput), these two only matter once
+      // the user starts changing the selection.
+      _dueTimeHour: "",
+      _dueTimeMinute: "",
       overdue_after_minutes: task.overdue_after_minutes ?? 60,
       requires_confirmation: task.requires_confirmation ?? true,
       kind: task.kind ?? "standard",
@@ -2101,7 +2119,13 @@
       const rawValue = el.getAttribute("value") || "";
 
       if (isTime) {
-        el.replaceWith(this._renderFallbackTimeInput(fieldAttr, rawValue));
+        // v0.31: see _renderFallbackTimeInput and _applyFieldChange's
+        // due_time branch - these two extra attributes are how a partial
+        // hour-only or minute-only selection survives the form's re-render
+        // (rawValue/due_time itself is still "" until both are picked).
+        const fallbackHour = el.getAttribute("data-fallback-hour") || "";
+        const fallbackMinute = el.getAttribute("data-fallback-minute") || "";
+        el.replaceWith(this._renderFallbackTimeInput(fieldAttr, rawValue, fallbackHour, fallbackMinute));
         return;
       }
 
@@ -2124,8 +2148,25 @@
     // both selects off this element (via data-fallback-time) instead of a
     // single .value, since no single child element holds the combined
     // "HH:MM" value.
-    _renderFallbackTimeInput(fieldAttr, rawValue) {
-      const [h, m] = rawValue.includes(":") ? rawValue.split(":") : ["", ""];
+    //
+    // v0.31: fixes "the dropdown opens but the picked time is never
+    // accepted" - every field change re-renders the whole form (see the
+    // "change" listener), and this fallback used to derive both selects'
+    // displayed value solely from due_time. Since due_time only becomes
+    // non-empty once *both* hour and minute are set, picking just one of
+    // them produced due_time="" and the re-render then rebuilt both selects
+    // back at "--" - the very selection the user just made was gone before
+    // they could pick the second field, so a value could never be built up
+    // at all. fallbackHour/fallbackMinute (sourced from the target's
+    // _dueTimeHour/_dueTimeMinute, see _applyFieldChange) now carry a
+    // still-incomplete selection across that re-render independently of
+    // due_time, so the first pick sticks while the user makes the second.
+    // rawValue (from due_time itself) still wins once it's a complete
+    // "HH:MM" - e.g. right after opening the form to edit an existing task.
+    _renderFallbackTimeInput(fieldAttr, rawValue, fallbackHour = "", fallbackMinute = "") {
+      const [rawH, rawM] = rawValue.includes(":") ? rawValue.split(":") : ["", ""];
+      const h = rawH || fallbackHour;
+      const m = rawM || fallbackMinute;
       const options = (count, selected) =>
         [`<option value="">--</option>`]
           .concat(
@@ -3187,7 +3228,7 @@
 
           ${f.recurrence.type !== "trigger" ? `
           <div class="grid2">
-            <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" value="${esc(f.due_time)}"></ha-time-input></label>
+            <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" data-fallback-hour="${esc(f._dueTimeHour ?? "")}" data-fallback-minute="${esc(f._dueTimeMinute ?? "")}" value="${esc(f.due_time)}"></ha-time-input></label>
             <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
           </div>` : `
           <label>Karenz bis überfällig, nachdem der Sensor ausgelöst hat (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>`}
@@ -3250,7 +3291,7 @@
             <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>` : ""}
 
           <div class="grid2">
-            <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" value="${esc(f.due_time)}"></ha-time-input></label>
+            <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" data-fallback-hour="${esc(f._dueTimeHour ?? "")}" data-fallback-minute="${esc(f._dueTimeMinute ?? "")}" value="${esc(f.due_time)}"></ha-time-input></label>
             <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
           </div>
 
@@ -3928,6 +3969,14 @@
         if (el.dataset.fallbackTime) {
           const hour = el.querySelector('[data-time-part="hour"]')?.value || "";
           const minute = el.querySelector('[data-time-part="minute"]')?.value || "";
+          // v0.31: stash whichever half was just picked on the target itself
+          // (read back by _renderFallbackTimeInput via the ha-time-input's
+          // data-fallback-hour/-minute attributes, see the render call
+          // sites) so an hour-only or minute-only selection survives the
+          // form re-render below instead of snapping back to "--" - see the
+          // long comment on _renderFallbackTimeInput for the full story.
+          target._dueTimeHour = hour;
+          target._dueTimeMinute = minute;
           target.due_time = hour && minute ? `${hour}:${minute}` : "";
           return;
         }

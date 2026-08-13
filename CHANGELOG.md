@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.31.0] - 2026-08-13
+
+### Fixed
+- **"Fällig um"-Auswahl wurde nie übernommen, weder am Handy noch am Laptop**: betraf den seit v0.29 bestehenden Stunde/Minute-`<select>`-Fallback von `<ha-time-input>` (greift, wenn die Komponente auf dem jeweiligen Dashboard nicht registriert ist, siehe v0.27-Eintrag - offenbar auf beiden gemeldeten Geräten der Fall). Jede Feldänderung rendert das ganze Formular neu, und die beiden Auswahlfelder bezogen ihren angezeigten Wert bisher ausschließlich aus `due_time` selbst - das aber wird erst nicht-leer, wenn *beide* Felder gesetzt sind. Wurde z. B. zuerst nur die Stunde gewählt, war `due_time` weiterhin `""`, und das direkt darauf folgende Neu-Rendern setzte beide Auswahlfelder wieder auf die leere "--"-Option zurück - die gerade getroffene Auswahl war weg, bevor das zweite Feld überhaupt gewählt werden konnte, wodurch sich nie ein vollständiger Wert bilden ließ. Die Formular-Entwürfe (`emptyTaskForm`/`emptyOwnTaskForm`/`taskToForm`) führen jetzt zusätzlich `_dueTimeHour`/`_dueTimeMinute`, die eine noch unvollständige Auswahl unabhängig von `due_time` über das Neu-Rendern hinweg festhalten (`_applyFieldChange`, gelesen von `_renderFallbackTimeInput` über neue `data-fallback-hour`/`-minute`-Attribute am `<ha-time-input>`-Tag) - der zweite Klick trifft die Auswahlfelder jetzt so vor, wie der erste sie hinterlassen hat. Betrifft ausschließlich diesen Fallback-Pfad; am echten `<ha-time-input>` (registriert verfügbar) und am Absturz-Fix aus v0.26/v0.27 ändert sich nichts.
+
 ## [0.30.0] - 2026-08-11
 
 ### Fixed
