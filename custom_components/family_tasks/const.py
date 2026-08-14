@@ -9,7 +9,7 @@ from homeassistant.const import Platform
 
 DOMAIN: Final = "family_tasks"
 
-PLATFORMS: Final = [Platform.SENSOR, Platform.BUTTON, Platform.BINARY_SENSOR]
+PLATFORMS: Final = [Platform.SENSOR, Platform.BUTTON, Platform.BINARY_SENSOR, Platform.SWITCH]
 
 # --- Config / options keys -------------------------------------------------
 
@@ -101,6 +101,43 @@ MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 # FamilyTasksCoordinator._weekly_spendable_points in coordinator.py.
 CONF_WEEKLY_PROGRESS_GOAL_POINTS: Final = "weekly_progress_goal_points"
 
+# v0.32: household-wide "Streak-Bonus" - bonus points for a member who earns
+# at least CONF_STREAK_BONUS_THRESHOLD_POINTS points *above*
+# CONF_WEEKLY_PROGRESS_GOAL_POINTS in CONF_STREAK_BONUS_REQUIRED_WEEKS
+# consecutive calendar weeks. Unlike the Meilensteinbonus (which awards live,
+# mid-week, the moment a threshold is crossed), a streak can only be judged
+# once a week has actually ended - see
+# FamilyTasksCoordinator._async_process_streak_bonus, which processes each
+# member's fully-elapsed weeks one at a time via StreakBonusStateStore. Once
+# a member's streak reaches the required length, every further consecutive
+# week keeps earning the bonus again (rolling), not just the one that first
+# reached it - a maintained streak is rewarded every week, not once.
+CONF_STREAK_BONUS_ENABLED: Final = "streak_bonus_enabled"
+CONF_STREAK_BONUS_THRESHOLD_POINTS: Final = "streak_bonus_threshold_points"
+CONF_STREAK_BONUS_REQUIRED_WEEKS: Final = "streak_bonus_required_weeks"
+CONF_STREAK_BONUS_POINTS: Final = "streak_bonus_points"
+
+# v0.32: household-wide "Urlaubsmodus" - see switch.py
+# (FamilyTasksVacationModeSwitch) for the actual on/off entity, which is the
+# source of truth once created; this option only seeds its *initial* value
+# the first time VacationModeStateStore loads with nothing on disk yet, so a
+# household that already wants it on can set that up during onboarding
+# without having to remember to flip the switch separately afterwards. Not
+# read again after that - see storage.VacationModeStateStore.
+CONF_VACATION_MODE_DEFAULT: Final = "vacation_mode_default"
+
+# Per-task override (TASK_CREATE_SCHEMA/TASK_UPDATE_SCHEMA in storage.py) of
+# what should happen to this task's occurrences while the household-wide
+# Urlaubsmodus switch is on - see VACATION_BEHAVIOR_SHOW/VACATION_BEHAVIOR_PAUSE
+# below and the vacation-mode handling in
+# FamilyTasksCoordinator._async_update_data. Only consulted while vacation
+# mode is actually active; otherwise every task behaves exactly as if this
+# field didn't exist.
+CONF_TASK_VACATION_BEHAVIOR: Final = "vacation_behavior"
+VACATION_BEHAVIOR_SHOW: Final = "show"
+VACATION_BEHAVIOR_PAUSE: Final = "pause"
+VACATION_BEHAVIORS: Final = [VACATION_BEHAVIOR_SHOW, VACATION_BEHAVIOR_PAUSE]
+
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
@@ -111,6 +148,18 @@ DEFAULT_MILESTONE_1_BONUS_POINTS: Final = 0
 DEFAULT_MILESTONE_2_THRESHOLD_PERCENT: Final = 200
 DEFAULT_MILESTONE_2_BONUS_POINTS: Final = 0
 DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS: Final = 0
+DEFAULT_STREAK_BONUS_ENABLED: Final = False
+DEFAULT_STREAK_BONUS_THRESHOLD_POINTS: Final = 0
+DEFAULT_STREAK_BONUS_REQUIRED_WEEKS: Final = 2
+DEFAULT_STREAK_BONUS_POINTS: Final = 0
+DEFAULT_VACATION_MODE: Final = False
+
+# Internal-only sentinel task_id for a completion-log entry created by
+# FamilyTasksCoordinator._async_process_streak_bonus - same sentinel pattern
+# as MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID above (never a real
+# task, excluded from ws_list_member_weekly_completions, still counts
+# normally toward the member's point totals).
+STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
 ROTATION_STRATEGY_RANDOM: Final = "random"
@@ -398,6 +447,12 @@ STORAGE_KEY_FAVORITES: Final = f"{DOMAIN}.favorites"
 # reservation open - see ClaimStateStore in storage.py and the "Task
 # claiming / reservation" section above.
 STORAGE_KEY_CLAIM_STATE: Final = f"{DOMAIN}.claim_state"
+# v0.32: per-member Streak-Bonus cursor/counter - see StreakBonusStateStore
+# in storage.py and CONF_STREAK_BONUS_ENABLED above.
+STORAGE_KEY_STREAK_BONUS_STATE: Final = f"{DOMAIN}.streak_bonus_state"
+# v0.32: the household-wide Urlaubsmodus on/off state - see
+# VacationModeStateStore in storage.py and CONF_VACATION_MODE_DEFAULT above.
+STORAGE_KEY_VACATION_MODE: Final = f"{DOMAIN}.vacation_mode"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -521,6 +576,15 @@ EVENT_REWARD_REDEEMED: Final = f"{DOMAIN}_reward_redeemed"
 # without the integration having to know about any of that.
 EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
 
+# v0.32: fired whenever a parent rejects ("Ablehnen") a child's completion
+# claim (member_id/member_name/task_name/note - note may be None) - same
+# extension-point pattern as EVENT_TASK_ASSIGNED/EVENT_REWARD_REDEEMED. The
+# integration itself only ever calls the member's notify.* service or raises
+# a persistent_notification (see FamilyTasksCoordinator._async_notify_rejection
+# in coordinator.py); a household's own automation can react to this event
+# however else it likes.
+EVENT_TASK_REJECTED: Final = f"{DOMAIN}_task_rejected"
+
 # --- Manual point awards (v0.24) ------------------------------------------------
 #
 # Lets a parent grant (or, with a negative amount, deduct/correct) points for
@@ -558,10 +622,23 @@ SERVICE_TOGGLE_SUBTASK: Final = "toggle_subtask"
 # any eligible family member, not just admins, needs to be able to call them.
 SERVICE_CLAIM_TASK: Final = "claim_task"
 SERVICE_RELEASE_TASK: Final = "release_task"
+# v0.32: wipes stored *points* data - the completion log, reward redemptions,
+# and Meilenstein-/Streak-Bonus tracking - back to zero, optionally scoped to
+# one member (ATTR_MEMBER_ID) or, left unset, every member at once. Task and
+# member *definitions* and the reward catalog itself are untouched - see
+# FamilyTasksCoordinator.async_reset_points in coordinator.py. Admin-only is
+# not enforceable at the plain-service level (unlike the websocket API), same
+# as every other family_tasks.* service - a household is expected to guard
+# this via HA's own user/area permissions if that matters to them.
+SERVICE_RESET_POINTS: Final = "reset_points"
 
 ATTR_TASK_ID: Final = "task_id"
 ATTR_MEMBER_ID: Final = "member_id"
 ATTR_SUBTASK_ID: Final = "subtask_id"
+# v0.32: optional free-text note a parent leaves when rejecting ("Ablehnen")
+# a child's completion via SERVICE_SKIP_TASK - see async_skip_task in
+# coordinator.py.
+ATTR_NOTE: Final = "note"
 
 # --- Frontend -----------------------------------------------------------------
 

@@ -378,12 +378,17 @@
  *   thresholds out in text for accessibility/narrow screens.
  * - "Aufgabenpool" (v0.30): a task with no fixed assignee(s) and no rotation
  *   (empty rotation.member_ids, see is_pool_task in coordinator.py) gets its
- *   own always-visible section - _renderTaskPoolSection/_isPoolTask - above
- *   the normal "Aufgaben" list, unaffected by hideNotDue/hideCompleted/the
- *   member-filter chips and showing occurrences even before their weekday
- *   arrives (see _pool_period_date in coordinator.py). Any active child may
- *   reserve one via the existing "Annehmen" claim mechanism, same
- *   canClaim/canAct logic and row markup (_renderTaskRow) as a normal task.
+ *   own always-visible section - _renderTaskPoolSection/_isPoolTask - below
+ *   the normal "Aufgaben" list (v0.32 - previously above it), unaffected by
+ *   hideNotDue/hideCompleted/the member-filter chips and showing occurrences
+ *   even before their weekday arrives (see _pool_period_date in
+ *   coordinator.py). Any active child may reserve one via the existing
+ *   "Annehmen" claim mechanism, same canClaim/canAct logic and row markup
+ *   (_renderTaskRow) as a normal task. v0.32: once claimed, an occurrence
+ *   moves out of this section into the normal list instead - see
+ *   _isClaimedPoolTask, and claimed_by_member_id/assigned_member_id(s) in
+ *   coordinator.py, which now firmly attributes a claimed pool occurrence to
+ *   its claimant.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -628,6 +633,11 @@
       kind: "standard",
       subtasks: [],
       completion_button_entity_id: "",
+      // v0.32: see CONF_TASK_VACATION_BEHAVIOR in const.py - checked means
+      // "pause" (vacation_behavior: "pause"), unchecked means the default
+      // "show". Only takes effect while the household-wide Urlaubsmodus
+      // switch is on.
+      vacation_paused: false,
       // v0.29: "Einmalig" is the default for a brand-new task now, not
       // "Täglich" - most ad-hoc tasks a parent adds on the fly (the common
       // case "+ Aufgabe hinzufügen" is used for) are one-off, and picking
@@ -698,6 +708,8 @@
       kind: task.kind ?? "standard",
       subtasks: (task.subtasks ?? []).map((s) => ({ ...s })),
       completion_button_entity_id: task.completion_button_entity_id ?? "",
+      // v0.32: see the matching comment in emptyTaskForm above.
+      vacation_paused: task.vacation_behavior === "pause",
       recurrence: {
         type: task.recurrence?.type ?? "daily",
         interval: task.recurrence?.interval ?? 1,
@@ -1257,6 +1269,8 @@
         bonus1: 0,
         threshold2Percent: 200,
         bonus2: 0,
+        threshold1Points: 0,
+        threshold2Points: 0,
       };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
@@ -1269,7 +1283,58 @@
         bonus1: Number(sensor.attributes.milestone_1_bonus_points ?? 0),
         threshold2Percent: Number(sensor.attributes.milestone_2_threshold_percent ?? 200),
         bonus2: Number(sensor.attributes.milestone_2_bonus_points ?? 0),
+        // v0.32: the absolute point value of each threshold, computed once
+        // server-side (round(), see FamilyTasksData.milestone_1_threshold_points
+        // in coordinator.py) - used directly instead of recomputing
+        // threshold_percent -> points here in JS, since Python's round()
+        // (banker's rounding) and JS's Math.round() (always rounds .5 up)
+        // can disagree on an exact .5 value, which would otherwise show a
+        // marker at a slightly different point value than the backend
+        // actually awards at.
+        threshold1Points: Number(sensor.attributes.milestone_1_threshold_points ?? 0),
+        threshold2Points: Number(sensor.attributes.milestone_2_threshold_points ?? 0),
       };
+    }
+
+    // v0.32: household-wide "Streak-Bonus" settings - same "rides along on
+    // every member's points sensor" pattern as _milestoneBonus above.
+    _streakBonus() {
+      const empty = {
+        enabled: false,
+        thresholdPoints: 0,
+        requiredWeeks: 2,
+        bonusPoints: 0,
+        targetPoints: 0,
+      };
+      if (!this._hass) return empty;
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      if (!sensor) return empty;
+      return {
+        enabled: !!sensor.attributes.streak_bonus_enabled,
+        thresholdPoints: Number(sensor.attributes.streak_bonus_threshold_points ?? 0),
+        requiredWeeks: Number(sensor.attributes.streak_bonus_required_weeks ?? 2),
+        bonusPoints: Number(sensor.attributes.streak_bonus_points ?? 0),
+        targetPoints: Number(sensor.attributes.streak_bonus_target_points ?? 0),
+      };
+    }
+
+    // v0.32: a member's current consecutive-week Streak-Bonus length - see
+    // MemberSummaryData.streak_weeks in coordinator.py.
+    _streakWeeksFor(memberId) {
+      return Number(this._pointsSensorForMember(memberId)?.attributes?.streak_weeks ?? 0);
+    }
+
+    // v0.32: whether the household-wide Urlaubsmodus switch is currently on
+    // - see FamilyTasksData.vacation_mode_active in coordinator.py, ridden
+    // along on every member's points sensor same as the settings above.
+    _vacationModeActive() {
+      if (!this._hass) return false;
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      return !!sensor?.attributes?.vacation_mode_active;
     }
 
     // v0.23: household-wide default rotation strategy (see
@@ -1450,6 +1515,8 @@
         },
         requires_confirmation: !!form.requires_confirmation,
         kind: form.kind === "checklist" || form.kind === "mandatory" ? form.kind : "standard",
+        // v0.32: see CONF_TASK_VACATION_BEHAVIOR in const.py.
+        vacation_behavior: form.vacation_paused ? "pause" : "show",
       };
       if (form.kind === "checklist") {
         payload.subtasks = form.subtasks
@@ -1921,9 +1988,9 @@
             ${!showVisibilityControls || controlsHidden ? "" : `<button class="link" data-action="toggle-hide-not-due">${this._hideNotDue ? "Alle anzeigen" : "Nicht fällige ausblenden"}</button>`}
           </div>
         </div>
-        ${this._renderTaskPoolSection(isAdmin)}
         ${!showVisibilityControls || controlsHidden ? "" : this._renderMemberFilterChips()}
         ${this._renderTaskList(isAdmin)}
+        ${this._renderTaskPoolSection(isAdmin)}
         <div class="task-actions-row">
           <div>
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
@@ -1962,6 +2029,10 @@
               aria-label="${controlsHidden ? "Steuerungen einblenden" : "Steuerungen ausblenden"}"
             ><ha-icon icon="${controlsHidden ? "mdi:tune-variant" : "mdi:tune"}"></ha-icon></button>` : ""}
           </div>
+          ${this._vacationModeActive() ? `
+          <div class="card-content" style="padding-top:0;padding-bottom:0;">
+            <p class="muted">🌴 Urlaubsmodus aktiv - Aufgaben mit "Während Urlaubsmodus pausieren" werden derzeit übersprungen. Umschaltbar über <code>switch.family_tasks_urlaubsmodus</code>.</p>
+          </div>` : ""}
           <div class="card-content">
             ${cardSections.join('<hr class="section-divider">')}
           </div>
@@ -2287,8 +2358,12 @@
       // v0.30: "Aufgabenpool" tasks (no fixed assignee, no rotation) get
       // their own dedicated section below (_renderTaskPoolSection),
       // unaffected by hideNotDue/hideCompleted/the member-filter chips - so
-      // they're excluded here to avoid showing up twice.
-      ids = ids.filter((id) => !this._isPoolTask(id));
+      // they're excluded here to avoid showing up twice. v0.32: a pool
+      // occurrence someone has actively claimed is the one exception - see
+      // _isClaimedPoolTask - it belongs in this normal list (subject to the
+      // same filters as everything else) instead, since it's no longer
+      // "unclaimed pool work", it's firmly the claimant's task now.
+      ids = ids.filter((id) => !this._isPoolTask(id) || this._isClaimedPoolTask(id));
       const totalCount = ids.length;
       // v0.28: independent of hideNotDue above (which is admin-only and
       // bundles "done" together with "idle"/waiting-for-sensor) - this
@@ -2495,6 +2570,13 @@
             if (a.checked !== b.checked) return a.checked ? 1 : -1;
             return a.name.localeCompare(b.name, "de", { sensitivity: "base" });
           });
+          // v0.32: a parent's explanation from the last time this task's
+          // claim was rejected ("Ablehnen") - see last_rejection_note/...at
+          // (TaskStatusData in coordinator.py), cleared automatically the
+          // next time the child retries. Shown regardless of the current
+          // status so a child who missed the (also-fired) notification still
+          // sees why, right on the task itself.
+          const rejectionNote = statusState?.attributes?.last_rejection_note;
           const subtaskList = isChecklist && subtasks.length
             ? `<div class="subtask-list">${sortedSubtasks
                 .map(
@@ -2525,6 +2607,7 @@
                   ${iconActionButton("delete-task", "mdi:delete", "Löschen", { dataset: `data-task-id="${id}"`, extraClass: "danger" })}`}
                 </div>
               </div>
+              ${rejectionNote ? `<div class="muted" style="color:var(--error-color,#db4437)">⚠ Nicht freigegeben: ${esc(rejectionNote)}</div>` : ""}
               ${subtaskList}
             </div>`;
       }
@@ -2538,6 +2621,21 @@
     _isPoolTask(id) {
       const memberIds = this._tasks[id]?.rotation?.member_ids ?? [];
       return memberIds.length === 0 && !this._tasks[id]?.confirms;
+    }
+
+    // v0.32: a pool task someone has actively reserved ("Annehmen") right
+    // now - see claimed_by_member_id (TaskStatusData in coordinator.py,
+    // which also firmly assigns assigned_member_id/assigned_member_ids to
+    // the claimant for as long as this is true). Read off the status
+    // sensor's attributes (unlike _isPoolTask above, this *does* change
+    // between refreshes - a claim can expire or be released). Such an
+    // occurrence is treated as a normal, assigned task rather than an
+    // unclaimed pool one - "Aufgaben, welche ein Kind reserviert hat, sollen
+    // nicht weiter als Poolaufgabe angezeigt werden, sondern dann dem Kind
+    // fest zugewiesen sein."
+    _isClaimedPoolTask(id) {
+      if (!this._isPoolTask(id)) return false;
+      return !!this._statusStateForTask(id)?.attributes?.claimed_by_member_id;
     }
 
     // v0.30: dedicated section for Aufgabenpool tasks, always shown
@@ -2555,6 +2653,9 @@
       const isParentUser = isAdmin && !this._isChildUser();
       const ids = Object.keys(this._tasks).filter((id) => {
         if (!this._isPoolTask(id)) return false;
+        // v0.32: already claimed - shows in the normal task list instead
+        // (see _isClaimedPoolTask / the _renderTaskList filter above).
+        if (this._isClaimedPoolTask(id)) return false;
         const status = this._statusStateForTask(id)?.state ?? "pending";
         return status !== "done";
       });
@@ -2791,15 +2892,22 @@
                 ? Math.min(100, Math.round((weekPoints / (goal * barMaxPercent / 100)) * 100))
                 : 100;
               const goalReached = goal > 0 && weekPoints >= goal;
-              // v0.30: Marken für die beiden Meilenstein-Schwellen, als
+              // v0.32: Marken für die beiden Meilenstein-Schwellen, als
               // Prozent-Position *innerhalb* des Balkens (nicht vom
-              // Wochenziel) - siehe barMaxPercent oben. Nur eine Schwelle mit
+              // Wochenziel) - siehe barMaxPercent oben. Die Punktwerte selbst
+              // kommen jetzt fertig berechnet vom Backend
+              // (milestone.threshold1Points/threshold2Points, siehe
+              // _milestoneBonus) statt hier per Math.round() aus dem Prozentsatz
+              // neu berechnet zu werden - so kann die Karte nie einen anderen
+              // Punktwert anzeigen als der, gegen den der Bonus tatsächlich
+              // vergeben wird (Python round() und JS Math.round() runden einen
+              // exakten .5-Wert nicht immer gleich). Nur eine Schwelle mit
               // Prozentsatz > 0 bekommt überhaupt eine Marke.
               const milestone1Points = milestone && milestone.threshold1Percent > 0
-                ? Math.round((goal * milestone.threshold1Percent) / 100)
+                ? milestone.threshold1Points
                 : null;
               const milestone2Points = milestone && milestone.threshold2Percent > 0
-                ? Math.round((goal * milestone.threshold2Percent) / 100)
+                ? milestone.threshold2Points
                 : null;
               const milestone1Reached = milestone1Points !== null && weekPoints >= milestone1Points;
               const milestone2Reached = milestone2Points !== null && weekPoints >= milestone2Points;
@@ -2811,8 +2919,11 @@
                   ? { left: (milestone.threshold2Percent / barMaxPercent) * 100, points: milestone2Points, bonus: milestone.bonus2, percent: milestone.threshold2Percent, reached: milestone2Reached }
                   : null,
               ].filter(Boolean);
+              // v0.32: die Marke selbst zeigt jetzt den absoluten Punktwert
+              // ("ab X Pkt.") statt des Prozentsatzes - der Prozentsatz steht
+              // nur noch ergänzend in Klammern im Tooltip.
               const markersHtml = markers
-                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`${m.percent}% des Wochenziels (${m.points} Pkt.)${m.bonus > 0 ? ` · +${m.bonus} Bonuspunkte` : ""}`)}"></div>`)
+                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels)${m.bonus > 0 ? ` · +${m.bonus} Bonuspunkte` : ""}`)}"></div>`)
                 .join("");
               const barFillClass = milestone2Reached
                 ? " milestone-2-reached"
@@ -2822,9 +2933,11 @@
                     ? " goal-reached"
                     : "";
               const pointsLine = goal > 0 ? `${esc(weekPoints)} / ${esc(goal)} Pkt. diese Woche` : `${esc(weekPoints)} Pkt. diese Woche`;
-              const balanceLine = goal > 0 && !goalReached
+              const streakWeeks = this._streakWeeksFor(id);
+              const streakSuffix = streak.enabled && streakWeeks > 0 ? ` · 🔥 ${streakWeeks} Wochen Streak` : "";
+              const balanceLine = (goal > 0 && !goalReached
                 ? `${pointsLabel(available)} verfügbar · noch ${esc(goal - weekPoints)} bis zum Wochenziel`
-                : `${pointsLabel(available)} verfügbar`;
+                : `${pointsLabel(available)} verfügbar`) + streakSuffix;
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
@@ -2844,23 +2957,35 @@
             .join("")}</div>`
         : `<p class="muted">${isChildUser ? "Kein verknüpftes Familienmitglied gefunden." : "Noch keine teilnehmenden Kinder."}</p>`;
 
-      // v0.30: kurze Legende der beiden Meilenstein-Schwellen samt Bonus
-      // oben im Abschnitt, sofern der Haushalt die Funktion aktiviert hat -
-      // reine Anzeige (auch für Screenreader/schmale Displays, wo die
+      // v0.30/v0.32: kurze Legende der beiden Meilenstein-Schwellen samt
+      // Bonus oben im Abschnitt, sofern der Haushalt die Funktion aktiviert
+      // hat - reine Anzeige (auch für Screenreader/schmale Displays, wo die
       // Balken-Marken selbst schlecht lesbar sind); die eigentliche Vergabe
       // übernimmt FamilyTasksCoordinator._async_process_milestone_bonus.
       // Ersetzt die frühere "Wochensieger-Bonus: N Punkte"-Zeile vollständig.
+      // v0.32: zeigt jetzt den absoluten Punktwert statt des Prozentsatzes -
+      // siehe die Marker-Berechnung oben für die Rundungs-Begründung; der
+      // Prozentsatz steht nur noch ergänzend in Klammern dahinter.
       const milestoneLegend = milestone?.enabled
         ? [
             milestone.threshold1Percent > 0
-              ? `Meilenstein 1: ${milestone.threshold1Percent}%${milestone.bonus1 > 0 ? ` (+${pointsLabel(milestone.bonus1)})` : ""}`
+              ? `Meilenstein 1: ab ${pointsLabel(milestone.threshold1Points)} (${milestone.threshold1Percent}%)${milestone.bonus1 > 0 ? ` → +${pointsLabel(milestone.bonus1)}` : ""}`
               : null,
             milestone.threshold2Percent > 0
-              ? `Meilenstein 2: ${milestone.threshold2Percent}%${milestone.bonus2 > 0 ? ` (+${pointsLabel(milestone.bonus2)})` : ""}`
+              ? `Meilenstein 2: ab ${pointsLabel(milestone.threshold2Points)} (${milestone.threshold2Percent}%)${milestone.bonus2 > 0 ? ` → +${pointsLabel(milestone.bonus2)}` : ""}`
               : null,
           ]
             .filter(Boolean)
             .join(" · ")
+        : "";
+
+      // v0.32: "Streak-Bonus" Legende - siehe _streakBonus/CONF_STREAK_BONUS_ENABLED
+      // in const.py. Nur eine Text-Zeile (kein Balken-Marker, da die Schwelle
+      // sich wochenweise über die Zeit erstreckt, nicht auf einer einzelnen
+      // Woche liegt).
+      const streak = this._streakBonus();
+      const streakLegend = streak.enabled
+        ? `Streak-Bonus: ${streak.requiredWeeks}× in Folge ab ${pointsLabel(streak.targetPoints)}/Woche → +${pointsLabel(streak.bonusPoints)}`
         : "";
 
       return `
@@ -2870,6 +2995,7 @@
         </div>
         ${goal > 0 ? `<p class="muted">Wochenziel: ${pointsLabel(goal)}</p>` : ""}
         ${milestoneLegend ? `<p class="muted">${esc(milestoneLegend)}</p>` : ""}
+        ${streakLegend ? `<p class="muted">${esc(streakLegend)}</p>` : ""}
         ${progressList}
       `;
     }
@@ -3245,6 +3371,7 @@
 
           <label class="inline"><input type="checkbox" data-field="enabled" ${f.enabled ? "checked" : ""}> Aktiv</label>
           <label class="inline"><input type="checkbox" data-field="requires_confirmation" ${f.requires_confirmation ? "checked" : ""}> Bestätigung durch Eltern erforderlich (bei Kindern)</label>
+          <label class="inline"><input type="checkbox" data-field="vacation_paused" ${f.vacation_paused ? "checked" : ""}> Während Urlaubsmodus pausieren</label>
 
           <div class="form-actions">
             <button type="submit" data-action="save-task">Speichern</button>
@@ -3657,8 +3784,32 @@
         else if (action === "delete-task") { if (this._isAdmin()) this._deleteTask(el.dataset.taskId)?.catch(() => {}); }
         else if (action === "complete-task")
           this._hass.callService("family_tasks", "complete_task", { task_id: el.dataset.taskId });
-        else if (action === "skip-task")
-          this._hass.callService("family_tasks", "skip_task", { task_id: el.dataset.taskId });
+        else if (action === "skip-task") {
+          // v0.32: "Ablehnen" a child's completion (task_id here is the
+          // auto-generated parent-confirmation task, task.confirms set - see
+          // showReject in _renderTaskRow) additionally offers leaving an
+          // optional free-text note explaining why, which the coordinator
+          // stores on the original task (last_rejection_note/...at, shown
+          // via _renderTaskRow below) and notifies the child with - see
+          // async_skip_task in coordinator.py. A plain (non-rejection) skip
+          // has no note to attach, so the prompt is skipped entirely for it.
+          const taskId = el.dataset.taskId;
+          const isRejection = !!this._tasks[taskId]?.confirms;
+          if (isRejection) {
+            const note = prompt(
+              "Notiz für das Kind (optional) - warum wird die Aufgabe nicht freigegeben?"
+            );
+            if (note === null) return; // Abgebrochen
+            const trimmed = note.trim();
+            this._hass.callService(
+              "family_tasks",
+              "skip_task",
+              trimmed ? { task_id: taskId, note: trimmed } : { task_id: taskId }
+            );
+          } else {
+            this._hass.callService("family_tasks", "skip_task", { task_id: taskId });
+          }
+        }
         else if (action === "claim-task")
           this._hass.callService("family_tasks", "claim_task", { task_id: el.dataset.taskId });
         else if (action === "release-task")

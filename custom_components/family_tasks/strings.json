@@ -27,7 +27,12 @@
           "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",
           "milestone_1_bonus_points": "Bonus points at threshold 1",
           "milestone_2_threshold_percent": "Threshold 2 (% of weekly goal)",
-          "milestone_2_bonus_points": "Bonus points at threshold 2"
+          "milestone_2_bonus_points": "Bonus points at threshold 2",
+          "streak_bonus_enabled": "Award a Streak-Bonus",
+          "streak_bonus_threshold_points": "Extra points above weekly goal required per week",
+          "streak_bonus_required_weeks": "Consecutive weeks required",
+          "streak_bonus_points": "Bonus points per streak week",
+          "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
       }
     },
@@ -66,6 +71,11 @@
       "screen_time_grant_active": {
         "name": "Screen time grant active"
       }
+    },
+    "switch": {
+      "vacation_mode": {
+        "name": "Vacation mode"
+      }
     }
   },
   "services": {
@@ -85,11 +95,15 @@
     },
     "skip_task": {
       "name": "Skip task",
-      "description": "Skips the current period of a task without awarding points and without advancing the rotation.",
+      "description": "Skips the current period of a task without awarding points and without advancing the rotation. If task_id is an auto-generated parent confirmation task, this rejects the child's claim instead - see 'note'.",
       "fields": {
         "task_id": {
           "name": "Task ID",
           "description": "The task's ID (see the status sensor's attributes)."
+        },
+        "note": {
+          "name": "Note",
+          "description": "Optional: only used when rejecting a child's completion claim - an explanation shown/notified to the child for why it wasn't accepted."
         }
       }
     },
@@ -132,6 +146,16 @@
         "member_id": {
           "name": "Member ID",
           "description": "Optional: release the reservation on behalf of a member other than the calling user."
+        }
+      }
+    },
+    "reset_points": {
+      "name": "Reset points",
+      "description": "Resets stored points data: the completion log/history, reward redemptions, and Meilenstein-/Streak-Bonus tracking. Tasks, members, and the reward catalog itself are left untouched.",
+      "fields": {
+        "member_id": {
+          "name": "Member ID",
+          "description": "Optional: only reset this member's points data. Left empty, every member is reset."
         }
       }
     }

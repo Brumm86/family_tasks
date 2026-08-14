@@ -14,6 +14,7 @@ import random
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
@@ -28,14 +29,20 @@ from .const import (
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
+    CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_MILESTONE_1_BONUS_POINTS,
     CONF_MILESTONE_1_THRESHOLD_PERCENT,
     CONF_MILESTONE_2_BONUS_POINTS,
     CONF_MILESTONE_2_THRESHOLD_PERCENT,
     CONF_MILESTONE_BONUS_ENABLED,
+    CONF_STREAK_BONUS_ENABLED,
+    CONF_STREAK_BONUS_POINTS,
+    CONF_STREAK_BONUS_REQUIRED_WEEKS,
+    CONF_STREAK_BONUS_THRESHOLD_POINTS,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
+    CONF_TASK_VACATION_BEHAVIOR,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     CONFIRMATION_REJECTION_PENALTY_POINTS,
     COORDINATOR_UPDATE_INTERVAL,
@@ -47,8 +54,13 @@ from .const import (
     DEFAULT_MILESTONE_BONUS_ENABLED,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
+    DEFAULT_STREAK_BONUS_ENABLED,
+    DEFAULT_STREAK_BONUS_POINTS,
+    DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+    DEFAULT_STREAK_BONUS_THRESHOLD_POINTS,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
+    EVENT_TASK_REJECTED,
     MANUAL_POINTS_TASK_ID,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
@@ -64,6 +76,7 @@ from .const import (
     ROTATION_STRATEGY_LEAST_POINTS,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
+    STREAK_BONUS_TASK_ID,
     TASK_KIND_CHECKLIST,
     TASK_KIND_MANDATORY,
     TASK_KIND_STANDARD,
@@ -72,6 +85,8 @@ from .const import (
     TASK_STATUS_IDLE,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_PENDING,
+    VACATION_BEHAVIOR_PAUSE,
+    VACATION_BEHAVIOR_SHOW,
 )
 from .storage import (
     BatteryOverrideStorageCollection,
@@ -81,8 +96,10 @@ from .storage import (
     MemberStorageCollection,
     MilestoneBonusStateStore,
     RewardRedemptionStorageCollection,
+    StreakBonusStateStore,
     TaskStorageCollection,
     TriggerStateStore,
+    VacationModeStateStore,
     weekly_spendable_points,
 )
 
@@ -196,6 +213,16 @@ class TaskStatusData:
     # CONF_TASK_CREATED_BY_MEMBER_ID in const.py) - the card uses this to
     # hide such a task from everyone except the member it names.
     created_by_member_id: str | None = None
+    # v0.32: "show"/"pause" - what this task does while the household-wide
+    # Urlaubsmodus switch is on, see CONF_TASK_VACATION_BEHAVIOR in const.py.
+    # Exposed so the card's task-edit form can pre-fill the current choice.
+    vacation_behavior: str = VACATION_BEHAVIOR_SHOW
+    # v0.32: a parent's free-text note left the last time this task's claim
+    # was rejected ("Ablehnen"), and when - see async_skip_task in
+    # coordinator.py. Both None once the child has acted on the task again
+    # (a fresh completion or confirmation request clears them).
+    last_rejection_note: str | None = None
+    last_rejection_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -233,6 +260,12 @@ class MemberSummaryData:
     # action) the moment none of their mandatory tasks are overdue anymore;
     # ticks missed while paused are never made up.
     screen_time_grant_active: bool = True
+    # v0.32: current consecutive-week Streak-Bonus length - see
+    # CONF_STREAK_BONUS_ENABLED in const.py and
+    # FamilyTasksCoordinator._async_process_streak_bonus. 0 whenever the
+    # feature is off or the member hasn't reached the threshold in their most
+    # recently judged week.
+    streak_weeks: int = 0
 
 
 @dataclass(slots=True)
@@ -258,6 +291,19 @@ class FamilyTasksData:
     milestone_1_bonus_points: int = 0
     milestone_2_threshold_percent: int = DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
     milestone_2_bonus_points: int = 0
+    # v0.32: the *absolute* point value each threshold above works out to
+    # this week (round(weekly_progress_goal_points * threshold_percent / 100),
+    # the exact same computation FamilyTasksCoordinator._async_process_milestone_bonus
+    # itself awards against) - computed once, here, in Python and exposed so
+    # the card can show/label the milestone markers with these numbers
+    # directly instead of recomputing threshold_percent -> points itself in
+    # JS. Python's round() (banker's rounding) and JS's Math.round() (always
+    # rounds .5 up) can disagree on an exact .5 - recomputing independently
+    # in the card could then show a marker at a slightly different point
+    # value than the one the backend actually awards at. 0 whenever
+    # weekly_progress_goal_points is 0 (nothing to take a percentage of).
+    milestone_1_threshold_points: int = 0
+    milestone_2_threshold_points: int = 0
     # v0.23: household-wide default rotation strategy for new tasks (see
     # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
     # same reason the milestone-bonus settings above do (no dedicated entity
@@ -273,6 +319,28 @@ class FamilyTasksData:
     # card then renders each bar as a plain "points earned this week" tally
     # with no target to reach.
     weekly_progress_goal_points: int = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+    # v0.32: household-wide Streak-Bonus settings (see
+    # CONF_STREAK_BONUS_ENABLED in const.py) - rides along here for the same
+    # "no dedicated entity for a plain options value" reason the milestone/
+    # weekly-goal settings above do. streak_bonus_target_points is the
+    # already-computed absolute weekly target (weekly_progress_goal_points +
+    # streak_bonus_threshold_points, floored at the threshold alone if no
+    # weekly goal is configured) - same "compute once in Python, don't make
+    # the card redo it" reasoning as milestone_1_threshold_points above,
+    # though here it's a plain sum so there is no rounding to disagree on.
+    streak_bonus_enabled: bool = False
+    streak_bonus_threshold_points: int = DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+    streak_bonus_required_weeks: int = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+    streak_bonus_points: int = 0
+    streak_bonus_target_points: int = 0
+    # v0.32: whether the household-wide Urlaubsmodus switch
+    # (switch.FamilyTasksVacationModeSwitch) is currently on - rides along
+    # here (not a dedicated attribute on the switch's own entity state, which
+    # already exposes it as its native on/off state) purely so the card can
+    # read it off the same per-refresh snapshot as everything else, without
+    # having to separately track the switch entity's state too. See
+    # VacationModeStateStore in storage.py.
+    vacation_mode_active: bool = False
 
 
 def _current_period_date(recurrence: dict, today: date) -> date:
@@ -399,6 +467,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         reward_redemptions: RewardRedemptionStorageCollection,
         milestone_bonus_state: MilestoneBonusStateStore,
         claim_state: ClaimStateStore,
+        streak_bonus_state: StreakBonusStateStore,
+        vacation_mode_state: VacationModeStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -416,6 +486,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.reward_redemptions = reward_redemptions
         self.milestone_bonus_state = milestone_bonus_state
         self.claim_state = claim_state
+        self.streak_bonus_state = streak_bonus_state
+        self.vacation_mode_state = vacation_mode_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -460,6 +532,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # not just after a second refresh.
         await self._async_correct_negative_balances(weekly_progress_goal_points)
         await self._async_process_milestone_bonus(start_of_week, weekly_progress_goal_points)
+        await self._async_process_streak_bonus(start_of_week, weekly_progress_goal_points)
+
+        # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
+        # storage.py. Read once per refresh, same pattern as
+        # weekly_progress_goal_points above; consulted below to skip any task
+        # whose CONF_TASK_VACATION_BEHAVIOR is "pause" while it's on.
+        vacation_mode_active = self.vacation_mode_state.is_active
 
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
@@ -484,6 +563,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         for task_id, task in self.tasks.data.items():
             if not task.get("enabled", True):
+                continue
+            # v0.32: paused for the duration of Urlaubsmodus - treated exactly
+            # like "enabled: false" above (no status entry at all, not due,
+            # not shown), except conditional on the household-wide switch
+            # instead of permanent. A task left at the default "show"
+            # (VACATION_BEHAVIOR_SHOW) is completely unaffected.
+            if (
+                vacation_mode_active
+                and task.get(CONF_TASK_VACATION_BEHAVIOR, VACATION_BEHAVIOR_SHOW)
+                == VACATION_BEHAVIOR_PAUSE
+            ):
                 continue
 
             recurrence = task["recurrence"]
@@ -665,6 +755,23 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     eligible_member_ids = [claimed_by_member_id]
                     claimable = False
 
+            # v0.32: once a child reserves ("Annehmen") an Aufgabenpool
+            # occurrence, it is firmly theirs for as long as the reservation
+            # holds - not just in terms of who *may* complete it
+            # (eligible_member_ids above already narrows to just them), but
+            # also in terms of how the occurrence displays: assigned_member_id/
+            # assigned_member_ids feed the card's assignee label and per-
+            # member open-task counts, and the card's "Aufgabenpool" section
+            # (_isClaimedPoolTask in family-tasks-card.js) now reads
+            # claimed_by_member_id to move a claimed occurrence out of that
+            # section and into the claimant's normal task list instead of
+            # leaving it looking unclaimed there. Only while the claim is
+            # actually active - an expired/never-claimed pool occurrence is
+            # untouched.
+            if is_pool_task and claimed_by_member_id:
+                assigned_member_id = claimed_by_member_id
+                assigned_member_ids = [claimed_by_member_id]
+
             subtasks_status: list[dict] = []
             if task.get("kind") == TASK_KIND_CHECKLIST:
                 checked_ids = self.checklist_state.checked_ids(task_id, period_key)
@@ -711,6 +818,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 trigger_sensor_unit=trigger_sensor_unit,
                 subtasks=subtasks_status,
                 created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
+                vacation_behavior=task.get(CONF_TASK_VACATION_BEHAVIOR, VACATION_BEHAVIOR_SHOW),
+                last_rejection_note=task.get("last_rejection_note"),
+                last_rejection_at=dt_util.parse_datetime(task["last_rejection_at"])
+                if task.get("last_rejection_at")
+                else None,
             )
 
         # Total points already redeemed for a catalog reward (v0.9), per
@@ -746,6 +858,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 points_available=spendable_points - redeemed_points.get(member_id, 0),
                 open_tasks=open_tasks_by_member.get(member_id, 0),
                 screen_time_grant_active=member_id not in screen_time_paused_members,
+                streak_weeks=(self.streak_bonus_state.get(member_id) or {}).get(
+                    "streak_count", 0
+                ),
             )
 
         milestone_bonus_enabled = False
@@ -764,6 +879,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # FamilyTasksMemberPointsSensor in sensor.py for how it now reaches
         # the card.
         default_rotation_strategy = DEFAULT_ROTATION_STRATEGY
+        streak_bonus_enabled = DEFAULT_STREAK_BONUS_ENABLED
+        streak_bonus_threshold_points = DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+        streak_bonus_required_weeks = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+        streak_bonus_points = DEFAULT_STREAK_BONUS_POINTS
         if self.config_entry:
             options = self.config_entry.options
             milestone_bonus_enabled = bool(
@@ -784,6 +903,34 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             default_rotation_strategy = options.get(
                 CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
             )
+            streak_bonus_enabled = bool(
+                options.get(CONF_STREAK_BONUS_ENABLED, DEFAULT_STREAK_BONUS_ENABLED)
+            )
+            streak_bonus_threshold_points = options.get(
+                CONF_STREAK_BONUS_THRESHOLD_POINTS, DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+            )
+            streak_bonus_required_weeks = options.get(
+                CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+            )
+            streak_bonus_points = options.get(
+                CONF_STREAK_BONUS_POINTS, DEFAULT_STREAK_BONUS_POINTS
+            )
+
+        # See FamilyTasksData.milestone_1_threshold_points's docstring - the
+        # exact same round() the awarding logic
+        # (_async_process_milestone_bonus) uses, computed once here too so
+        # the card never has to redo it (and risk disagreeing on a .5 case).
+        milestone_1_threshold_points = (
+            round(weekly_progress_goal_points * milestone_1_threshold_percent / 100)
+            if weekly_progress_goal_points > 0
+            else 0
+        )
+        milestone_2_threshold_points = (
+            round(weekly_progress_goal_points * milestone_2_threshold_percent / 100)
+            if weekly_progress_goal_points > 0
+            else 0
+        )
+        streak_bonus_target_points = max(0, weekly_progress_goal_points) + streak_bonus_threshold_points
 
         return FamilyTasksData(
             tasks=task_statuses,
@@ -793,8 +940,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             milestone_1_bonus_points=milestone_1_bonus_points,
             milestone_2_threshold_percent=milestone_2_threshold_percent,
             milestone_2_bonus_points=milestone_2_bonus_points,
+            milestone_1_threshold_points=milestone_1_threshold_points,
+            milestone_2_threshold_points=milestone_2_threshold_points,
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
+            streak_bonus_enabled=streak_bonus_enabled,
+            streak_bonus_threshold_points=streak_bonus_threshold_points,
+            streak_bonus_required_weeks=streak_bonus_required_weeks,
+            streak_bonus_points=streak_bonus_points,
+            streak_bonus_target_points=streak_bonus_target_points,
+            vacation_mode_active=vacation_mode_active,
         )
 
     def _current_period_key(self, task_id: str, task: dict) -> str | None:
@@ -950,20 +1105,32 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             await self.tasks.async_delete_item(task_id)
         await self.async_request_refresh()
 
-    async def async_skip_task(self, task_id: str) -> None:
+    async def async_skip_task(self, task_id: str, note: str | None = None) -> None:
         """Skip the current occurrence without awarding points or rotating.
 
         For an auto-generated parent confirmation task, skipping means the
         parent *rejects* the child's claim: the confirmation task is dropped
         without finalizing anything, so the original task falls back to its
         normal pending/overdue state and the child can complete it again.
+
+        ``note`` (v0.32) only applies to that rejection case - see ATTR_NOTE
+        in const.py: an optional explanation a parent leaves for why the
+        completion wasn't accepted (e.g. "Bett noch nicht gemacht"). Stored
+        on the deduction's completion-log entry for the permanent record,
+        *and* written onto the original task as "last_rejection_note"/
+        "last_rejection_at" so the card can show it to the child right on the
+        task itself (see TaskStatusData.last_rejection_note/...at, cleared
+        again the next time the child retries - see
+        _async_request_confirmation above). The child is also notified live,
+        the same way a new task assignment is - see _async_notify_rejection.
         """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
 
         task = self.tasks.data[task_id]
 
-        if task.get("confirms"):
+        confirms = task.get("confirms")
+        if confirms:
             # v0.27: a parent explicitly rejecting a child's claimed
             # completion costs that child CONFIRMATION_REJECTION_PENALTY_POINTS
             # point(s), logged the same way a manual points/award adjustment
@@ -975,10 +1142,25 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             await self.completions.async_add_entry(
                 task_id=MANUAL_POINTS_TASK_ID,
                 period_key=dt_util.utcnow().date().isoformat(),
-                member_id=task["confirms"]["member_id"],
+                member_id=confirms["member_id"],
                 points_awarded=-CONFIRMATION_REJECTION_PENALTY_POINTS,
                 task_name=f"Nicht freigegeben: {task.get('name', 'Aufgabe')}",
+                note=note,
             )
+            original_task_id = confirms.get("task_id")
+            original_task_name = task.get("name", "Aufgabe")
+            if original_task_id and original_task_id in self.tasks.data:
+                original_task_name = self.tasks.data[original_task_id].get(
+                    "name", original_task_name
+                )
+                await self.tasks.async_update_item(
+                    original_task_id,
+                    {
+                        "last_rejection_note": note,
+                        "last_rejection_at": dt_util.utcnow().isoformat(),
+                    },
+                )
+            await self._async_notify_rejection(confirms["member_id"], original_task_name, note)
             await self.trigger_state.async_clear(task_id)
             await self.tasks.async_delete_item(task_id)
             await self.async_request_refresh()
@@ -1002,6 +1184,63 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
             await self.trigger_state.async_clear(task_id)
         await self.async_request_refresh()
+
+    async def _async_notify_rejection(
+        self, member_id: str, task_name: str, note: str | None
+    ) -> None:
+        """Best-effort notify a child that a parent rejected their completion.
+
+        Mirrors __init__._async_notify_member's two-channel pattern (the
+        member's own configured notify.* service, else a
+        persistent_notification fallback) in miniature - duplicated here
+        rather than imported, since __init__.py already imports from
+        coordinator.py and importing back the other way would be circular.
+        Also fires EVENT_TASK_REJECTED, same extension-point reasoning as
+        EVENT_TASK_ASSIGNED.
+        """
+        member = self.members.data.get(member_id)
+        if not member:
+            return
+        title = "Family Tasks"
+        message = f"Nicht freigegeben: {task_name}"
+        if note:
+            message += f" – {note}"
+
+        notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
+        if notify_service:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    notify_service,
+                    {"title": title, "message": message},
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "Failed to call notify.%s for %s: %s", notify_service, member_id, err
+                )
+        else:
+            try:
+                persistent_notification.async_create(
+                    self.hass,
+                    message,
+                    title=title,
+                    notification_id=f"{DOMAIN}_rejection_{member_id}_{dt_util.utcnow().timestamp()}",
+                )
+            except Exception as err:  # noqa: BLE001 - best-effort, must never block the rejection
+                _LOGGER.warning(
+                    "Failed to raise persistent notification for %s: %s", member_id, err
+                )
+
+        self.hass.bus.async_fire(
+            EVENT_TASK_REJECTED,
+            {
+                "member_id": member_id,
+                "member_name": member.get("name"),
+                "task_name": task_name,
+                "note": note,
+            },
+        )
 
     async def async_claim_task(self, task_id: str, member_id: str | None) -> None:
         """Reserve a task's current occurrence for CLAIM_RESERVATION_MINUTES.
@@ -1199,6 +1438,15 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         skipping it rejects the claim. See RECURRENCE_CONFIRMATION in
         const.py for why this reuses the trigger-task idle/open machinery.
         """
+        # v0.32: the child has retried - any note left on a previous
+        # rejection of this task no longer applies, see "last_rejection_note"/
+        # "last_rejection_at" in storage.TASK_UPDATE_SCHEMA and
+        # async_skip_task's "confirms" branch below.
+        if task.get("last_rejection_note") or task.get("last_rejection_at"):
+            await self.tasks.async_update_item(
+                task_id, {"last_rejection_note": None, "last_rejection_at": None}
+            )
+
         child = self.members.data.get(child_member_id)
         child_name = child["name"] if child else child_member_id
         parent_ids = [
@@ -1445,6 +1693,132 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     threshold_percent,
                     period_key,
                 )
+
+    async def _async_process_streak_bonus(
+        self, start_of_week: datetime, goal_points: int
+    ) -> None:
+        """Award "Streak-Bonus" points for consecutive weeks above target.
+
+        See CONF_STREAK_BONUS_ENABLED/...THRESHOLD_POINTS/...REQUIRED_WEEKS/
+        ...POINTS in const.py. Unlike the Meilensteinbonus above (awarded
+        live, mid-week), a streak can only be judged once a week has actually
+        ended - so this catches each member up on every fully-elapsed
+        calendar week since their StreakBonusStateStore cursor last stopped,
+        oldest first, judging each one against ``goal_points +
+        streak_bonus_threshold_points`` and incrementing/resetting a
+        per-member streak counter accordingly. Once that counter reaches
+        streak_bonus_required_weeks, *every* further consecutive week that
+        still meets target earns the bonus again (rolling) - a maintained
+        streak, not a one-off reward for first reaching it.
+
+        A brand-new member (or the feature's very first run) starts its
+        cursor at "last week" rather than the beginning of time, so turning
+        this on doesn't retroactively grind through a household's entire
+        history - same reasoning as the Meilensteinbonus only ever reacting
+        to the current week.
+        """
+        if not self.config_entry:
+            return
+        options = self.config_entry.options
+        if not options.get(CONF_STREAK_BONUS_ENABLED, DEFAULT_STREAK_BONUS_ENABLED):
+            return
+        threshold_extra = options.get(
+            CONF_STREAK_BONUS_THRESHOLD_POINTS, DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+        )
+        required_weeks = options.get(
+            CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+        )
+        bonus_points = options.get(CONF_STREAK_BONUS_POINTS, DEFAULT_STREAK_BONUS_POINTS)
+        if threshold_extra <= 0 or required_weeks <= 0 or bonus_points <= 0:
+            return
+        target_points = max(0, goal_points) + threshold_extra
+
+        for member_id, member in self.members.data.items():
+            if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or not member.get(
+                "active", True
+            ):
+                continue
+            await self._async_process_member_streak(
+                member_id, start_of_week, target_points, required_weeks, bonus_points
+            )
+
+    async def _async_process_member_streak(
+        self,
+        member_id: str,
+        start_of_week: datetime,
+        target_points: int,
+        required_weeks: int,
+        bonus_points: int,
+    ) -> None:
+        """Catch up one member's Streak-Bonus cursor through every elapsed week."""
+        state = self.streak_bonus_state.get(member_id)
+        if state and state.get("processed_through"):
+            cursor = dt_util.parse_datetime(state["processed_through"]) or (
+                start_of_week - timedelta(days=7)
+            )
+        else:
+            cursor = start_of_week - timedelta(days=7)
+        streak_count = state.get("streak_count", 0) if state else 0
+
+        # Cap how many weeks a single refresh catches up on, in case a
+        # household was offline for a very long time - the streak still
+        # ends up correct, just spread across a few extra refreshes instead
+        # of one long blocking loop.
+        weeks_processed = 0
+        while cursor < start_of_week and weeks_processed < 52:
+            week_points = self.completions.points_between(
+                member_id, cursor, cursor + timedelta(days=7)
+            )
+            if week_points >= target_points:
+                streak_count += 1
+            else:
+                streak_count = 0
+            if streak_count >= required_weeks:
+                period_key = dt_util.as_local(cursor).date().isoformat()
+                await self.completions.async_add_entry(
+                    task_id=STREAK_BONUS_TASK_ID,
+                    period_key=period_key,
+                    member_id=member_id,
+                    points_awarded=bonus_points,
+                    task_name=f"Streak-Bonus: {streak_count}. Woche in Folge über dem Ziel",
+                )
+                _LOGGER.debug(
+                    "Awarded %s Streak-Bonus point(s) to %s for week %s (streak %s)",
+                    bonus_points,
+                    member_id,
+                    period_key,
+                    streak_count,
+                )
+            cursor += timedelta(days=7)
+            weeks_processed += 1
+
+        if weeks_processed:
+            await self.streak_bonus_state.async_set(member_id, cursor, streak_count)
+
+    async def async_reset_points(self, member_id: str | None = None) -> None:
+        """Reset stored *points* data - see SERVICE_RESET_POINTS in const.py.
+
+        Clears the completion log (points_total/points_week/.../history),
+        reward redemptions (so points_available is no longer reduced by past
+        purchases either), and the Meilenstein-/Streak-Bonus tracking state.
+        Task and member *definitions* and the reward catalog itself are left
+        completely untouched - this only ever resets *earned/spent points*,
+        never the household's setup. ``member_id`` left unset (None) resets
+        every member at once; given, only that member's data is cleared.
+        """
+        await self.completions.async_reset(member_id)
+        for redemption_id, redemption in list(self.reward_redemptions.data.items()):
+            if member_id is None or redemption.get("member_id") == member_id:
+                await self.reward_redemptions.async_delete_item(redemption_id)
+        await self.milestone_bonus_state.async_reset(member_id)
+        await self.streak_bonus_state.async_reset(member_id)
+        _LOGGER.info("Reset points data for %s", member_id or "every member")
+        await self.async_request_refresh()
+
+    async def async_set_vacation_mode(self, is_active: bool) -> None:
+        """Turn the household-wide Urlaubsmodus on/off - see switch.py."""
+        await self.vacation_mode_state.async_set(is_active)
+        await self.async_request_refresh()
 
     async def _async_correct_negative_balances(self, goal_points: int) -> None:
         """One-time, per-member top-up for balances left negative by a v0.29/v0.30 bug.

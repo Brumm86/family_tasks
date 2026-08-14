@@ -21,17 +21,21 @@ from homeassistant.loader import async_get_integration
 
 from .const import (
     ATTR_MEMBER_ID,
+    ATTR_NOTE,
     ATTR_SUBTASK_ID,
     ATTR_TASK_ID,
     CARD_FILENAME,
     CARD_URL_PATH,
     CONF_MEMBER_NOTIFY_SERVICE,
+    CONF_VACATION_MODE_DEFAULT,
+    DEFAULT_VACATION_MODE,
     DOMAIN,
     EVENT_TASK_ASSIGNED,
     PLATFORMS,
     SERVICE_CLAIM_TASK,
     SERVICE_COMPLETE_TASK,
     SERVICE_RELEASE_TASK,
+    SERVICE_RESET_POINTS,
     SERVICE_SKIP_TASK,
     SERVICE_TOGGLE_SUBTASK,
 )
@@ -47,8 +51,10 @@ from .storage import (
     MilestoneBonusStateStore,
     RewardRedemptionStorageCollection,
     RewardStorageCollection,
+    StreakBonusStateStore,
     TaskStorageCollection,
     TriggerStateStore,
+    VacationModeStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_claim_state_store,
@@ -57,8 +63,10 @@ from .storage import (
     async_create_milestone_bonus_state_store,
     async_create_reward_redemptions_collection,
     async_create_rewards_collection,
+    async_create_streak_bonus_state_store,
     async_create_tasks_collection,
     async_create_trigger_state_store,
+    async_create_vacation_mode_state_store,
     async_member_id_for_context,
     async_setup_websocket_api,
 )
@@ -72,7 +80,15 @@ COMPLETE_TASK_SCHEMA = vol.Schema(
         vol.Optional(ATTR_MEMBER_ID): cv.string,
     }
 )
-SKIP_TASK_SCHEMA = vol.Schema({vol.Required(ATTR_TASK_ID): cv.string})
+SKIP_TASK_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_TASK_ID): cv.string,
+        # v0.32: only meaningful when task_id is an auto-generated parent
+        # confirmation task - see async_skip_task's "confirms" branch.
+        # Ignored (harmlessly) for a normal task skip.
+        vol.Optional(ATTR_NOTE): cv.string,
+    }
+)
 TOGGLE_SUBTASK_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_TASK_ID): cv.string,
@@ -92,6 +108,7 @@ RELEASE_TASK_SCHEMA = vol.Schema(
         vol.Optional(ATTR_MEMBER_ID): cv.string,
     }
 )
+RESET_POINTS_SCHEMA = vol.Schema({vol.Optional(ATTR_MEMBER_ID): cv.string})
 
 
 @dataclass(slots=True)
@@ -109,6 +126,8 @@ class FamilyTasksRuntimeData:
     milestone_bonus_state: MilestoneBonusStateStore
     favorites: FavoriteStorageCollection
     claim_state: ClaimStateStore
+    streak_bonus_state: StreakBonusStateStore
+    vacation_mode_state: VacationModeStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -148,6 +167,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     checklist_state = await async_create_checklist_state_store(hass)
     milestone_bonus_state = await async_create_milestone_bonus_state_store(hass)
     claim_state = await async_create_claim_state_store(hass)
+    streak_bonus_state = await async_create_streak_bonus_state_store(hass)
+    # v0.32: CONF_VACATION_MODE_DEFAULT only ever seeds this the very first
+    # time it loads with nothing on disk yet - see VacationModeStateStore in
+    # storage.py.
+    vacation_mode_default = entry.options.get(
+        CONF_VACATION_MODE_DEFAULT, DEFAULT_VACATION_MODE
+    )
+    vacation_mode_state = await async_create_vacation_mode_state_store(
+        hass, vacation_mode_default
+    )
 
     coordinator = FamilyTasksCoordinator(
         hass,
@@ -161,6 +190,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         reward_redemptions,
         milestone_bonus_state,
         claim_state,
+        streak_bonus_state,
+        vacation_mode_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -176,6 +207,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         milestone_bonus_state=milestone_bonus_state,
         favorites=favorites,
         claim_state=claim_state,
+        streak_bonus_state=streak_bonus_state,
+        vacation_mode_state=vacation_mode_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -400,7 +433,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def _async_skip_task(call: ServiceCall) -> None:
         coordinator = _get_coordinator(hass)
-        await coordinator.async_skip_task(call.data[ATTR_TASK_ID])
+        await coordinator.async_skip_task(call.data[ATTR_TASK_ID], call.data.get(ATTR_NOTE))
 
     async def _async_toggle_subtask(call: ServiceCall) -> None:
         coordinator = _get_coordinator(hass)
@@ -419,6 +452,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
         member_id = await _async_resolve_member_id(call)
         await coordinator.async_release_task(call.data[ATTR_TASK_ID], member_id)
 
+    async def _async_reset_points(call: ServiceCall) -> None:
+        coordinator = _get_coordinator(hass)
+        await coordinator.async_reset_points(call.data.get(ATTR_MEMBER_ID))
+
     hass.services.async_register(
         DOMAIN, SERVICE_COMPLETE_TASK, _async_complete_task, schema=COMPLETE_TASK_SCHEMA
     )
@@ -436,4 +473,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_RELEASE_TASK, _async_release_task, schema=RELEASE_TASK_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_RESET_POINTS, _async_reset_points, schema=RESET_POINTS_SCHEMA
     )

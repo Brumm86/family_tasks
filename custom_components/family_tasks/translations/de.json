@@ -27,7 +27,12 @@
           "milestone_1_threshold_percent": "Schwelle 1 (% der Zielpunktzahl)",
           "milestone_1_bonus_points": "Bonuspunkte bei Schwelle 1",
           "milestone_2_threshold_percent": "Schwelle 2 (% der Zielpunktzahl)",
-          "milestone_2_bonus_points": "Bonuspunkte bei Schwelle 2"
+          "milestone_2_bonus_points": "Bonuspunkte bei Schwelle 2",
+          "streak_bonus_enabled": "Streak-Bonus vergeben",
+          "streak_bonus_threshold_points": "Zusätzliche Punkte oberhalb der Zielpunktzahl je Woche",
+          "streak_bonus_required_weeks": "Erforderliche Wochen in Folge",
+          "streak_bonus_points": "Bonuspunkte je Streak-Woche",
+          "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
       }
     },
@@ -66,6 +71,11 @@
       "screen_time_grant_active": {
         "name": "Handyzeitgewährung aktiv"
       }
+    },
+    "switch": {
+      "vacation_mode": {
+        "name": "Urlaubsmodus"
+      }
     }
   },
   "services": {
@@ -85,11 +95,15 @@
     },
     "skip_task": {
       "name": "Aufgabe überspringen",
-      "description": "Überspringt die aktuelle Periode einer Aufgabe ohne Punktevergabe und ohne die Rotation zu verschieben.",
+      "description": "Überspringt die aktuelle Periode einer Aufgabe ohne Punktevergabe und ohne die Rotation zu verschieben. Ist task_id eine automatisch erzeugte Eltern-Bestätigungsaufgabe, wird stattdessen die Erledigung des Kindes abgelehnt - siehe 'note'.",
       "fields": {
         "task_id": {
           "name": "Aufgaben-ID",
           "description": "Die ID der Aufgabe (siehe Attribute des Status-Sensors)."
+        },
+        "note": {
+          "name": "Notiz",
+          "description": "Optional: nur beim Ablehnen einer Kind-Bestätigung relevant - eine Erklärung, die dem Kind angezeigt und mitgeteilt wird, warum die Erledigung nicht anerkannt wurde."
         }
       }
     },
@@ -132,6 +146,16 @@
         "member_id": {
           "name": "Mitglieds-ID",
           "description": "Optional: gibt die Reservierung im Namen eines anderen Mitglieds als des aufrufenden Nutzers zurück."
+        }
+      }
+    },
+    "reset_points": {
+      "name": "Punkte zurücksetzen",
+      "description": "Setzt gespeicherte Punkte-Daten zurück: das Erledigungs-Log/die Historie, Belohnungs-Einlösungen sowie das Meilenstein-/Streak-Bonus-Tracking. Aufgaben, Mitglieder und der Belohnungs-Katalog selbst bleiben unangetastet.",
+      "fields": {
+        "member_id": {
+          "name": "Mitglieds-ID",
+          "description": "Optional: setzt nur die Punkte-Daten dieses Mitglieds zurück. Leer gelassen werden alle Mitglieder zurückgesetzt."
         }
       }
     }

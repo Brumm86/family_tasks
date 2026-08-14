@@ -122,6 +122,17 @@ class FamilyTasksTaskStatusSensor(
             # The card uses this to hide such a task from everyone except the
             # member it names.
             "created_by_member_id": task.created_by_member_id,
+            # v0.32: "show"/"pause" - see CONF_TASK_VACATION_BEHAVIOR in
+            # const.py. Lets the card's task-edit form pre-fill the current
+            # choice.
+            "vacation_behavior": task.vacation_behavior,
+            # v0.32: a parent's note from the last time this task's claim was
+            # rejected, and when - both None once the child has retried. See
+            # async_skip_task in coordinator.py.
+            "last_rejection_note": task.last_rejection_note,
+            "last_rejection_at": task.last_rejection_at.isoformat()
+            if task.last_rejection_at
+            else None,
         }
 
 
@@ -188,6 +199,27 @@ class FamilyTasksMemberPointsSensor(
             "milestone_1_bonus_points": self.coordinator.data.milestone_1_bonus_points,
             "milestone_2_threshold_percent": self.coordinator.data.milestone_2_threshold_percent,
             "milestone_2_bonus_points": self.coordinator.data.milestone_2_bonus_points,
+            # v0.32: the absolute point value each threshold above works out
+            # to this week, computed once server-side (round(), same as the
+            # awarding logic itself uses) - see
+            # FamilyTasksData.milestone_1_threshold_points in coordinator.py.
+            # The card shows these directly instead of recomputing
+            # threshold_percent -> points itself, so it can never disagree
+            # with the backend on a borderline .5 rounding case.
+            "milestone_1_threshold_points": self.coordinator.data.milestone_1_threshold_points,
+            "milestone_2_threshold_points": self.coordinator.data.milestone_2_threshold_points,
+            # v0.32: household-wide Streak-Bonus settings (see
+            # CONF_STREAK_BONUS_ENABLED in const.py) - same "rides along,
+            # identical on every member's points sensor" reasoning as the
+            # Meilensteinbonus attributes above.
+            "streak_bonus_enabled": self.coordinator.data.streak_bonus_enabled,
+            "streak_bonus_threshold_points": self.coordinator.data.streak_bonus_threshold_points,
+            "streak_bonus_required_weeks": self.coordinator.data.streak_bonus_required_weeks,
+            "streak_bonus_points": self.coordinator.data.streak_bonus_points,
+            "streak_bonus_target_points": self.coordinator.data.streak_bonus_target_points,
+            # v0.32: this member's current consecutive-week streak length -
+            # see MemberSummaryData.streak_weeks in coordinator.py.
+            "streak_weeks": member.streak_weeks,
             # v0.23: household-wide default rotation strategy (see
             # CONF_DEFAULT_ROTATION_STRATEGY in const.py), identical on every
             # member's points sensor - same "rides along, no dedicated
@@ -202,6 +234,11 @@ class FamilyTasksMemberPointsSensor(
             # "Wochenfortschritt" progress-bar target; 0 means no goal is
             # configured (every earned point is immediately spendable).
             "weekly_progress_goal_points": self.coordinator.data.weekly_progress_goal_points,
+            # v0.32: whether Urlaubsmodus is currently on - also the native
+            # on/off state of switch.FamilyTasksVacationModeSwitch, repeated
+            # here purely so the card can read it off this same per-refresh
+            # snapshot without separately looking up that entity by id.
+            "vacation_mode_active": self.coordinator.data.vacation_mode_active,
         }
 
 

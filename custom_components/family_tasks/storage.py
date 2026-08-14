@@ -38,6 +38,7 @@ from .const import (
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
+    CONF_TASK_VACATION_BEHAVIOR,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
@@ -67,17 +68,22 @@ from .const import (
     STORAGE_KEY_MEMBERS,
     STORAGE_KEY_REWARD_REDEMPTIONS,
     STORAGE_KEY_REWARDS,
+    STORAGE_KEY_STREAK_BONUS_STATE,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
+    STORAGE_KEY_VACATION_MODE,
     STORAGE_KEY_WEEKLY_BONUS_STATE,
     STORAGE_VERSION,
     STORAGE_VERSION_MINOR,
+    STREAK_BONUS_TASK_ID,
     TASK_KIND_CHECKLIST,
     TASK_KIND_STANDARD,
     TASK_KINDS,
     TASK_TRIGGER_KINDS,
     TASK_TRIGGER_NUMERIC_STATE,
     TASK_TRIGGER_STATE,
+    VACATION_BEHAVIOR_SHOW,
+    VACATION_BEHAVIORS,
     WS_API_FAVORITE_INSTANTIATE,
     WS_API_MEMBER_WEEKLY_COMPLETIONS,
     WS_API_POINTS_AWARD,
@@ -231,6 +237,13 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     # See CONF_TASK_CREATED_BY_MEMBER_ID in const.py - only ever set by
     # ws_create_own_task, never by the card's admin task-creation form.
     vol.Optional(CONF_TASK_CREATED_BY_MEMBER_ID): str,
+    # v0.32: what this task should do while the household-wide Urlaubsmodus
+    # switch is on - "show" (default, behaves normally) or "pause" (skipped
+    # entirely, like a temporarily disabled task) - see
+    # CONF_TASK_VACATION_BEHAVIOR in const.py.
+    vol.Optional(CONF_TASK_VACATION_BEHAVIOR, default=VACATION_BEHAVIOR_SHOW): vol.In(
+        VACATION_BEHAVIORS
+    ),
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -249,6 +262,15 @@ TASK_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_COMPLETION_BUTTON_ENTITY_ID): vol.Any(None, cv.entity_id),
     vol.Optional("kind"): vol.In(TASK_KINDS),
     vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+    vol.Optional(CONF_TASK_VACATION_BEHAVIOR): vol.In(VACATION_BEHAVIORS),
+    # v0.32: a parent's free-text note left when rejecting ("Ablehnen") this
+    # task's last claimed completion - never set by the card's task-edit
+    # form, only by FamilyTasksCoordinator.async_skip_task/
+    # _async_request_confirmation, which also clear it again once the child
+    # acts on the task again. Explicit null clears it, same pattern as
+    # CONF_COMPLETION_BUTTON_ENTITY_ID above.
+    vol.Optional("last_rejection_note"): vol.Any(None, str),
+    vol.Optional("last_rejection_at"): vol.Any(None, str),
 }
 
 MEMBER_CREATE_SCHEMA: collection.VolDictType = {
@@ -1410,6 +1432,7 @@ def async_setup_websocket_api(
                 MILESTONE_BONUS_1_TASK_ID,
                 MILESTONE_BONUS_2_TASK_ID,
                 POINTS_CORRECTION_TASK_ID,
+                STREAK_BONUS_TASK_ID,
             ):
                 continue
             completed_at = dt_util.parse_datetime(entry.get("completed_at", ""))
@@ -1719,6 +1742,7 @@ class CompletionLogStore:
         points_awarded: int,
         skipped: bool = False,
         task_name: str | None = None,
+        note: str | None = None,
     ) -> dict[str, Any]:
         """Append a new completion/skip entry and persist it.
 
@@ -1731,6 +1755,13 @@ class CompletionLogStore:
         entries written before this field existed simply have it as None,
         and that lookup falls back to resolving the task_id against the
         still-existing tasks collection (or "Aufgabe" if that's gone too).
+
+        ``note`` (v0.32) is only ever set for the negative MANUAL_POINTS_TASK_ID
+        entry async_skip_task logs when a parent rejects a child's completion
+        with an explanation - see ATTR_NOTE in const.py. Kept on the entry
+        itself purely as a permanent record; the child is actually notified
+        of it live via FamilyTasksCoordinator._async_notify_rejection, not by
+        reading this back out of the log.
         """
         entry = {
             CONF_ID: uuid4().hex,
@@ -1741,6 +1772,7 @@ class CompletionLogStore:
             "points_awarded": points_awarded,
             "skipped": skipped,
             "task_name": task_name,
+            "note": note,
         }
         self._entries.append(entry)
         if len(self._entries) > MAX_COMPLETION_LOG_ENTRIES:
@@ -1757,6 +1789,44 @@ class CompletionLogStore:
             if dt_util.parse_datetime(entry["completed_at"]) >= since:
                 total += entry["points_awarded"]
         return total
+
+    def points_between(self, member_id: str, start: datetime, end: datetime) -> int:
+        """Sum awarded points for a member within [start, end) UTC.
+
+        Used by FamilyTasksCoordinator._async_process_streak_bonus to judge
+        one specific, already-elapsed calendar week at a time - points_since
+        above has no upper bound, so it can't isolate a single past week on
+        its own.
+        """
+        total = 0
+        for entry in self._entries:
+            if entry["completed_by_member_id"] != member_id or entry["skipped"]:
+                continue
+            completed_at = dt_util.parse_datetime(entry["completed_at"])
+            if completed_at is not None and start <= completed_at < end:
+                total += entry["points_awarded"]
+        return total
+
+    async def async_reset(self, member_id: str | None = None) -> None:
+        """Clear logged points history - see SERVICE_RESET_POINTS in const.py.
+
+        ``member_id`` left unset (None) clears the entire log for every
+        member at once; given, only entries attributed to that member are
+        removed (this covers Meilenstein-/Streak-Bonus and manual award/
+        deduction entries too, since those also carry a real member_id - see
+        MANUAL_POINTS_TASK_ID/MILESTONE_BONUS_*_TASK_ID/STREAK_BONUS_TASK_ID
+        in const.py). A skipped entry (member_id None) has no owner and is
+        only ever removed by a full reset.
+        """
+        if member_id is None:
+            self._entries = []
+        else:
+            self._entries = [
+                entry
+                for entry in self._entries
+                if entry["completed_by_member_id"] != member_id
+            ]
+        await self._store.async_save(self._entries)
 
 
 def weekly_spendable_points(
@@ -2021,9 +2091,129 @@ class MilestoneBonusStateStore:
             self._state[key].append(member_id)
             await self._store.async_save(self._state)
 
+    async def async_reset(self, member_id: str | None = None) -> None:
+        """Clear award-tracking state - see SERVICE_RESET_POINTS in const.py.
+
+        ``member_id`` left unset (None) drops the whole current-week state
+        (it gets rebuilt from scratch the next time it's consulted); given,
+        only that member is removed from both threshold lists so a reset
+        member can immediately earn a Meilensteinbonus again this same week
+        instead of it looking already-awarded.
+        """
+        if member_id is None:
+            self._state = {}
+        else:
+            for key in ("threshold_1", "threshold_2"):
+                if member_id in self._state.get(key, []):
+                    self._state[key].remove(member_id)
+        await self._store.async_save(self._state)
+
 
 async def async_create_milestone_bonus_state_store(hass: HomeAssistant) -> MilestoneBonusStateStore:
     """Create and load the Meilensteinbonus award-tracking state store."""
     store = MilestoneBonusStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class StreakBonusStateStore:
+    """Per-member Streak-Bonus cursor/counter.
+
+    See CONF_STREAK_BONUS_ENABLED in const.py and
+    FamilyTasksCoordinator._async_process_streak_bonus in coordinator.py.
+    Unlike MilestoneBonusStateStore (which only ever needs to remember the
+    *current* week), a streak has to be judged across consecutive already-
+    elapsed weeks, so this remembers, per member, the UTC start-of-week
+    timestamp already processed ("processed_through" - the coordinator has
+    caught up on every week strictly before this one) and the current
+    consecutive-week streak length ("streak_count"). Not a StorageCollection,
+    coordinator-internal bookkeeping never edited by the user, same as
+    MilestoneBonusStateStore/ClaimStateStore.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, dict[str, Any]]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_STREAK_BONUS_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        # member_id -> {"processed_through": iso datetime str, "streak_count": int}
+        self._state: dict[str, dict[str, Any]] = {}
+
+    async def async_load(self) -> None:
+        """Load per-member streak state from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def get(self, member_id: str) -> dict[str, Any] | None:
+        """Return a member's current streak state, if any has been recorded yet."""
+        return self._state.get(member_id)
+
+    async def async_set(self, member_id: str, processed_through: datetime, streak_count: int) -> None:
+        """Persist a member's updated cursor/streak length."""
+        self._state[member_id] = {
+            "processed_through": processed_through.isoformat(),
+            "streak_count": streak_count,
+        }
+        await self._store.async_save(self._state)
+
+    async def async_reset(self, member_id: str | None = None) -> None:
+        """Clear streak state - see SERVICE_RESET_POINTS in const.py.
+
+        ``member_id`` left unset (None) clears every member; given, only
+        that member's cursor/counter is dropped - their very next elapsed
+        week is then judged fresh, starting a new streak at 0 instead of
+        continuing whatever it was before the reset.
+        """
+        if member_id is None:
+            self._state = {}
+        else:
+            self._state.pop(member_id, None)
+        await self._store.async_save(self._state)
+
+
+async def async_create_streak_bonus_state_store(hass: HomeAssistant) -> StreakBonusStateStore:
+    """Create and load the Streak-Bonus state store."""
+    store = StreakBonusStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class VacationModeStateStore:
+    """The household-wide Urlaubsmodus on/off state.
+
+    Backs switch.py's FamilyTasksVacationModeSwitch, which is the entity a
+    dashboard/automation actually toggles - this store is just where that
+    state is persisted (same "runtime state, not a StorageCollection"
+    reasoning as ClaimStateStore) so it survives a restart and is readable
+    from FamilyTasksCoordinator._async_update_data without depending on
+    entity-platform setup having already run (switch.py's platform is set up
+    *after* the coordinator's first refresh - see async_setup_entry in
+    __init__.py - so reading hass.states here instead would see nothing on
+    that very first refresh). CONF_VACATION_MODE_DEFAULT (const.py) seeds
+    ``is_active`` only the first time this loads with nothing on disk yet;
+    every toggle after that lives here, not in the config entry's options.
+    """
+
+    def __init__(self, hass: HomeAssistant, default_active: bool) -> None:
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_VACATION_MODE, minor_version=STORAGE_VERSION_MINOR
+        )
+        self._default_active = default_active
+        self.is_active = default_active
+
+    async def async_load(self) -> None:
+        """Load the stored on/off state from disk, seeding it on first run."""
+        stored = await self._store.async_load()
+        self.is_active = stored["is_active"] if stored else self._default_active
+
+    async def async_set(self, is_active: bool) -> None:
+        """Turn Urlaubsmodus on/off and persist it."""
+        self.is_active = is_active
+        await self._store.async_save({"is_active": is_active})
+
+
+async def async_create_vacation_mode_state_store(
+    hass: HomeAssistant, default_active: bool
+) -> VacationModeStateStore:
+    """Create and load the Urlaubsmodus state store."""
+    store = VacationModeStateStore(hass, default_active)
     await store.async_load()
     return store

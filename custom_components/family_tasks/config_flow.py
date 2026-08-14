@@ -33,6 +33,11 @@ from .const import (
     CONF_MILESTONE_BONUS_ENABLED,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_STREAK_BONUS_ENABLED,
+    CONF_STREAK_BONUS_POINTS,
+    CONF_STREAK_BONUS_REQUIRED_WEEKS,
+    CONF_STREAK_BONUS_THRESHOLD_POINTS,
+    CONF_VACATION_MODE_DEFAULT,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_MILESTONE_1_BONUS_POINTS,
@@ -43,6 +48,11 @@ from .const import (
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+    DEFAULT_STREAK_BONUS_ENABLED,
+    DEFAULT_STREAK_BONUS_POINTS,
+    DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+    DEFAULT_STREAK_BONUS_THRESHOLD_POINTS,
+    DEFAULT_VACATION_MODE,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
     ROTATION_STRATEGIES,
@@ -227,6 +237,51 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
+                # v0.32: "Streak-Bonus" - bonus points for reaching
+                # weekly_progress_goal_points + streak_bonus_threshold_points
+                # in streak_bonus_required_weeks consecutive calendar weeks -
+                # see CONF_STREAK_BONUS_ENABLED in const.py and
+                # FamilyTasksCoordinator._async_process_streak_bonus.
+                vol.Optional(
+                    CONF_STREAK_BONUS_ENABLED,
+                    default=current.get(
+                        CONF_STREAK_BONUS_ENABLED, DEFAULT_STREAK_BONUS_ENABLED
+                    ),
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_STREAK_BONUS_THRESHOLD_POINTS,
+                    default=current.get(
+                        CONF_STREAK_BONUS_THRESHOLD_POINTS,
+                        DEFAULT_STREAK_BONUS_THRESHOLD_POINTS,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_STREAK_BONUS_REQUIRED_WEEKS,
+                    default=current.get(
+                        CONF_STREAK_BONUS_REQUIRED_WEEKS,
+                        DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=1, max=52, mode=NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_STREAK_BONUS_POINTS,
+                    default=current.get(
+                        CONF_STREAK_BONUS_POINTS, DEFAULT_STREAK_BONUS_POINTS
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                # v0.32: only seeds VacationModeStateStore's initial value the
+                # first time it loads with nothing on disk yet - the actual
+                # on/off control after that is switch.FamilyTasksVacationModeSwitch,
+                # not this option. See CONF_VACATION_MODE_DEFAULT in const.py.
+                vol.Optional(
+                    CONF_VACATION_MODE_DEFAULT,
+                    default=current.get(CONF_VACATION_MODE_DEFAULT, DEFAULT_VACATION_MODE),
+                ): BooleanSelector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
