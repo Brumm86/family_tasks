@@ -2865,6 +2865,13 @@
       // Prozentsätze *davon*) - siehe
       // FamilyTasksCoordinator._async_process_milestone_bonus.
       const milestone = goal > 0 ? this._milestoneBonus() : null;
+      // v0.32: muss vor progressList unten deklariert werden, da dessen
+      // .map()-Callback streak.enabled bereits liest (sonst
+      // ReferenceError: Cannot access 'streak' before initialization bei
+      // jedem Render mit mindestens einem Mitglied - const-Deklarationen
+      // werden nicht gehoisted nutzbar, "const" bleibt bis zur eigenen
+      // Zeile in der "temporal dead zone").
+      const streak = this._streakBonus();
       // Der Balken reicht über 100% hinaus, sobald Schwelle 2 über 100%
       // liegt (der Normalfall, Standard 200%) - andernfalls füllte "100% vom
       // Wochenziel" bereits die ganze Breite und die zweite Schwellen-Marke
@@ -2982,8 +2989,8 @@
       // v0.32: "Streak-Bonus" Legende - siehe _streakBonus/CONF_STREAK_BONUS_ENABLED
       // in const.py. Nur eine Text-Zeile (kein Balken-Marker, da die Schwelle
       // sich wochenweise über die Zeit erstreckt, nicht auf einer einzelnen
-      // Woche liegt).
-      const streak = this._streakBonus();
+      // Woche liegt). streak selbst ist bereits weiter oben deklariert (vor
+      // progressList).
       const streakLegend = streak.enabled
         ? `Streak-Bonus: ${streak.requiredWeeks}× in Folge ab ${pointsLabel(streak.targetPoints)}/Woche → +${pointsLabel(streak.bonusPoints)}`
         : "";

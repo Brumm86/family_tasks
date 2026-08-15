@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.32.1] - 2026-08-15
+
+### Fixed
+- **Karte hat nach dem Update auf v0.32.0 kaum noch reagiert (Buttons/Filter teilweise verschwunden)**: `_renderProgressSection` in `family-tasks-card.js` deklarierte die neue Streak-Bonus-Konstante (`const streak = this._streakBonus();`) *nach* der Stelle, an der die Wochenfortschritts-Liste sie bereits liest - ein klassischer "temporal dead zone"-Fehler (`ReferenceError: Cannot access 'streak' before initialization`), der bei jedem Rendern mit mindestens einem teilnehmenden Kind auftrat. Da `set hass()` `_render()` ohne try/catch aufruft, blieb die Karte dadurch bei jedem Update auf dem zuletzt erfolgreich gerenderten Stand eingefroren - sichtbar als teilweise reagierende Buttons und verschwundene Filter-Chips. Die Deklaration wurde vor die Nutzung verschoben.
+
 ## [0.32.0] - 2026-08-14
 
 ### Added
