@@ -691,17 +691,27 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             # v0.30: an Aufgabenpool task (is_pool_task, see above) starts
             # with nobody assigned at all - assigned_member_ids is always
             # empty, so the overdue-only expansion just above never triggers
-            # for it. Every active child is eligible for as long as it's
+            # for it. Every active member is eligible for as long as it's
             # actionable (pending or overdue), not just once overdue -
-            # letting a child reserve ("Annehmen") it from the very start of
+            # letting a member reserve ("Annehmen") it from the very start of
             # the week, before it's even due, is the entire point of the
             # pool - see _pool_period_date.
+            #
+            # v0.33: this used to only add active *children* - a parent could
+            # never claim ("sich melden") a pool task, and (since canAct in
+            # the card, and claimable in general, are both keyed off
+            # eligible_member_ids) could not complete one directly either
+            # unless it happened to also be assigned to a child (which a pool
+            # task, by definition, never is - see is_pool_task above). Every
+            # active member, parent or child, is now eligible - a parent can
+            # both claim and complete an Aufgabenpool occurrence without
+            # anyone claiming it first, exactly like they always could for a
+            # task assigned to a child.
             if is_pool_task and status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE):
                 for other_id, other_member in self.members.data.items():
                     if (
                         other_id not in eligible_member_ids
                         and other_member.get("active", True)
-                        and self._member_role(other_id) == MEMBER_ROLE_CHILD
                     ):
                         eligible_member_ids.append(other_id)
 

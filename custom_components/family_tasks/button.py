@@ -64,7 +64,15 @@ async def async_setup_entry(
 
     @callback
     def _async_add_new_entities() -> None:
-        new_tasks = set(coordinator.data.tasks) - known_tasks
+        # v0.33: see the matching comment in sensor.py's
+        # _async_add_new_entities - coordinator.tasks.data (the actual
+        # configured task collection) rather than coordinator.data.tasks
+        # (the current refresh's computed, pause-aware status snapshot) is
+        # the right source for "does this task's entity exist", so a
+        # disabled or Urlaubsmodus-paused task's "erledigt" button becomes
+        # unavailable (see the `available` property above) instead of being
+        # deleted from the registry outright.
+        new_tasks = set(coordinator.tasks.data) - known_tasks
         known_tasks.update(new_tasks)
 
         if new_tasks:
@@ -78,10 +86,10 @@ async def async_setup_entry(
             entry,
             platform="button",
             valid_unique_ids={
-                f"{entry.entry_id}_task_{tid}_complete" for tid in coordinator.data.tasks
+                f"{entry.entry_id}_task_{tid}_complete" for tid in coordinator.tasks.data
             },
         )
-        known_tasks.intersection_update(coordinator.data.tasks)
+        known_tasks.intersection_update(coordinator.tasks.data)
 
     entry.async_on_unload(coordinator.async_add_listener(_async_add_new_entities))
     _async_add_new_entities()

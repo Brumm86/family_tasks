@@ -1337,6 +1337,26 @@
       return !!sensor?.attributes?.vacation_mode_active;
     }
 
+    // v0.33: whether this task should currently be hidden for Urlaubsmodus -
+    // "Der Urlaubsmodus soll die entsprechenden Aufgaben aber deaktivieren,
+    // sodass sie auch nicht unter 'Alle' angezeigt wird." Read straight off
+    // the raw task definition (this._tasks) plus _vacationModeActive()
+    // rather than relying on the task's status sensor being missing/
+    // unavailable - the task list (_renderTaskList/_renderTaskPoolSection)
+    // is built from this._tasks, which is populated from the task storage
+    // collection independently of whether a status sensor currently exists
+    // for it, so a task the coordinator has stopped computing a status for
+    // (see CONF_TASK_VACATION_BEHAVIOR in coordinator.py) would otherwise
+    // still show up here, just with no sensor data - and every place that
+    // reads the (then-missing) status attributes falls back to "pending",
+    // which is exactly why a paused task used to reappear as a plain, open,
+    // unassigned "offen" task instead of disappearing.
+    _isVacationPaused(id) {
+      return (
+        this._vacationModeActive() && this._tasks[id]?.vacation_behavior === "pause"
+      );
+    }
+
     // v0.23: household-wide default rotation strategy (see
     // CONF_DEFAULT_ROTATION_STRATEGY in const.py) - same "rides along on
     // every member's points sensor" pattern as _milestoneBonus above. Used
@@ -2355,6 +2375,13 @@
         const createdBy = this._tasks[id].created_by_member_id;
         return !createdBy || createdBy === currentMemberId;
       });
+      // v0.33: hidden for the duration of Urlaubsmodus - see
+      // _isVacationPaused. Filtered out here (independent of hideNotDue/
+      // hideCompleted/the member-filter chips below, same as the
+      // created_by_member_id filter above) so it disappears from every view
+      // including "Alle", not just from whichever filter happened to be
+      // selected.
+      ids = ids.filter((id) => !this._isVacationPaused(id));
       // v0.30: "Aufgabenpool" tasks (no fixed assignee, no rotation) get
       // their own dedicated section below (_renderTaskPoolSection),
       // unaffected by hideNotDue/hideCompleted/the member-filter chips - so
@@ -2656,6 +2683,9 @@
         // v0.32: already claimed - shows in the normal task list instead
         // (see _isClaimedPoolTask / the _renderTaskList filter above).
         if (this._isClaimedPoolTask(id)) return false;
+        // v0.33: hidden for the duration of Urlaubsmodus - see
+        // _isVacationPaused / the matching filter in _renderTaskList.
+        if (this._isVacationPaused(id)) return false;
         const status = this._statusStateForTask(id)?.state ?? "pending";
         return status !== "done";
       });

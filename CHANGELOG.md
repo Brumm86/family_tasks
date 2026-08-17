@@ -2,6 +2,14 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.33.0] - 2026-08-16
+
+### Added
+- **Eltern können sich für Aufgabenpool-Aufgaben melden und sie erledigen**: bisher wurden für eine "Aufgabenpool"-Aufgabe (keine feste Zuweisung, keine Rotation) in `FamilyTasksCoordinator._async_update_data` nur aktive *Kinder* in `eligible_member_ids` aufgenommen - ein Elternteil konnte eine solche Aufgabe weder per "Annehmen" reservieren (das Backend lehnte `async_claim_task` mangels Eligibility ab) noch direkt erledigen (die Karte zeigt den "Erledigt"-Button nur für `eligible_member_ids`, und der bestehende Eltern-Bypass in `family-tasks-card.js` greift nur, wenn die Aufgabe *einem Kind* zugewiesen ist - bei einer Poolaufgabe ist aber niemand zugewiesen). Jetzt werden alle aktiven Mitglieder (Eltern wie Kinder) in `eligible_member_ids` aufgenommen, sobald eine Poolaufgabe ansteht oder überfällig ist - ein Elternteil kann sie damit sowohl reservieren als auch direkt erledigen, ohne sich vorher zu melden.
+
+### Fixed
+- **Urlaubsmodus-pausierte Aufgabe erscheint trotzdem unter "Alle" als offen**: `sensor.py`/`button.py` entschieden, welche Task-Status-Sensor-/"erledigt"-Button-Entities existieren dürfen (`async_prune_stale_entities`), anhand von `coordinator.data.tasks` - der pro Refresh berechneten Status-Momentaufnahme, die eine während des Urlaubsmodus pausierte Aufgabe (`vacation_behavior: "pause"`) komplett auslässt (siehe `_async_update_data`). Dadurch wurde die zugehörige Sensor-Entity bei jedem Refresh während des Urlaubsmodus aus der Entity-Registry **gelöscht**, statt nur "nicht verfügbar" zu werden - und blieb gelöscht, solange die Aufgabe pausiert war. Die Karte liest den Status einer Aufgabe ohne zugehörige Sensor-Entity aber mit dem Fallback `?? "pending"`, wodurch die Aufgabe fälschlich wieder als offene, niemandem zugewiesene Aufgabe unter dem Filter "Alle" auftauchte - während sie ohne Urlaubsmodus korrekt als überfällig und einer Person zugewiesen angezeigt wurde. Behoben an der Wurzel (`coordinator.tasks.data`, die tatsächliche Aufgaben-Konfiguration, statt der Status-Momentaufnahme, entscheidet jetzt, ob eine Entity existiert - `available` bleibt weiterhin an `coordinator.data.tasks` gekoppelt, sodass eine pausierte Aufgabe korrekt "nicht verfügbar" statt gelöscht wird) und zusätzlich in der Karte selbst (`_isVacationPaused` in `family-tasks-card.js`, ausgewertet direkt aus der Aufgaben-Konfiguration plus dem Urlaubsmodus-Status, unabhängig vom Zustand der Sensor-Entity): eine während des Urlaubsmodus pausierte Aufgabe wird jetzt sowohl in der normalen Aufgabenliste als auch im Aufgabenpool-Abschnitt konsequent ausgeblendet, auch unter dem Filter "Alle".
+
 ## [0.32.1] - 2026-08-15
 
 ### Fixed

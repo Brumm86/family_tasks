@@ -290,7 +290,26 @@ async def async_setup_entry(
 
     @callback
     def _async_add_new_entities() -> None:
-        new_tasks = set(coordinator.data.tasks) - known_tasks
+        # v0.33: which task ids "exist" for entity add/prune purposes is
+        # decided from coordinator.tasks.data (the actual configured task
+        # storage collection) rather than coordinator.data.tasks (the
+        # *current refresh's computed status snapshot*, which omits a task
+        # entirely while it's disabled or paused for Urlaubsmodus - see
+        # CONF_TASK_VACATION_BEHAVIOR/vacation_mode_active in
+        # _async_update_data). Using the latter here used to mean a task's
+        # status sensor got deleted via async_prune_stale_entities the
+        # moment it was paused (not merely marked unavailable), and then
+        # never recreated for as long as it stayed paused, since it was also
+        # never "new" again from this loop's point of view - the entity
+        # simply vanished from the registry, and the card's per-task
+        # websocket data (which lists the task regardless of its sensor)
+        # then fell back to displaying it as a plain, unassigned "offen"
+        # occurrence instead of hiding it. self._task_id in
+        # self.coordinator.data.tasks (the `available` property above)
+        # already handles marking such a sensor unavailable while paused -
+        # that's the only thing that should change on pause/resume, not
+        # whether the entity exists at all.
+        new_tasks = set(coordinator.tasks.data) - known_tasks
         new_members = set(coordinator.data.members) - known_members
 
         entities: list[SensorEntity] = []
@@ -315,7 +334,7 @@ async def async_setup_entry(
             entry,
             platform="sensor",
             valid_unique_ids={
-                f"{entry.entry_id}_task_{tid}_status" for tid in coordinator.data.tasks
+                f"{entry.entry_id}_task_{tid}_status" for tid in coordinator.tasks.data
             }
             | {
                 f"{entry.entry_id}_member_{mid}_points" for mid in coordinator.data.members
@@ -325,7 +344,7 @@ async def async_setup_entry(
                 for mid in coordinator.data.members
             },
         )
-        known_tasks.intersection_update(coordinator.data.tasks)
+        known_tasks.intersection_update(coordinator.tasks.data)
         known_members.intersection_update(coordinator.data.members)
 
     entry.async_on_unload(coordinator.async_add_listener(_async_add_new_entities))
