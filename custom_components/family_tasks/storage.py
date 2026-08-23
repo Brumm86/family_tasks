@@ -118,11 +118,22 @@ def _require_single_threshold(value: dict) -> dict:
     return value
 
 
+# Both trigger schemas below carry "auto_complete_on_normalize" (v0.34):
+# when true, the occurrence this trigger opened is completed automatically
+# (see FamilyTasksCoordinator.async_handle_sensor_normalized in
+# coordinator.py, wired up by trigger.TaskTriggerListener) the moment the
+# bound sensor transitions back *out* of the condition that opened it - a
+# "state" trigger's entity leaving ``to_state`` again, or a "numeric_state"
+# trigger's value crossing back past its ``above``/``below`` threshold in the
+# other direction. Defaults to False (unchanged pre-v0.34 behavior: someone
+# has to press "Erledigt" by hand) so existing trigger tasks are unaffected
+# until a household opts a given task in via the card's task-edit form.
 TASK_TRIGGER_STATE_SCHEMA = vol.Schema(
     {
         vol.Required("kind"): TASK_TRIGGER_STATE,
         vol.Required("entity_id"): cv.entity_id,
         vol.Optional("to_state", default="on"): str,
+        vol.Optional("auto_complete_on_normalize", default=False): bool,
     }
 )
 
@@ -133,6 +144,7 @@ TASK_TRIGGER_NUMERIC_STATE_SCHEMA = vol.All(
             vol.Required("entity_id"): cv.entity_id,
             vol.Optional("above"): vol.Coerce(float),
             vol.Optional("below"): vol.Coerce(float),
+            vol.Optional("auto_complete_on_normalize", default=False): bool,
         }
     ),
     _require_single_threshold,

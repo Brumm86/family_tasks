@@ -601,7 +601,16 @@
     // cross (above OR below), not a from-x-to-y range - see storage.py's
     // _require_single_threshold. Mapped to/from the backend's above/below
     // fields in taskToForm() / _saveTask().
-    return { kind: "state", entity_id: "", to_state: "on", direction: "above", value: "" };
+    return {
+      kind: "state",
+      entity_id: "",
+      to_state: "on",
+      direction: "above",
+      value: "",
+      // v0.34: see the matching field on TASK_TRIGGER_STATE_SCHEMA/
+      // TASK_TRIGGER_NUMERIC_STATE_SCHEMA in storage.py.
+      auto_complete_on_normalize: false,
+    };
   }
 
   // Opaque, client-generated id for a new checklist sub-item (see
@@ -724,6 +733,9 @@
             to_state: t?.to_state ?? "on",
             direction: hasBelow ? "below" : "above",
             value: hasBelow ? t.below : t?.above ?? "",
+            // v0.34: see the matching field on TASK_TRIGGER_STATE_SCHEMA/
+            // TASK_TRIGGER_NUMERIC_STATE_SCHEMA in storage.py.
+            auto_complete_on_normalize: t?.auto_complete_on_normalize ?? false,
           };
         })(),
       },
@@ -1521,6 +1533,9 @@
           // Single-direction crossing, not a range: exactly one of above/below.
           recurrence.trigger[t.direction === "below" ? "below" : "above"] = value;
         }
+        // v0.34: see TASK_TRIGGER_STATE_SCHEMA/TASK_TRIGGER_NUMERIC_STATE_SCHEMA
+        // in storage.py - applies to both trigger kinds above.
+        recurrence.trigger.auto_complete_on_normalize = !!t.auto_complete_on_normalize;
       }
 
       const payload = {
@@ -3537,6 +3552,8 @@
             </div>
           `}
           <p class="muted">Die Aufgabe wird fällig, sobald der Sensor die Bedingung erfüllt – statt nach einem festen Zeitplan.</p>
+          <label class="inline"><input type="checkbox" data-field="recurrence.trigger.auto_complete_on_normalize" ${t.auto_complete_on_normalize ? "checked" : ""}> Automatisch erledigen, sobald sich der Sensor wieder normalisiert</label>
+          <p class="muted">Statt manuell auf "Erledigt" zu tippen: sobald der Sensor die obige Bedingung wieder verlässt (z. B. der Mülleimer wieder als leer gemeldet wird), gilt die Aufgabe direkt als erledigt – auch bei einem Kind ohne extra Eltern-Bestätigung.</p>
           <datalist id="family-tasks-entity-list">${entityList}</datalist>
         </div>`;
     }

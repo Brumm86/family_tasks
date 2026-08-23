@@ -15,6 +15,15 @@ Home Assistant's own automation triggers:
 ``TaskTriggerListener`` subscribes to state-change events for every entity
 referenced this way and, on the edge transition into a matching condition,
 asks the coordinator to open a new occurrence for that task.
+
+v0.34: a trigger definition may also carry ``"auto_complete_on_normalize":
+True`` (see ``TASK_TRIGGER_STATE_SCHEMA``/``TASK_TRIGGER_NUMERIC_STATE_SCHEMA``
+in storage.py). When set, the *reverse* edge - the sensor transitioning back
+out of the matching condition it was opened for, e.g. "Mülleimer leeren"'s
+bin sensor reporting empty again - asks the coordinator to complete that
+open occurrence automatically instead of waiting for someone to press
+"Erledigt" by hand. Off by default; a task with no "trigger" or without the
+flag behaves exactly as before.
 """
 
 from __future__ import annotations
@@ -133,16 +142,32 @@ class TaskTriggerListener:
             if not trigger or trigger["entity_id"] != entity_id:
                 continue
 
-            # Edge-triggered: only fire on the transition *into* a matching
-            # condition, not on every update while it keeps matching (e.g. a
-            # numeric sensor hovering above a threshold, or unrelated
-            # attribute changes on an already-matching binary_sensor).
-            if _matches(self._hass, trigger, new_state) and not _matches(
-                self._hass, trigger, old_state
-            ):
+            # Edge-triggered: only fire on the transition *into* (or, for
+            # auto-complete, back *out of* - see the module docstring) a
+            # matching condition, not on every update while it keeps
+            # matching (e.g. a numeric sensor hovering above a threshold, or
+            # unrelated attribute changes on an already-matching
+            # binary_sensor).
+            now_matches = _matches(self._hass, trigger, new_state)
+            was_matching = _matches(self._hass, trigger, old_state)
+
+            if now_matches and not was_matching:
                 _LOGGER.debug(
                     "Sensor trigger fired for task %s via %s", task_id, entity_id
                 )
                 self._hass.async_create_task(
                     self._coordinator.async_handle_sensor_trigger(task_id)
+                )
+            elif (
+                was_matching
+                and not now_matches
+                and trigger.get("auto_complete_on_normalize", False)
+            ):
+                _LOGGER.debug(
+                    "Sensor normalized for task %s via %s, auto-completing",
+                    task_id,
+                    entity_id,
+                )
+                self._hass.async_create_task(
+                    self._coordinator.async_handle_sensor_normalized(task_id)
                 )

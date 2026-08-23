@@ -251,7 +251,8 @@ class MemberSummaryData:
     points_available: int = 0
     # v0.14: whether tick-based screen-time granting should currently be
     # active for this member - True unless they have at least one
-    # TASK_KIND_MANDATORY task assigned that is currently TASK_STATUS_OVERDUE
+    # TASK_KIND_MANDATORY task assigned whose deadline (due_at +
+    # overdue_after_minutes) has passed and that isn't TASK_STATUS_DONE yet
     # (see the screen_time_paused_members computation in
     # FamilyTasksCoordinator._async_update_data). Exposed via a per-member
     # binary_sensor (see binary_sensor.py) for a household's own tick-granting
@@ -259,6 +260,11 @@ class MemberSummaryData:
     # itself, only this flag. Resumes automatically (no explicit "resume"
     # action) the moment none of their mandatory tasks are overdue anymore;
     # ticks missed while paused are never made up.
+    # v0.34: this also covers a mandatory task a child has already marked
+    # done but that's still TASK_STATUS_AWAITING_CONFIRMATION past its
+    # deadline - a child's own completion claim doesn't lift the pause by
+    # itself, only an actual parent confirmation (or a task that needed none
+    # to begin with) does.
     screen_time_grant_active: bool = True
     # v0.32: current consecutive-week Streak-Bonus length - see
     # CONF_STREAK_BONUS_ENABLED in const.py and
@@ -794,7 +800,33 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 for member_id in assigned_member_ids:
                     open_tasks_by_member[member_id] = open_tasks_by_member.get(member_id, 0) + 1
 
-            if task.get("kind") == TASK_KIND_MANDATORY and status == TASK_STATUS_OVERDUE:
+            # v0.34: pausing must survive a child's own completion claim,
+            # not just resolve the instant TASK_STATUS_OVERDUE is computed.
+            # Once a child marks an overdue mandatory task done, its status
+            # becomes TASK_STATUS_AWAITING_CONFIRMATION (see the elif chain
+            # above) rather than staying TASK_STATUS_OVERDUE - a plain
+            # `status == TASK_STATUS_OVERDUE` check would then read as
+            # "resolved" and resume screen time before a parent has actually
+            # signed off, even though nothing about the task is done yet as
+            # far as the household's points/history are concerned. due_at
+            # (computed further up, independently of completion/confirmation
+            # state - see the RECURRENCE_TRIGGER/RECURRENCE_CONFIRMATION
+            # branch above and _due_at for calendar-based tasks) still
+            # reflects the *original* occurrence's deadline regardless of
+            # status, so re-deriving "is this occurrence past its deadline"
+            # from due_at directly - instead of trusting the OVERDUE status
+            # label alone - keeps the pause active through
+            # AWAITING_CONFIRMATION too. TASK_STATUS_DONE (a parent actually
+            # confirmed it, or it needed no confirmation to begin with) and
+            # TASK_STATUS_IDLE (nothing open at all, e.g. an untriggered
+            # "trigger"-recurrence mandatory task) are the only statuses that
+            # still lift the pause.
+            if (
+                task.get("kind") == TASK_KIND_MANDATORY
+                and status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE)
+                and due_at is not None
+                and now > due_at + overdue_after
+            ):
                 # See MemberSummaryData.screen_time_grant_active: an overdue
                 # mandatory task pauses tick-based screen-time granting for
                 # exactly whoever it's currently assigned to, not the whole
@@ -986,7 +1018,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         return period_date_fn(task["recurrence"], dt_util.now().date()).isoformat()
 
     async def async_complete_task(
-        self, task_id: str, member_id: str | None = None
+        self, task_id: str, member_id: str | None = None, *, skip_confirmation: bool = False
     ) -> None:
         """Mark the current occurrence of a task as done and advance rotation.
 
@@ -996,7 +1028,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
           original claim instead of logging a completion for itself.
         - If the member who would act on a normal task has role "child", the
           completion is not logged yet; instead a confirmation task is raised
-          for the household's parents (see ``_async_request_confirmation``).
+          for the household's parents (see ``_async_request_confirmation``) -
+          unless ``skip_confirmation`` is set (see below).
 
         ``member_id`` should be who *actually* completed the task whenever
         that's known (see _async_register_services in __init__.py, which
@@ -1010,6 +1043,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         so a caller that *can* identify the acting member (any real user
         action) should always pass it explicitly instead of relying on the
         fallback.
+
+        ``skip_confirmation`` (v0.34): bypasses the child-assignee parent-
+        confirmation step entirely, regardless of the task's own
+        ``requires_confirmation`` setting - the completion is logged (and
+        points awarded/rotation advanced) exactly as it would be for a
+        "parent"-role assignee. Only ``async_handle_sensor_normalized`` uses
+        this, for a "trigger" task whose bound sensor's own state change is
+        the proof the task was actually done - there is nothing left for a
+        parent to attest to that the sensor hasn't already confirmed. Never
+        set for a real user action (a claimed "Erledigt" tap is always the
+        child's own self-report and still needs sign-off).
         """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
@@ -1061,7 +1105,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         index = rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
         acting_member_id = member_id or self._assigned_member_id(rotation, member_ids)
 
-        if acting_member_id and self._member_role(acting_member_id) == MEMBER_ROLE_CHILD:
+        if (
+            acting_member_id
+            and not skip_confirmation
+            and self._member_role(acting_member_id) == MEMBER_ROLE_CHILD
+        ):
             requires_confirmation = task.get(CONF_TASK_REQUIRES_CONFIRMATION)
             if requires_confirmation is None:
                 # Legacy/default behavior: a task assigned to a child always
@@ -1990,6 +2038,37 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             return
         await self.trigger_state.async_activate(task_id, triggered_at=dt_util.utcnow())
         await self.async_request_refresh()
+
+    async def async_handle_sensor_normalized(self, task_id: str) -> None:
+        """Auto-complete a trigger task's open occurrence once its sensor normalizes.
+
+        v0.34: called by :class:`~.trigger.TaskTriggerListener` when a task's
+        trigger definition has its optional ``auto_complete_on_normalize``
+        flag set (see ``TASK_TRIGGER_STATE_SCHEMA``/
+        ``TASK_TRIGGER_NUMERIC_STATE_SCHEMA`` in storage.py) and the bound
+        sensor transitions back out of the condition that opened the
+        occurrence - e.g. "Mülleimer leeren" completing itself the moment
+        the bin sensor reports empty again, instead of someone having to
+        press "Erledigt" by hand.
+
+        Delegates to :meth:`async_complete_task` with ``skip_confirmation``
+        set - the sensor's own state change *is* the proof of completion, so
+        even a task normally assigned to a "child" with
+        ``requires_confirmation`` on is logged as done immediately, with no
+        parent sign-off step raised for it. A no-op if there's no open
+        occurrence to complete (the flag was only just turned on after the
+        sensor had already normalized, or the occurrence was already
+        completed/skipped by hand in the meantime) - mirrors the "already
+        open" guard in async_handle_sensor_trigger above.
+        """
+        if task_id not in self.tasks.data:
+            return
+        if self.trigger_state.get(task_id) is None:
+            _LOGGER.debug(
+                "Task %s has no open trigger occurrence to auto-complete", task_id
+            )
+            return
+        await self.async_complete_task(task_id, skip_confirmation=True)
 
     async def _async_advance_rotation(
         self,
