@@ -24,6 +24,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MILESTONE_1_BONUS_POINTS,
@@ -39,6 +40,7 @@ from .const import (
     CONF_STREAK_BONUS_THRESHOLD_POINTS,
     CONF_VACATION_MODE_DEFAULT,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
+    DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_MILESTONE_1_BONUS_POINTS,
     DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
@@ -157,6 +159,20 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                         min=0, max=100, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
                     )
                 ),
+                # v0.35: whether an auto-generated battery-alert task
+                # (RECURRENCE_ONCE, "battery_alert" - see
+                # FamilyTasksCoordinator._async_raise_battery_alerts)
+                # completes itself once the battery it names recovers, same
+                # as a "trigger" task's per-task auto_complete_on_normalize
+                # checkbox (v0.34) but as one household-wide setting, since
+                # these alert tasks have no form of their own.
+                vol.Optional(
+                    CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+                    default=current.get(
+                        CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+                        DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+                    ),
+                ): BooleanSelector(),
                 # v0.14: how many minutes of screen time one point invested
                 # into a CONF_REWARD_SCREEN_TIME_INVESTABLE ("Handyzeit")
                 # reward is worth - see ws_redeem_reward in storage.py.

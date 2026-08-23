@@ -21,6 +21,7 @@
           "overdue_after_minutes": "Karenzzeit bis überfällig (Minuten)",
           "default_rotation_strategy": "Standard-Rotationsstrategie",
           "battery_warning_threshold": "Standard-Batteriewarnschwelle (%)",
+          "battery_alert_auto_complete_on_recovery": "Batterie-Alarm-Aufgaben automatisch erledigen, sobald sich die Batterie erholt",
           "screen_time_minutes_per_point": "Handyzeit-Minuten pro investiertem Punkt",
           "weekly_progress_goal_points": "Wöchentliche Zielpunktzahl (Fortschrittsbalken)",
           "milestone_bonus_enabled": "Meilensteinbonus vergeben",

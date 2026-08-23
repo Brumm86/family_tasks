@@ -52,6 +52,20 @@
  *                               as above). That section is configuration-only
  *                               (see "Battery monitoring" below) so hiding it
  *                               has no effect on monitoring itself.
+ *   hide_excluded_batteries: false - initial value for the "Ausgeschlossene
+ *                               anzeigen"/"Ausgeschlossene ausblenden" toggle
+ *                               *within* the "Batterien" section (v0.35,
+ *                               same first-run-only rule as above): whether
+ *                               a battery entity already marked "Ausschließen"
+ *                               is filtered out of that list. Defaults to
+ *                               `true` (hidden) on a fresh device regardless
+ *                               of this key's own default (`false` here just
+ *                               means "don't force-show" - see setConfig) -
+ *                               set to `false` explicitly to start with
+ *                               excluded batteries shown instead. Purely a
+ *                               display filter, same as hide_battery_section
+ *                               itself - never affects which batteries are
+ *                               actually monitored.
  *   hide_progress_section: false - initial value for the "Wochenfortschritt"
  *                               progress-bar visibility toggle (v0.29,
  *                               replaces the old "Bestenliste" ranking - see
@@ -193,16 +207,26 @@
  * backend raises a single one-time task by itself, naming exactly that
  * battery and assigned to every family member linked to a Home Assistant
  * admin account; it shows up in the normal task list like any other task and
- * is dismissed the same way (complete/skip). The admin-only "Batterien"
- * section further down is configuration-only: it lets individual batteries
- * be excluded from monitoring entirely or given their own warning threshold
+ * is dismissed the same way (complete/skip) - or, if the household turned on
+ * "Auto-complete battery alert tasks once the battery recovers" in the
+ * integration's Options (v0.35, off by default), it resolves itself the
+ * moment that same battery recovers (back above threshold, or a
+ * binary_sensor no longer reporting low), with no one having to press
+ * "Erledigt"/"Überspringen" by hand. The admin-only "Batterien" section
+ * further down is configuration-only: it lets individual batteries be
+ * excluded from monitoring entirely or given their own warning threshold
  * (overriding the household-wide default set in the integration's Options),
  * through the family_tasks/battery_override/* websocket API, and can be
  * collapsed via hide_battery_section above since it's rarely touched day to
- * day. (The older recurrence type "battery" - one aggregate task an admin
- * assigns and that becomes due/idle by itself - still works for any
- * household that already set one up, but is no longer offered when creating
- * a new task.)
+ * day. Within that section, batteries already marked "Ausschließen" are
+ * themselves filtered out of the list by default (v0.35) - an "Ausgeschlossene
+ * anzeigen"/"Ausgeschlossene ausblenden" toggle un-hides them again, see
+ * hide_excluded_batteries above. (The older recurrence type "battery" - one
+ * aggregate task an admin assigns and that becomes due/idle by itself - still
+ * works for any household that already set one up, but is no longer offered
+ * when creating a new task; the new auto-complete-on-recovery option above
+ * does not apply to it, since it already falls back to idle by itself once
+ * every monitored battery recovers.)
  *
  * Rewards (v0.9, re-merged into this card in v0.15 - see the "Bestenliste &
  * Belohnungen" note below): a member's participation in the reward system
@@ -850,6 +874,17 @@
       this._hideCompleted = undefined;
       this._hideMembers = undefined;
       this._hideBattery = undefined;
+      // v0.35: independent of _hideBattery (which collapses the whole
+      // "Batterien" section) - filters *within* the section's own list,
+      // hiding battery entities already marked "Ausschließen" so the list
+      // stays focused on batteries that are actually still monitored.
+      // Defaults to hidden on a fresh device (see setConfig), same
+      // fallback-to-compact reasoning as _hideMembers/_hideBattery
+      // themselves - a household that's already excluded a handful of
+      // batteries (dummy/unused sensors, etc.) doesn't want them cluttering
+      // this list by default, but they're never fully inaccessible: the
+      // toggle button right there un-hides them again.
+      this._hideExcludedBatteries = undefined;
       this._controlsHidden = undefined;
       // Aufgaben-Filter nach Familienmitglied (v0.16, ersetzt das frühere
       // reine An/Aus von "Nur eigene Aufgaben"): null = "Alle", "own" =
@@ -941,6 +976,13 @@
         // (shown) the same way hide_not_due_tasks still does.
         this._hideMembers = saved?.hideMembers ?? this._config.hide_members_list !== false;
         this._hideBattery = saved?.hideBattery ?? this._config.hide_battery_section !== false;
+        // v0.35: defaults to hidden (excluded batteries filtered out of the
+        // "Batterien" list) on a genuinely fresh device, same as
+        // hideMembers/hideBattery just above - explicit
+        // `hide_excluded_batteries: false` in the card config opts back
+        // into showing everything from the start.
+        this._hideExcludedBatteries =
+          saved?.hideExcludedBatteries ?? this._config.hide_excluded_batteries !== false;
         this._controlsHidden = saved?.controlsHidden ?? false;
         // v0.16: replaces the old plain "Nur eigene Aufgaben"/"Alle Aufgaben
         // anzeigen" toggle button with per-member filter chips (see
@@ -1021,6 +1063,7 @@
             hideCompleted: this._hideCompleted,
             hideMembers: this._hideMembers,
             hideBattery: this._hideBattery,
+            hideExcludedBatteries: this._hideExcludedBatteries,
             controlsHidden: this._controlsHidden,
             taskMemberFilterByUser,
             hideFulfilled: this._hideFulfilled,
@@ -3305,13 +3348,32 @@
           ? ""
           : `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-battery">Batterien anzeigen</button></div>`;
       }
-      const batteries = this._batteryEntityOptions();
+      const allBatteries = this._batteryEntityOptions();
+      // v0.35: entities the household has explicitly excluded from
+      // monitoring (see the "Ausschließen" checkbox below) are, by default,
+      // filtered out of this list too - once a battery is marked as not
+      // worth watching (a dummy/unused sensor, etc.), most households don't
+      // want it cluttering the list they actually check regularly. The
+      // toggle button just below un-hides them again (e.g. to change a
+      // threshold or re-include one), and never affects monitoring itself -
+      // purely a display filter, same as _hideBattery/_hideMembers.
+      const excludedBatteries = allBatteries.filter(
+        (b) => this._batteryOverrideFor(b.entityId)?.excluded
+      );
+      const batteries = this._hideExcludedBatteries
+        ? allBatteries.filter((b) => !this._batteryOverrideFor(b.entityId)?.excluded)
+        : allBatteries;
       return `
         <div class="section-header">
           <h3>Batterien</h3>
           ${controlsHidden || !showVisibilityControls ? "" : `<button class="link" data-action="toggle-hide-battery">Ausblenden</button>`}
         </div>
         <p class="muted">Legt fest, welche Batterien überwacht werden und ab welchem Stand gewarnt wird. Sobald eine überwachte Batterie ihren Schwellenwert erreicht oder unterschreitet, legt die Integration automatisch eine einmalige Aufgabe für diese Batterie an, zugewiesen an alle Familienmitglieder mit Admin-Rechten - dieser Abschnitt dient nur der Konfiguration, nicht der Aufgabenverwaltung. Der Standard-Schwellenwert wird in den Integrations-Optionen festgelegt (Einstellungen → Geräte &amp; Dienste → Family Tasks → Konfigurieren).</p>
+        ${excludedBatteries.length ? `<div class="section-toggle-row"><button class="link" data-action="toggle-hide-excluded-batteries">${
+          this._hideExcludedBatteries
+            ? `Ausgeschlossene anzeigen (${excludedBatteries.length})`
+            : "Ausgeschlossene ausblenden"
+        }</button></div>` : ""}
         ${batteries.length ? `<div class="list">${batteries
           .map((b) => {
             const override = this._batteryOverrideFor(b.entityId);
@@ -3339,7 +3401,9 @@
                 </div>
               </div>`;
           })
-          .join("")}</div>` : `<p class="muted">Keine Batterie-Entities gefunden (Sensoren/Binärsensoren mit device_class "battery").</p>`}
+          .join("")}</div>` : allBatteries.length
+            ? `<p class="muted">Alle erkannten Batterien sind ausgeschlossen und ausgeblendet - "Ausgeschlossene anzeigen" oben zeigt sie wieder an.</p>`
+            : `<p class="muted">Keine Batterie-Entities gefunden (Sensoren/Binärsensoren mit device_class "battery").</p>`}
       `;
     }
 
@@ -3900,6 +3964,10 @@
           this._render();
         } else if (action === "toggle-hide-battery") {
           this._hideBattery = !this._hideBattery;
+          this._saveUiState();
+          this._render();
+        } else if (action === "toggle-hide-excluded-batteries") {
+          this._hideExcludedBatteries = !this._hideExcludedBatteries;
           this._saveUiState();
           this._render();
         } else if (action === "filter-member") {

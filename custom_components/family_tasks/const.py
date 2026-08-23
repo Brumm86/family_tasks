@@ -21,6 +21,25 @@ CONF_DEFAULT_ROTATION_STRATEGY: Final = "default_rotation_strategy"
 # storage.BatteryOverrideStorageCollection / battery.py.
 CONF_BATTERY_WARNING_THRESHOLD: Final = "battery_warning_threshold"
 
+# v0.35: household-wide switch for whether an auto-generated battery-alert
+# task (RECURRENCE_ONCE, tagged "battery_alert" - see
+# FamilyTasksCoordinator._async_raise_battery_alerts) resolves itself the
+# moment the battery it names recovers: back above its warning threshold for
+# a numeric sensor, or no longer reporting low for a binary_sensor. Mirrors
+# the per-task "auto_complete_on_normalize" flag on a "trigger" task's
+# TASK_TRIGGER_STATE_SCHEMA/TASK_TRIGGER_NUMERIC_STATE_SCHEMA (v0.34), but as
+# a single household-wide option rather than a per-task checkbox, since these
+# alert tasks are raised automatically and have no task form of their own to
+# hold one. Off by default: the alert task stays open (pending/overdue) until
+# a family member completes/skips it by hand, exactly as before this option
+# existed. Does not affect the older recurrence type "battery"
+# (RECURRENCE_BATTERY) - that aggregate task already falls back to idle by
+# itself once every monitored battery recovers, without ever logging a
+# completion or awarding points either way.
+CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY: Final = (
+    "battery_alert_auto_complete_on_recovery"
+)
+
 # v0.14: household-wide conversion rate for the "invest points" Handyzeit
 # reward flow (see CONF_REWARD_SCREEN_TIME_INVESTABLE below) - how many
 # minutes of screen time one invested point is worth. Applied at redemption
@@ -141,6 +160,7 @@ VACATION_BEHAVIORS: Final = [VACATION_BEHAVIOR_SHOW, VACATION_BEHAVIOR_PAUSE]
 DEFAULT_OVERDUE_AFTER_MINUTES: Final = 60
 DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
+DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY: Final = False
 DEFAULT_SCREEN_TIME_MINUTES_PER_POINT: Final = 1
 DEFAULT_MILESTONE_BONUS_ENABLED: Final = False
 DEFAULT_MILESTONE_1_THRESHOLD_PERCENT: Final = 100

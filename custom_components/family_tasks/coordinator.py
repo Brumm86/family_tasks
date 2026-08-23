@@ -26,6 +26,7 @@ from .battery import LowBattery, async_compute_low_batteries
 from .const import (
     CLAIM_PENALTY_POINTS,
     CLAIM_RESERVATION_MINUTES,
+    CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
@@ -46,6 +47,7 @@ from .const import (
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     CONFIRMATION_REJECTION_PENALTY_POINTS,
     COORDINATOR_UPDATE_INTERVAL,
+    DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_MILESTONE_1_BONUS_POINTS,
     DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
@@ -1048,12 +1050,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         confirmation step entirely, regardless of the task's own
         ``requires_confirmation`` setting - the completion is logged (and
         points awarded/rotation advanced) exactly as it would be for a
-        "parent"-role assignee. Only ``async_handle_sensor_normalized`` uses
-        this, for a "trigger" task whose bound sensor's own state change is
-        the proof the task was actually done - there is nothing left for a
-        parent to attest to that the sensor hasn't already confirmed. Never
-        set for a real user action (a claimed "Erledigt" tap is always the
-        child's own self-report and still needs sign-off).
+        "parent"-role assignee. Used by ``async_handle_sensor_normalized``,
+        for a "trigger" task whose bound sensor's own state change is the
+        proof the task was actually done, and (v0.35) by
+        ``_async_raise_battery_alerts`` when
+        ``CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY`` is on, for an
+        auto-generated battery-alert task whose battery recovered - in both
+        cases there is nothing left for a parent to attest to that the
+        sensor/battery state hasn't already confirmed. Never set for a real
+        user action (a claimed "Erledigt" tap is always the child's own
+        self-report and still needs sign-off).
         """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
@@ -1593,20 +1599,72 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         task every refresh: only once a battery's previous alert task has
         been resolved (completed or skipped) does the next refresh raise a
         new one for it.
-        """
-        if not low_batteries:
-            return
 
-        open_alert_entities: set[str] = set()
+        v0.35: if CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY is on, an open
+        alert task whose battery is no longer in ``low_batteries`` (it
+        recovered - back above threshold, or a binary_sensor no longer
+        reporting low) is completed automatically here instead of being left
+        open for someone to complete/skip by hand. This runs before the
+        "raise a new alert" step below, and regardless of whether any
+        battery is currently low, so a household that goes from "one battery
+        low" to "none low" in a single refresh still gets that task closed
+        out.
+        """
+        open_alerts: dict[str, str] = {}  # entity_id -> task_id
         for task_id, task in self.tasks.data.items():
             alert = task.get("battery_alert")
             if not alert:
                 continue
             anchor_date = task.get("recurrence", {}).get("anchor_date")
             if anchor_date and self.completions.get_last_entry(task_id, anchor_date) is None:
-                open_alert_entities.add(alert["entity_id"])
+                open_alerts[alert["entity_id"]] = task_id
 
-        newly_low = [b for b in low_batteries if b.entity_id not in open_alert_entities]
+        low_entity_ids = {battery.entity_id for battery in low_batteries}
+
+        auto_complete_on_recovery = DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY
+        if self.config_entry:
+            auto_complete_on_recovery = self.config_entry.options.get(
+                CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+                DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+            )
+        if auto_complete_on_recovery:
+            for entity_id, task_id in open_alerts.items():
+                if entity_id in low_entity_ids:
+                    continue
+                _LOGGER.debug(
+                    "Battery %s recovered, auto-completing alert task %s",
+                    entity_id,
+                    task_id,
+                )
+                # Scheduled as a separate task rather than awaited inline,
+                # same as BatteryStateListener/TaskTriggerListener do for
+                # their own coordinator calls - not just style: this method
+                # runs *inside* _async_update_data, and async_complete_task
+                # ends with await self.async_request_refresh(). Awaiting that
+                # here directly would re-enter _async_update_data before this
+                # call has returned whenever this refresh was itself invoked
+                # via the coordinator's periodic interval timer (which calls
+                # _async_refresh() directly, bypassing the request-refresh
+                # debouncer's lock that would otherwise make such a
+                # reentrant call a no-op) - harmless in the end (the task is
+                # already gone from self.tasks.data by then, so the nested
+                # refresh just does redundant work), but avoided entirely by
+                # not awaiting it here. Same reasoning as
+                # async_handle_sensor_normalized for skip_confirmation: the
+                # battery's own state change is the proof no one still needs
+                # to buy/charge a replacement, so this skips the parent-
+                # confirmation step even for a child assignee - in practice
+                # a battery-alert task is only ever assigned to admin-linked
+                # members (see member_ids below) anyway, so that step would
+                # never have applied here regardless.
+                self.hass.async_create_task(
+                    self.async_complete_task(task_id, skip_confirmation=True)
+                )
+
+        if not low_batteries:
+            return
+
+        newly_low = [b for b in low_batteries if b.entity_id not in open_alerts]
         if not newly_low:
             return
 
