@@ -179,47 +179,61 @@ class FamilyTasksMemberPointsSensor(
             "points_week": member.points_week,
             "points_month": member.points_month,
             "person_entity_id": member.person_entity_id,
-            # Current spendable balance for the reward system (v0.9):
-            # points_total minus everything this member has already redeemed
-            # - see FamilyTasksCoordinator._async_update_data /
-            # MemberSummaryData.points_available in coordinator.py. Drives
-            # the leaderboard card's balance display and reward-affordability
-            # check.
-            "points_available": member.points_available,
-            # v0.30: household-wide Meilensteinbonus settings, identical on
-            # every member's points sensor - see
-            # FamilyTasksData.milestone_bonus_enabled/... in coordinator.py
+            # v0.36: this member's current "Münzen" balance - also the
+            # native state of the dedicated FamilyTasksMemberCoinsSensor
+            # below, repeated here (same "rides along" pattern as the other
+            # options-derived attributes on this sensor) purely so the card
+            # can read a member's balance off the same points-sensor lookup
+            # it already does for everything else on the "Wochenfortschritt"
+            # bar, without a second sensor lookup keyed differently. See
+            # MemberSummaryData.coins_available in coordinator.py.
+            "coins_available": member.coins_available,
+            # v0.36: how many minutes to add to the household's Handyzeit
+            # blueprint's own configured per-tick increment for this member
+            # right now (negative = reduce it) - see
+            # PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py and
+            # MemberSummaryData.screen_time_tick_adjustment_minutes in
+            # coordinator.py. Meant to be read by the blueprint's optional
+            # screen_time_tick_adjustment_source_entity input via
+            # state_attr(...), not by the card.
+            "screen_time_tick_adjustment_minutes": member.screen_time_tick_adjustment_minutes,
+            # v0.36: household-wide Meilensteinbonus coin amounts, identical
+            # on every member's points sensor - see
+            # FamilyTasksData.milestone_150_bonus_coins/... in coordinator.py
             # for why this rides along here instead of living on a dedicated
-            # entity. Drives the two threshold markers (and their bonus
-            # labels) the card draws on each "Wochenfortschritt" progress
-            # bar. Replaces the pre-v0.30 weekly_winner_bonus_enabled/...points
-            # attributes entirely.
-            "milestone_bonus_enabled": self.coordinator.data.milestone_bonus_enabled,
-            "milestone_1_threshold_percent": self.coordinator.data.milestone_1_threshold_percent,
-            "milestone_1_bonus_points": self.coordinator.data.milestone_1_bonus_points,
-            "milestone_2_threshold_percent": self.coordinator.data.milestone_2_threshold_percent,
-            "milestone_2_bonus_points": self.coordinator.data.milestone_2_bonus_points,
-            # v0.32: the absolute point value each threshold above works out
-            # to this week, computed once server-side (round(), same as the
-            # awarding logic itself uses) - see
-            # FamilyTasksData.milestone_1_threshold_points in coordinator.py.
-            # The card shows these directly instead of recomputing
-            # threshold_percent -> points itself, so it can never disagree
-            # with the backend on a borderline .5 rounding case.
-            "milestone_1_threshold_points": self.coordinator.data.milestone_1_threshold_points,
-            "milestone_2_threshold_points": self.coordinator.data.milestone_2_threshold_points,
-            # v0.32: household-wide Streak-Bonus settings (see
-            # CONF_STREAK_BONUS_ENABLED in const.py) - same "rides along,
-            # identical on every member's points sensor" reasoning as the
-            # Meilensteinbonus attributes above.
-            "streak_bonus_enabled": self.coordinator.data.streak_bonus_enabled,
-            "streak_bonus_threshold_points": self.coordinator.data.streak_bonus_threshold_points,
+            # entity. Drives the two fixed 150%/200% threshold markers (and
+            # their bonus labels) the card draws on each "Wochenfortschritt"
+            # progress bar. Replaces the pre-v0.36 configurable-threshold
+            # milestone_bonus_enabled/milestone_1_*/milestone_2_* attributes
+            # entirely.
+            "milestone_150_bonus_coins": self.coordinator.data.milestone_150_bonus_coins,
+            "milestone_200_bonus_coins": self.coordinator.data.milestone_200_bonus_coins,
+            # v0.32: the absolute point value each fixed checkpoint above
+            # works out to this week, computed once server-side (round(),
+            # same as the awarding logic itself uses) - see
+            # FamilyTasksData.milestone_150_threshold_points in
+            # coordinator.py. The card shows these directly instead of
+            # recomputing percent -> points itself, so it can never disagree
+            # with the backend on a borderline .5 rounding case. Also the
+            # per-week target each Streak-Bonus tier below is judged against.
+            "milestone_150_threshold_points": self.coordinator.data.milestone_150_threshold_points,
+            "milestone_200_threshold_points": self.coordinator.data.milestone_200_threshold_points,
+            # v0.36: household-wide Streak-Bonus coin amounts, one per tier
+            # (see CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in
+            # const.py) - same "rides along, identical on every member's
+            # points sensor" reasoning as the Meilensteinbonus attributes
+            # above. Replaces the pre-v0.36 single configurable-threshold
+            # streak_bonus_enabled/...threshold_points/...points attributes
+            # entirely.
+            "streak_150_bonus_coins": self.coordinator.data.streak_150_bonus_coins,
+            "streak_200_bonus_coins": self.coordinator.data.streak_200_bonus_coins,
             "streak_bonus_required_weeks": self.coordinator.data.streak_bonus_required_weeks,
-            "streak_bonus_points": self.coordinator.data.streak_bonus_points,
-            "streak_bonus_target_points": self.coordinator.data.streak_bonus_target_points,
-            # v0.32: this member's current consecutive-week streak length -
-            # see MemberSummaryData.streak_weeks in coordinator.py.
-            "streak_weeks": member.streak_weeks,
+            # v0.32: this member's current consecutive-week streak length,
+            # one per fixed tier since v0.36 - see
+            # MemberSummaryData.streak_weeks_150/streak_weeks_200 in
+            # coordinator.py.
+            "streak_weeks_150": member.streak_weeks_150,
+            "streak_weeks_200": member.streak_weeks_200,
             # v0.23: household-wide default rotation strategy (see
             # CONF_DEFAULT_ROTATION_STRATEGY in const.py), identical on every
             # member's points sensor - same "rides along, no dedicated
@@ -240,6 +254,55 @@ class FamilyTasksMemberPointsSensor(
             # snapshot without separately looking up that entity by id.
             "vacation_mode_active": self.coordinator.data.vacation_mode_active,
         }
+
+
+class FamilyTasksMemberCoinsSensor(
+    CoordinatorEntity[FamilyTasksCoordinator], SensorEntity
+):
+    """A member's current "Münzen" (coins) balance for the reward shop.
+
+    v0.36: the reward shop's currency, entirely separate from points now -
+    see MemberSummaryData.coins_available in coordinator.py. Unlike the
+    Meilenstein-/Streak-Bonus settings and screen_time_tick_adjustment_minutes
+    (which ride along on FamilyTasksMemberPointsSensor as plain attributes,
+    since they're just options values or a single number with nowhere else
+    to attach), the coin balance itself is a primary, user-facing figure a
+    household will want to see at a glance and put on a dashboard directly -
+    it gets its own dedicated entity instead.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:hand-coin-outline"
+    _attr_state_class = SensorStateClass.TOTAL
+
+    def __init__(
+        self, coordinator: FamilyTasksCoordinator, entry: FamilyTasksConfigEntry, member_id: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._member_id = member_id
+        self._attr_unique_id = f"{entry.entry_id}_member_{member_id}_coins"
+        self._attr_device_info = _device_info(entry)
+        self._attr_translation_key = "member_coins"
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._member_id in self.coordinator.data.members
+
+    @property
+    def _member(self):
+        return self.coordinator.data.members[self._member_id]
+
+    @property
+    def name(self) -> str:
+        return f"{self._member.name} Münzen"
+
+    @property
+    def native_value(self) -> int:
+        return self._member.coins_available
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"member_id": self._member_id}
 
 
 class FamilyTasksMemberOpenTasksSensor(
@@ -320,6 +383,9 @@ async def async_setup_entry(
                 FamilyTasksMemberPointsSensor(coordinator, entry, member_id)
             )
             entities.append(
+                FamilyTasksMemberCoinsSensor(coordinator, entry, member_id)
+            )
+            entities.append(
                 FamilyTasksMemberOpenTasksSensor(coordinator, entry, member_id)
             )
 
@@ -338,6 +404,9 @@ async def async_setup_entry(
             }
             | {
                 f"{entry.entry_id}_member_{mid}_points" for mid in coordinator.data.members
+            }
+            | {
+                f"{entry.entry_id}_member_{mid}_coins" for mid in coordinator.data.members
             }
             | {
                 f"{entry.entry_id}_member_{mid}_open_tasks"

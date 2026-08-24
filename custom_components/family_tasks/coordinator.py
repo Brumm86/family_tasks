@@ -26,21 +26,21 @@ from .battery import LowBattery, async_compute_low_batteries
 from .const import (
     CLAIM_PENALTY_POINTS,
     CLAIM_RESERVATION_MINUTES,
+    COIN_REASON_MILESTONE_150,
+    COIN_REASON_MILESTONE_200,
+    COIN_REASON_STREAK_150,
+    COIN_REASON_STREAK_200,
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_REWARDS_OPT_IN,
-    CONF_MILESTONE_1_BONUS_POINTS,
-    CONF_MILESTONE_1_THRESHOLD_PERCENT,
-    CONF_MILESTONE_2_BONUS_POINTS,
-    CONF_MILESTONE_2_THRESHOLD_PERCENT,
-    CONF_MILESTONE_BONUS_ENABLED,
-    CONF_STREAK_BONUS_ENABLED,
-    CONF_STREAK_BONUS_POINTS,
+    CONF_MILESTONE_150_BONUS_COINS,
+    CONF_MILESTONE_200_BONUS_COINS,
+    CONF_STREAK_150_BONUS_COINS,
+    CONF_STREAK_200_BONUS_COINS,
     CONF_STREAK_BONUS_REQUIRED_WEEKS,
-    CONF_STREAK_BONUS_THRESHOLD_POINTS,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
@@ -49,26 +49,20 @@ from .const import (
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
-    DEFAULT_MILESTONE_1_BONUS_POINTS,
-    DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
-    DEFAULT_MILESTONE_2_BONUS_POINTS,
-    DEFAULT_MILESTONE_2_THRESHOLD_PERCENT,
-    DEFAULT_MILESTONE_BONUS_ENABLED,
+    DEFAULT_MILESTONE_150_BONUS_COINS,
+    DEFAULT_MILESTONE_200_BONUS_COINS,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
-    DEFAULT_STREAK_BONUS_ENABLED,
-    DEFAULT_STREAK_BONUS_POINTS,
+    DEFAULT_STREAK_150_BONUS_COINS,
+    DEFAULT_STREAK_200_BONUS_COINS,
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
-    DEFAULT_STREAK_BONUS_THRESHOLD_POINTS,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
     EVENT_TASK_REJECTED,
     MANUAL_POINTS_TASK_ID,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
-    MILESTONE_BONUS_1_TASK_ID,
-    MILESTONE_BONUS_2_TASK_ID,
-    POINTS_CORRECTION_TASK_ID,
+    PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES,
     RECURRENCE_BATTERY,
     RECURRENCE_CONFIRMATION,
     RECURRENCE_ONCE,
@@ -78,7 +72,6 @@ from .const import (
     ROTATION_STRATEGY_LEAST_POINTS,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
-    STREAK_BONUS_TASK_ID,
     TASK_KIND_CHECKLIST,
     TASK_KIND_MANDATORY,
     TASK_KIND_STANDARD,
@@ -94,6 +87,8 @@ from .storage import (
     BatteryOverrideStorageCollection,
     ChecklistStateStore,
     ClaimStateStore,
+    CoinLedgerStore,
+    CoinSystemStateStore,
     CompletionLogStore,
     MemberStorageCollection,
     MilestoneBonusStateStore,
@@ -102,15 +97,18 @@ from .storage import (
     TaskStorageCollection,
     TriggerStateStore,
     VacationModeStateStore,
-    weekly_spendable_points,
+    coins_from_task_points,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID/POINTS_CORRECTION_TASK_ID
-# live in const.py (like WEEKLY_BONUS_TASK_ID/MANUAL_POINTS_TASK_ID before
-# them) so storage.py's ws_list_member_weekly_completions can exclude them
-# too, without an import cycle - see the constants' docstrings there.
+# v0.36: MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID/
+# POINTS_CORRECTION_TASK_ID/STREAK_BONUS_TASK_ID are retired (the coin-bonus
+# system below credits CoinLedgerStore directly instead of logging a
+# completion-log entry) but still live in const.py so storage.py's
+# ws_list_member_weekly_completions can keep excluding old entries under
+# those sentinels from a household's pre-v0.36 history - see the constants'
+# docstrings there. Nothing in this module needs them directly any more.
 
 
 @dataclass(slots=True)
@@ -239,18 +237,23 @@ class MemberSummaryData:
     points_month: int
     points_total: int
     open_tasks: int
-    # Current spendable balance for the reward system (v0.9): the member's
-    # *spendable* points (see FamilyTasksCoordinator._weekly_spendable_points
-    # - points_total itself, minus any weekly-goal quota per
-    # CONF_WEEKLY_PROGRESS_GOAL_POINTS, v0.29) minus every "points_cost" this
-    # member has already redeemed (see RewardRedemptionStorageCollection in
-    # storage.py) - never a separately stored/mutated value, always computed
-    # fresh from history so it can never drift out of sync. Drives the
-    # Wochenfortschritt/reward-shop balance display and whether a given
-    # catalog reward is affordable (WS_API_REWARD_REDEEM in const.py /
-    # ws_redeem_reward in storage.py re-derives the same thing server-side
-    # before letting a redemption through).
-    points_available: int = 0
+    # v0.36: current balance in the new reward-shop currency, "Münzen" -
+    # replaces the old points_available entirely (the point shop no longer
+    # exists; points now only ever drive the weekly-progress bar, see
+    # points_week below). Two components, summed: storage.coins_from_task_points
+    # (task points earned *beyond* CONF_WEEKLY_PROGRESS_GOAL_POINTS in a
+    # calendar week, for every week since CoinSystemStateStore.started_at -
+    # the v0.36 upgrade cutover, so nobody's historical points retroactively
+    # convert) plus FamilyTasksCoordinator.coin_ledger's own balance (manual
+    # milestone/streak coin bonuses credited, and past reward redemptions
+    # debited - see CoinLedgerStore in storage.py). Never a separately
+    # stored/mutated value itself, always computed fresh from history so it
+    # can never drift out of sync - same "recompute, don't store" pattern the
+    # old points_available used. Drives the reward-shop balance display and
+    # whether a given catalog reward is affordable (WS_API_REWARD_REDEEM in
+    # const.py / ws_redeem_reward in storage.py re-derives the same thing
+    # server-side before letting a redemption through).
+    coins_available: int = 0
     # v0.14: whether tick-based screen-time granting should currently be
     # active for this member - True unless they have at least one
     # TASK_KIND_MANDATORY task assigned whose deadline (due_at +
@@ -268,12 +271,31 @@ class MemberSummaryData:
     # itself, only an actual parent confirmation (or a task that needed none
     # to begin with) does.
     screen_time_grant_active: bool = True
-    # v0.32: current consecutive-week Streak-Bonus length - see
-    # CONF_STREAK_BONUS_ENABLED in const.py and
-    # FamilyTasksCoordinator._async_process_streak_bonus. 0 whenever the
-    # feature is off or the member hasn't reached the threshold in their most
-    # recently judged week.
-    streak_weeks: int = 0
+    # v0.36: how many minutes to ADD to the household's Handyzeit blueprint's
+    # own configured per-tick increment (a negative number reduces it, 0
+    # leaves it unchanged) - see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in
+    # const.py and FamilyTasksCoordinator._screen_time_tick_adjustment_minutes.
+    # Banded on this member's current-week progress percent against
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS: -2 at the 0% band (no progress at all
+    # yet this week), -1 at the 50% band, 0 from the 100% band up. Exposed as
+    # a plain attribute on FamilyTasksMemberPointsSensor (see sensor.py, same
+    # "no dedicated entity for a single number" reasoning as the other
+    # options-derived attributes on FamilyTasksData below) rather than a new
+    # entity, for the blueprint's optional
+    # screen_time_tick_adjustment_source_entity input to read via
+    # state_attr(...) and apply only to its "plus_tick" trigger path.
+    screen_time_tick_adjustment_minutes: int = 0
+    # v0.32: current consecutive-week bonus streak length, one counter per
+    # fixed coin-bonus tier (v0.36: was a single counter tied to the
+    # then-configurable CONF_STREAK_BONUS_THRESHOLD_POINTS; now there are two
+    # independent streaks, one for maintaining the 150% weekly-progress
+    # checkpoint and one for the 200% checkpoint - see
+    # CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in const.py and
+    # FamilyTasksCoordinator._async_process_streak_coin_bonus). 0 whenever the
+    # relevant tier's bonus is unconfigured (bonus coins <= 0) or the member
+    # hasn't reached that checkpoint in their most recently judged week.
+    streak_weeks_150: int = 0
+    streak_weeks_200: int = 0
 
 
 @dataclass(slots=True)
@@ -282,36 +304,41 @@ class FamilyTasksData:
 
     tasks: dict[str, TaskStatusData] = field(default_factory=dict)
     members: dict[str, MemberSummaryData] = field(default_factory=dict)
-    # v0.30: household-wide Meilensteinbonus settings (see
-    # CONF_MILESTONE_BONUS_ENABLED and the CONF_MILESTONE_1_*/CONF_MILESTONE_2_*
-    # constants in const.py), read fresh from the config entry's options on
-    # every refresh. Exposed as sensor attributes (see
+    # v0.36: household-wide Meilensteinbonus coin amounts (see
+    # CONF_MILESTONE_150_BONUS_COINS/CONF_MILESTONE_200_BONUS_COINS in
+    # const.py), read fresh from the config entry's options on every refresh.
+    # Replaces v0.30's configurable-threshold milestone_bonus_enabled/
+    # milestone_1_*/milestone_2_* fields entirely - the two checkpoints are
+    # now the fixed 150%/200% weekly-progress bands (PROGRESS_THRESHOLD_PERCENTS
+    # in const.py) rather than a household-chosen percent, and the bonus
+    # itself is coins credited to CoinLedgerStore rather than points logged
+    # to the completion log (see
+    # FamilyTasksCoordinator._async_process_milestone_coin_bonus). A tier is
+    # off exactly when its bonus is <= 0. Exposed as sensor attributes (see
     # FamilyTasksMemberPointsSensor in sensor.py) purely so the card can draw
-    # the two threshold markers on each member's "Wochenfortschritt" progress
-    # bar and label them with their bonus - there is no coordinator-level
-    # entity to attach this to otherwise, so it rides along on every member's
-    # points sensor (the value is identical on all of them, the card just
-    # reads it off whichever one). Replaces the pre-v0.30 weekly-winner-bonus
-    # settings (weekly_winner_bonus_enabled/...points) entirely - see
-    # FamilyTasksCoordinator._async_process_milestone_bonus.
-    milestone_bonus_enabled: bool = False
-    milestone_1_threshold_percent: int = DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
-    milestone_1_bonus_points: int = 0
-    milestone_2_threshold_percent: int = DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
-    milestone_2_bonus_points: int = 0
-    # v0.32: the *absolute* point value each threshold above works out to
-    # this week (round(weekly_progress_goal_points * threshold_percent / 100),
-    # the exact same computation FamilyTasksCoordinator._async_process_milestone_bonus
-    # itself awards against) - computed once, here, in Python and exposed so
-    # the card can show/label the milestone markers with these numbers
-    # directly instead of recomputing threshold_percent -> points itself in
-    # JS. Python's round() (banker's rounding) and JS's Math.round() (always
-    # rounds .5 up) can disagree on an exact .5 - recomputing independently
-    # in the card could then show a marker at a slightly different point
-    # value than the one the backend actually awards at. 0 whenever
-    # weekly_progress_goal_points is 0 (nothing to take a percentage of).
-    milestone_1_threshold_points: int = 0
-    milestone_2_threshold_points: int = 0
+    # the two fixed threshold markers on each member's "Wochenfortschritt"
+    # progress bar and label them with their bonus - there is no
+    # coordinator-level entity to attach this to otherwise, so it rides along
+    # on every member's points sensor (the value is identical on all of them,
+    # the card just reads it off whichever one).
+    milestone_150_bonus_coins: int = DEFAULT_MILESTONE_150_BONUS_COINS
+    milestone_200_bonus_coins: int = DEFAULT_MILESTONE_200_BONUS_COINS
+    # v0.32: the *absolute* point value each fixed 150%/200% checkpoint above
+    # works out to this week (round(weekly_progress_goal_points * percent /
+    # 100), the exact same computation
+    # FamilyTasksCoordinator._async_process_milestone_coin_bonus itself
+    # awards against, and also the per-week target the streak-bonus tiers
+    # below judge against - see streak_150_bonus_coins/streak_200_bonus_coins)
+    # - computed once, here, in Python and exposed so the card can show/label
+    # the markers with these numbers directly instead of recomputing
+    # percent -> points itself in JS. Python's round() (banker's rounding)
+    # and JS's Math.round() (always rounds .5 up) can disagree on an exact
+    # .5 - recomputing independently in the card could then show a marker at
+    # a slightly different point value than the one the backend actually
+    # awards at. 0 whenever weekly_progress_goal_points is 0 (nothing to take
+    # a percentage of).
+    milestone_150_threshold_points: int = 0
+    milestone_200_threshold_points: int = 0
     # v0.23: household-wide default rotation strategy for new tasks (see
     # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
     # same reason the milestone-bonus settings above do (no dedicated entity
@@ -327,20 +354,21 @@ class FamilyTasksData:
     # card then renders each bar as a plain "points earned this week" tally
     # with no target to reach.
     weekly_progress_goal_points: int = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
-    # v0.32: household-wide Streak-Bonus settings (see
-    # CONF_STREAK_BONUS_ENABLED in const.py) - rides along here for the same
-    # "no dedicated entity for a plain options value" reason the milestone/
-    # weekly-goal settings above do. streak_bonus_target_points is the
-    # already-computed absolute weekly target (weekly_progress_goal_points +
-    # streak_bonus_threshold_points, floored at the threshold alone if no
-    # weekly goal is configured) - same "compute once in Python, don't make
-    # the card redo it" reasoning as milestone_1_threshold_points above,
-    # though here it's a plain sum so there is no rounding to disagree on.
-    streak_bonus_enabled: bool = False
-    streak_bonus_threshold_points: int = DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+    # v0.36: household-wide Streak-Bonus coin amounts, one per fixed tier
+    # (see CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS/
+    # CONF_STREAK_BONUS_REQUIRED_WEEKS in const.py) - rides along here for
+    # the same "no dedicated entity for a plain options value" reason the
+    # milestone/weekly-goal settings above do. Replaces v0.32's single
+    # configurable-threshold streak_bonus_enabled/...threshold_points/
+    # ...points fields entirely: "maintaining" a fixed checkpoint (150% or
+    # 200%, milestone_150_threshold_points/milestone_200_threshold_points
+    # above) for more than streak_bonus_required_weeks consecutive weeks now
+    # earns its own coin bonus each further week the streak holds - see
+    # FamilyTasksCoordinator._async_process_streak_coin_bonus. A tier is off
+    # exactly when its bonus is <= 0.
+    streak_150_bonus_coins: int = DEFAULT_STREAK_150_BONUS_COINS
+    streak_200_bonus_coins: int = DEFAULT_STREAK_200_BONUS_COINS
     streak_bonus_required_weeks: int = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
-    streak_bonus_points: int = 0
-    streak_bonus_target_points: int = 0
     # v0.32: whether the household-wide Urlaubsmodus switch
     # (switch.FamilyTasksVacationModeSwitch) is currently on - rides along
     # here (not a dedicated attribute on the switch's own entity state, which
@@ -477,6 +505,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         claim_state: ClaimStateStore,
         streak_bonus_state: StreakBonusStateStore,
         vacation_mode_state: VacationModeStateStore,
+        coin_ledger: CoinLedgerStore,
+        coin_system_state: CoinSystemStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -496,14 +526,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.claim_state = claim_state
         self.streak_bonus_state = streak_bonus_state
         self.vacation_mode_state = vacation_mode_state
+        # v0.36: see CoinLedgerStore/CoinSystemStateStore in storage.py.
+        self.coin_ledger = coin_ledger
+        self.coin_system_state = coin_system_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
         today = dt_util.now().date()
 
         # Moved up from further down (was only computed just before the
-        # member-summaries loop) so _async_process_milestone_bonus/
-        # _async_correct_negative_balances below can use start_of_week and
+        # member-summaries loop) so _async_process_milestone_coin_bonus/
+        # _async_process_streak_coin_bonus below can use start_of_week and
         # weekly_progress_goal_points too.
         local_now = dt_util.now()
         start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
@@ -534,13 +567,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # one (see _async_raise_battery_alerts).
         await self._async_raise_battery_alerts(low_batteries)
 
-        # Also raised before the main loop, same reasoning: a bonus awarded
-        # (or a negative-balance correction applied) this refresh should
-        # already be reflected in this same refresh's member_summaries below,
-        # not just after a second refresh.
-        await self._async_correct_negative_balances(weekly_progress_goal_points)
-        await self._async_process_milestone_bonus(start_of_week, weekly_progress_goal_points)
-        await self._async_process_streak_bonus(start_of_week, weekly_progress_goal_points)
+        # Also raised before the main loop, same reasoning: a coin bonus
+        # credited this refresh should already be reflected in this same
+        # refresh's member_summaries below, not just after a second refresh.
+        # v0.36: the old _async_correct_negative_balances one-time fixup is
+        # gone along with points_available itself - a member's coin balance
+        # can never go negative from a redemption (ws_redeem_reward in
+        # storage.py validates against it up front, same as before), so there
+        # is nothing left for it to correct.
+        await self._async_process_milestone_coin_bonus(start_of_week, weekly_progress_goal_points)
+        await self._async_process_streak_coin_bonus(start_of_week, weekly_progress_goal_points)
 
         # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
         # storage.py. Read once per refresh, same pattern as
@@ -869,49 +905,50 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 else None,
             )
 
-        # Total points already redeemed for a catalog reward (v0.9), per
-        # member - subtracted from points_total below so a member's
-        # "available" balance reflects past purchases. See
-        # RewardRedemptionStorageCollection in storage.py / _available_points
-        # in storage.py, which computes the same thing independently for
-        # server-side validation when a redemption is actually attempted.
-        redeemed_points: dict[str, int] = {}
-        for redemption in self.reward_redemptions.data.values():
-            redeemed_member_id = redemption.get("member_id")
-            if redeemed_member_id:
-                redeemed_points[redeemed_member_id] = redeemed_points.get(
-                    redeemed_member_id, 0
-                ) + redemption.get("points_cost", 0)
-
         member_summaries: dict[str, MemberSummaryData] = {}
         for member_id, member in self.members.data.items():
             points_total = self.completions.points_since(
                 member_id, datetime.min.replace(tzinfo=dt_util.UTC)
             )
-            spendable_points = self._weekly_spendable_points(
-                member_id, weekly_progress_goal_points
-            )
+            points_week = self.completions.points_since(member_id, start_of_week)
+            # v0.36: coins_available replaces the old spendable_points minus
+            # redeemed_points computation entirely - coins_from_task_points
+            # already only counts points earned beyond the weekly goal since
+            # the v0.36 cutover, and self.coin_ledger.balance nets out every
+            # bonus credit *and* every past redemption debit on its own (see
+            # ws_redeem_reward in storage.py, which appends the debit at
+            # redemption time) - see MemberSummaryData.coins_available's
+            # docstring.
+            coins_available = coins_from_task_points(
+                self.completions,
+                member_id,
+                weekly_progress_goal_points,
+                self.coin_system_state.started_at,
+            ) + self.coin_ledger.balance(member_id)
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
                 name=member["name"],
                 person_entity_id=member.get("person_entity_id"),
                 points_today=self.completions.points_since(member_id, start_of_today),
-                points_week=self.completions.points_since(member_id, start_of_week),
+                points_week=points_week,
                 points_month=self.completions.points_since(member_id, start_of_month),
                 points_total=points_total,
-                points_available=spendable_points - redeemed_points.get(member_id, 0),
+                coins_available=coins_available,
                 open_tasks=open_tasks_by_member.get(member_id, 0),
                 screen_time_grant_active=member_id not in screen_time_paused_members,
-                streak_weeks=(self.streak_bonus_state.get(member_id) or {}).get(
+                screen_time_tick_adjustment_minutes=self._screen_time_tick_adjustment_minutes(
+                    points_week, weekly_progress_goal_points
+                ),
+                streak_weeks_150=(self.streak_bonus_state.get(member_id, "150") or {}).get(
+                    "streak_count", 0
+                ),
+                streak_weeks_200=(self.streak_bonus_state.get(member_id, "200") or {}).get(
                     "streak_count", 0
                 ),
             )
 
-        milestone_bonus_enabled = False
-        milestone_1_threshold_percent = DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
-        milestone_1_bonus_points = DEFAULT_MILESTONE_1_BONUS_POINTS
-        milestone_2_threshold_percent = DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
-        milestone_2_bonus_points = DEFAULT_MILESTONE_2_BONUS_POINTS
+        milestone_150_bonus_coins = DEFAULT_MILESTONE_150_BONUS_COINS
+        milestone_200_bonus_coins = DEFAULT_MILESTONE_200_BONUS_COINS
         # Household-wide default rotation strategy (see
         # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - read fresh from the
         # config entry's options every refresh, same pattern as the
@@ -923,76 +960,58 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # FamilyTasksMemberPointsSensor in sensor.py for how it now reaches
         # the card.
         default_rotation_strategy = DEFAULT_ROTATION_STRATEGY
-        streak_bonus_enabled = DEFAULT_STREAK_BONUS_ENABLED
-        streak_bonus_threshold_points = DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+        streak_150_bonus_coins = DEFAULT_STREAK_150_BONUS_COINS
+        streak_200_bonus_coins = DEFAULT_STREAK_200_BONUS_COINS
         streak_bonus_required_weeks = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
-        streak_bonus_points = DEFAULT_STREAK_BONUS_POINTS
         if self.config_entry:
             options = self.config_entry.options
-            milestone_bonus_enabled = bool(
-                options.get(CONF_MILESTONE_BONUS_ENABLED, DEFAULT_MILESTONE_BONUS_ENABLED)
+            milestone_150_bonus_coins = options.get(
+                CONF_MILESTONE_150_BONUS_COINS, DEFAULT_MILESTONE_150_BONUS_COINS
             )
-            milestone_1_threshold_percent = options.get(
-                CONF_MILESTONE_1_THRESHOLD_PERCENT, DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
-            )
-            milestone_1_bonus_points = options.get(
-                CONF_MILESTONE_1_BONUS_POINTS, DEFAULT_MILESTONE_1_BONUS_POINTS
-            )
-            milestone_2_threshold_percent = options.get(
-                CONF_MILESTONE_2_THRESHOLD_PERCENT, DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
-            )
-            milestone_2_bonus_points = options.get(
-                CONF_MILESTONE_2_BONUS_POINTS, DEFAULT_MILESTONE_2_BONUS_POINTS
+            milestone_200_bonus_coins = options.get(
+                CONF_MILESTONE_200_BONUS_COINS, DEFAULT_MILESTONE_200_BONUS_COINS
             )
             default_rotation_strategy = options.get(
                 CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
             )
-            streak_bonus_enabled = bool(
-                options.get(CONF_STREAK_BONUS_ENABLED, DEFAULT_STREAK_BONUS_ENABLED)
+            streak_150_bonus_coins = options.get(
+                CONF_STREAK_150_BONUS_COINS, DEFAULT_STREAK_150_BONUS_COINS
             )
-            streak_bonus_threshold_points = options.get(
-                CONF_STREAK_BONUS_THRESHOLD_POINTS, DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
+            streak_200_bonus_coins = options.get(
+                CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
             )
             streak_bonus_required_weeks = options.get(
                 CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
             )
-            streak_bonus_points = options.get(
-                CONF_STREAK_BONUS_POINTS, DEFAULT_STREAK_BONUS_POINTS
-            )
 
-        # See FamilyTasksData.milestone_1_threshold_points's docstring - the
-        # exact same round() the awarding logic
-        # (_async_process_milestone_bonus) uses, computed once here too so
-        # the card never has to redo it (and risk disagreeing on a .5 case).
-        milestone_1_threshold_points = (
-            round(weekly_progress_goal_points * milestone_1_threshold_percent / 100)
+        # See FamilyTasksData.milestone_150_threshold_points's docstring -
+        # the exact same round() the awarding logic
+        # (_async_process_milestone_coin_bonus) uses, computed once here too
+        # so the card never has to redo it (and risk disagreeing on a .5
+        # case).
+        milestone_150_threshold_points = (
+            round(weekly_progress_goal_points * 150 / 100)
             if weekly_progress_goal_points > 0
             else 0
         )
-        milestone_2_threshold_points = (
-            round(weekly_progress_goal_points * milestone_2_threshold_percent / 100)
+        milestone_200_threshold_points = (
+            round(weekly_progress_goal_points * 200 / 100)
             if weekly_progress_goal_points > 0
             else 0
         )
-        streak_bonus_target_points = max(0, weekly_progress_goal_points) + streak_bonus_threshold_points
 
         return FamilyTasksData(
             tasks=task_statuses,
             members=member_summaries,
-            milestone_bonus_enabled=milestone_bonus_enabled,
-            milestone_1_threshold_percent=milestone_1_threshold_percent,
-            milestone_1_bonus_points=milestone_1_bonus_points,
-            milestone_2_threshold_percent=milestone_2_threshold_percent,
-            milestone_2_bonus_points=milestone_2_bonus_points,
-            milestone_1_threshold_points=milestone_1_threshold_points,
-            milestone_2_threshold_points=milestone_2_threshold_points,
+            milestone_150_bonus_coins=milestone_150_bonus_coins,
+            milestone_200_bonus_coins=milestone_200_bonus_coins,
+            milestone_150_threshold_points=milestone_150_threshold_points,
+            milestone_200_threshold_points=milestone_200_threshold_points,
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
-            streak_bonus_enabled=streak_bonus_enabled,
-            streak_bonus_threshold_points=streak_bonus_threshold_points,
+            streak_150_bonus_coins=streak_150_bonus_coins,
+            streak_200_bonus_coins=streak_200_bonus_coins,
             streak_bonus_required_weeks=streak_bonus_required_weeks,
-            streak_bonus_points=streak_bonus_points,
-            streak_bonus_target_points=streak_bonus_target_points,
             vacation_mode_active=vacation_mode_active,
         )
 
@@ -1397,8 +1416,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         Deducts CLAIM_PENALTY_POINTS from the claimant - logged the same way
         ws_award_points logs a manual adjustment, under MANUAL_POINTS_TASK_ID
-        (see const.py), so it counts toward points_total/points_available
-        exactly like any other award/deduction - and drops the claim. The
+        (see const.py), so it counts toward points_total/points_week (and
+        thus coins_available, v0.36) exactly like any other award/deduction -
+        and drops the claim. The
         caller (_async_update_data) doesn't restore claimed_by_member_id or
         the narrowed eligible_member_ids after calling this, so the
         occurrence is already back open to everyone in this same refresh.
@@ -1688,91 +1708,79 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
 
-    def _weekly_spendable_points(self, member_id: str, goal_points: int) -> int:
-        """Sum a member's lifetime *spendable* points under the v0.29 weekly-goal rule.
+    def _screen_time_tick_adjustment_minutes(self, points_week: int, goal_points: int) -> int:
+        """Per-tick minute adjustment for the household's Handyzeit blueprint.
 
-        See CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py: within each
-        calendar week (Monday 00:00 local - the same boundary start_of_week/
-        points_week already use), a member's first ``goal_points`` points
-        earned that week count only toward the "Wochenfortschritt" progress
-        bar, not toward their spendable points_available balance - only
-        points earned *beyond* the goal in that week are added to it.
-        ``goal_points <= 0`` (the default) disables the rule entirely: every
-        week's total is fully spendable, identical to the pre-v0.29
-        behavior where points_available was simply points_total minus
-        redeemed points.
-
-        Recomputed fresh from the full completion log every call, like every
-        other MemberSummaryData figure - nothing here is separately stored -
-        so changing the goal in Options immediately re-derives every past
-        week's contribution under the new value, rather than only affecting
-        weeks going forward.
-
-        v0.30: the actual computation now lives in storage.weekly_spendable_points
-        - storage.py's _available_points (the server-side redemption check in
-        ws_redeem_reward) needs the exact same rule and used to have its own,
-        stale copy that never got updated for it, which is what let a
-        redemption push a member's points_available negative. This method is
-        kept as a thin wrapper so every existing call site here is unaffected.
+        v0.36: see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES/PROGRESS_THRESHOLD_PERCENTS
+        in const.py and MemberSummaryData.screen_time_tick_adjustment_minutes.
+        Banded on this week's progress percent (points_week as a percentage
+        of goal_points, the same basis every other weekly-progress figure
+        uses) against the fixed 0%/50%/100% bands: -2 while at the 0% band
+        (nothing earned this week yet), -1 once at least half the weekly
+        goal has been reached, 0 from the full goal onward -
+        PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES has no entry above 100 because
+        nothing beyond "leave the blueprint's own increment unchanged" ever
+        applies once the goal itself is met. Always 0 (no adjustment) when
+        goal_points itself is 0 - there is no goal to measure a percentage
+        against, so the tick-based grant just runs at the blueprint's own
+        configured pace, same as this feature being effectively off.
         """
-        return weekly_spendable_points(self.completions, member_id, goal_points)
+        if goal_points <= 0:
+            return 0
+        percent = (points_week / goal_points) * 100
+        adjustment = 0
+        for band_percent in sorted(PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES):
+            if percent >= band_percent:
+                adjustment = PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES[band_percent]
+        return adjustment
 
-    async def _async_process_milestone_bonus(
+    async def _async_process_milestone_coin_bonus(
         self, start_of_week: datetime, goal_points: int
     ) -> None:
-        """Award "Meilensteinbonus" points live, the moment a member crosses a threshold.
+        """Credit "Meilensteinbonus" coins live, the moment a member crosses a checkpoint.
 
-        v0.30, replaces the old weekly-winner bonus entirely - see
-        CONF_MILESTONE_BONUS_ENABLED and the CONF_MILESTONE_1_*/
-        CONF_MILESTONE_2_* constants in const.py. Off unless a parent turns
-        it on. Also a no-op if ``goal_points`` (CONF_WEEKLY_PROGRESS_GOAL_POINTS)
-        is 0 - both thresholds are defined as a percentage *of* the weekly
-        goal, so without a goal there is nothing for them to be a percentage
-        of.
+        v0.36: replaces the old configurable-threshold, points-based
+        Meilensteinbonus entirely - see CONF_MILESTONE_150_BONUS_COINS/
+        CONF_MILESTONE_200_BONUS_COINS in const.py. The two checkpoints are
+        now fixed at 150%/200% of the weekly goal (PROGRESS_THRESHOLD_PERCENTS
+        in const.py) rather than a household-chosen percent, and the reward
+        is coins credited straight to CoinLedgerStore rather than points
+        logged to the completion log - so, unlike the old bonus, this can
+        never feed back into points_week/the weekly-progress percent it's
+        itself judged against. A no-op if ``goal_points``
+        (CONF_WEEKLY_PROGRESS_GOAL_POINTS) is 0 - both checkpoints are a
+        percentage *of* the weekly goal, so without a goal there is nothing
+        for them to be a percentage of.
 
-        Unlike the old bonus (a single household-wide "winner" determined
-        retroactively once a week ended), every participating, active member
-        who reaches threshold 1 or 2 *during* the current week is credited
-        that threshold's bonus immediately, the first refresh after they
-        cross it - so it shows up on their "Wochenfortschritt" progress bar
-        right away rather than waiting for Monday. self.milestone_bonus_state
-        tracks, per member and per threshold, whether this week's crossing
-        has already been awarded, so a refresh that runs again minutes later
-        (nothing having changed) never double-awards; that tracking resets
-        itself automatically once the calendar week rolls over - see
-        MilestoneBonusStateStore in storage.py.
+        Every participating, active member who reaches 150% or 200% *during*
+        the current week is credited that tier's bonus immediately, the
+        first refresh after they cross it - so it shows up on their
+        "Wochenfortschritt" progress bar right away rather than waiting for
+        Monday. self.milestone_bonus_state (the same store the pre-v0.36
+        version used, reinterpreted - see MilestoneBonusStateStore in
+        storage.py) tracks, per member and per threshold slot (slot 1 =
+        150%, slot 2 = 200%), whether this week's crossing has already been
+        credited, so a refresh that runs again minutes later (nothing having
+        changed) never double-credits; that tracking resets itself
+        automatically once the calendar week rolls over.
 
         Eligibility mirrors the leaderboard: only members who participate in
-        the reward system (CONF_MEMBER_REWARDS_OPT_IN) and are active. The
-        awarded points are logged via the normal completion log (so they
-        show up in points_total/points_week/points_available/history like
-        any other points) under the internal MILESTONE_BONUS_1_TASK_ID/
-        MILESTONE_BONUS_2_TASK_ID sentinels.
+        the reward system (CONF_MEMBER_REWARDS_OPT_IN) and are active.
         """
         if not self.config_entry or goal_points <= 0:
             return
         options = self.config_entry.options
-        if not options.get(CONF_MILESTONE_BONUS_ENABLED, DEFAULT_MILESTONE_BONUS_ENABLED):
-            return
+        milestone_150_bonus_coins = options.get(
+            CONF_MILESTONE_150_BONUS_COINS, DEFAULT_MILESTONE_150_BONUS_COINS
+        )
+        milestone_200_bonus_coins = options.get(
+            CONF_MILESTONE_200_BONUS_COINS, DEFAULT_MILESTONE_200_BONUS_COINS
+        )
 
         period_key = start_of_week.date().isoformat()
-        thresholds = (
-            (
-                1,
-                MILESTONE_BONUS_1_TASK_ID,
-                options.get(
-                    CONF_MILESTONE_1_THRESHOLD_PERCENT, DEFAULT_MILESTONE_1_THRESHOLD_PERCENT
-                ),
-                options.get(CONF_MILESTONE_1_BONUS_POINTS, DEFAULT_MILESTONE_1_BONUS_POINTS),
-            ),
-            (
-                2,
-                MILESTONE_BONUS_2_TASK_ID,
-                options.get(
-                    CONF_MILESTONE_2_THRESHOLD_PERCENT, DEFAULT_MILESTONE_2_THRESHOLD_PERCENT
-                ),
-                options.get(CONF_MILESTONE_2_BONUS_POINTS, DEFAULT_MILESTONE_2_BONUS_POINTS),
-            ),
+        tiers = (
+            (1, COIN_REASON_MILESTONE_150, 150, milestone_150_bonus_coins),
+            (2, COIN_REASON_MILESTONE_200, 200, milestone_200_bonus_coins),
         )
 
         for member_id, member in self.members.data.items():
@@ -1781,93 +1789,116 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             ):
                 continue
             points_week = self.completions.points_since(member_id, start_of_week)
-            for threshold_index, task_id, threshold_percent, bonus_points in thresholds:
-                if threshold_percent <= 0 or bonus_points <= 0:
+            for threshold_index, coin_reason, percent, bonus_coins in tiers:
+                if bonus_coins <= 0:
                     continue
-                threshold_points = round(goal_points * threshold_percent / 100)
+                threshold_points = round(goal_points * percent / 100)
                 if points_week < threshold_points:
                     continue
                 if await self.milestone_bonus_state.async_has_awarded(
                     period_key, threshold_index, member_id
                 ):
                     continue
-                await self.completions.async_add_entry(
-                    task_id=task_id,
-                    period_key=period_key,
+                await self.coin_ledger.async_add_entry(
                     member_id=member_id,
-                    points_awarded=bonus_points,
-                    task_name=f"Meilensteinbonus: {threshold_percent}% des Wochenziels erreicht",
+                    amount=bonus_coins,
+                    reason=coin_reason,
+                    note=f"Meilensteinbonus: {percent}% des Wochenziels erreicht",
                 )
                 await self.milestone_bonus_state.async_mark_awarded(
                     period_key, threshold_index, member_id
                 )
                 _LOGGER.debug(
-                    "Awarded %s Meilensteinbonus point(s) to %s for threshold %s (%s%%) in week %s",
-                    bonus_points,
+                    "Credited %s Meilensteinbonus coin(s) to %s for the %s%% checkpoint in week %s",
+                    bonus_coins,
                     member_id,
-                    threshold_index,
-                    threshold_percent,
+                    percent,
                     period_key,
                 )
 
-    async def _async_process_streak_bonus(
+    async def _async_process_streak_coin_bonus(
         self, start_of_week: datetime, goal_points: int
     ) -> None:
-        """Award "Streak-Bonus" points for consecutive weeks above target.
+        """Credit "Streak-Bonus" coins for maintaining a checkpoint across weeks.
 
-        See CONF_STREAK_BONUS_ENABLED/...THRESHOLD_POINTS/...REQUIRED_WEEKS/
-        ...POINTS in const.py. Unlike the Meilensteinbonus above (awarded
-        live, mid-week), a streak can only be judged once a week has actually
-        ended - so this catches each member up on every fully-elapsed
-        calendar week since their StreakBonusStateStore cursor last stopped,
-        oldest first, judging each one against ``goal_points +
-        streak_bonus_threshold_points`` and incrementing/resetting a
-        per-member streak counter accordingly. Once that counter reaches
+        See CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS/
+        CONF_STREAK_BONUS_REQUIRED_WEEKS in const.py. v0.36: replaces the old
+        single configurable-threshold, points-based Streak-Bonus entirely -
+        there are now two independent streaks, one for the fixed 150%
+        weekly-progress checkpoint and one for 200%
+        (PROGRESS_THRESHOLD_PERCENTS in const.py), each processed exactly
+        like the old single streak was (see
+        _async_process_member_streak_tier): unlike the Meilensteinbonus
+        above (credited live, mid-week), a streak can only be judged once a
+        week has actually ended - so each tier catches its member up on
+        every fully-elapsed calendar week since that tier's
+        StreakBonusStateStore cursor last stopped, oldest first, judging
+        each one against the tier's checkpoint and incrementing/resetting a
+        per-tier streak counter. Once a tier's counter reaches
         streak_bonus_required_weeks, *every* further consecutive week that
-        still meets target earns the bonus again (rolling) - a maintained
-        streak, not a one-off reward for first reaching it.
+        still meets that checkpoint credits the bonus again (rolling) - a
+        maintained streak, not a one-off reward for first reaching it. A
+        no-op if goal_points is 0 - both checkpoints are a percentage of the
+        weekly goal.
 
-        A brand-new member (or the feature's very first run) starts its
-        cursor at "last week" rather than the beginning of time, so turning
-        this on doesn't retroactively grind through a household's entire
-        history - same reasoning as the Meilensteinbonus only ever reacting
-        to the current week.
+        A brand-new member (or a tier's very first run) starts its cursor at
+        "last week" rather than the beginning of time, so turning a bonus on
+        doesn't retroactively grind through a household's entire history -
+        same reasoning as the Meilensteinbonus only ever reacting to the
+        current week.
         """
-        if not self.config_entry:
+        if not self.config_entry or goal_points <= 0:
             return
         options = self.config_entry.options
-        if not options.get(CONF_STREAK_BONUS_ENABLED, DEFAULT_STREAK_BONUS_ENABLED):
-            return
-        threshold_extra = options.get(
-            CONF_STREAK_BONUS_THRESHOLD_POINTS, DEFAULT_STREAK_BONUS_THRESHOLD_POINTS
-        )
         required_weeks = options.get(
             CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
         )
-        bonus_points = options.get(CONF_STREAK_BONUS_POINTS, DEFAULT_STREAK_BONUS_POINTS)
-        if threshold_extra <= 0 or required_weeks <= 0 or bonus_points <= 0:
+        if required_weeks <= 0:
             return
-        target_points = max(0, goal_points) + threshold_extra
+        streak_150_bonus_coins = options.get(
+            CONF_STREAK_150_BONUS_COINS, DEFAULT_STREAK_150_BONUS_COINS
+        )
+        streak_200_bonus_coins = options.get(
+            CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
+        )
+        tiers = (
+            ("150", 150, streak_150_bonus_coins, COIN_REASON_STREAK_150),
+            ("200", 200, streak_200_bonus_coins, COIN_REASON_STREAK_200),
+        )
 
-        for member_id, member in self.members.data.items():
-            if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or not member.get(
-                "active", True
-            ):
+        for tier, percent, bonus_coins, coin_reason in tiers:
+            if bonus_coins <= 0:
                 continue
-            await self._async_process_member_streak(
-                member_id, start_of_week, target_points, required_weeks, bonus_points
-            )
+            target_points = round(goal_points * percent / 100)
+            for member_id, member in self.members.data.items():
+                if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or not member.get(
+                    "active", True
+                ):
+                    continue
+                await self._async_process_member_streak_tier(
+                    member_id,
+                    tier,
+                    start_of_week,
+                    target_points,
+                    required_weeks,
+                    bonus_coins,
+                    percent,
+                    coin_reason,
+                )
 
-    async def _async_process_member_streak(
+    async def _async_process_member_streak_tier(
         self,
         member_id: str,
+        tier: str,
         start_of_week: datetime,
         target_points: int,
         required_weeks: int,
-        bonus_points: int,
+        bonus_coins: int,
+        percent: int,
+        coin_reason: str,
     ) -> None:
-        """Catch up one member's Streak-Bonus cursor through every elapsed week."""
-        state = self.streak_bonus_state.get(member_id)
+        """Catch up one member's Streak-Bonus cursor, for one tier, through every elapsed week."""
+        state = self.streak_bonus_state.get(member_id, tier)
         if state and state.get("processed_through"):
             cursor = dt_util.parse_datetime(state["processed_through"]) or (
                 start_of_week - timedelta(days=7)
@@ -1890,42 +1921,47 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             else:
                 streak_count = 0
             if streak_count >= required_weeks:
-                period_key = dt_util.as_local(cursor).date().isoformat()
-                await self.completions.async_add_entry(
-                    task_id=STREAK_BONUS_TASK_ID,
-                    period_key=period_key,
+                await self.coin_ledger.async_add_entry(
                     member_id=member_id,
-                    points_awarded=bonus_points,
-                    task_name=f"Streak-Bonus: {streak_count}. Woche in Folge über dem Ziel",
+                    amount=bonus_coins,
+                    reason=coin_reason,
+                    note=(
+                        f"Streak-Bonus: {streak_count}. Woche in Folge "
+                        f"über der {percent}%-Marke"
+                    ),
                 )
                 _LOGGER.debug(
-                    "Awarded %s Streak-Bonus point(s) to %s for week %s (streak %s)",
-                    bonus_points,
+                    "Credited %s Streak-Bonus coin(s) to %s for tier %s, week of %s (streak %s)",
+                    bonus_coins,
                     member_id,
-                    period_key,
+                    tier,
+                    dt_util.as_local(cursor).date().isoformat(),
                     streak_count,
                 )
             cursor += timedelta(days=7)
             weeks_processed += 1
 
         if weeks_processed:
-            await self.streak_bonus_state.async_set(member_id, cursor, streak_count)
+            await self.streak_bonus_state.async_set(member_id, tier, cursor, streak_count)
 
     async def async_reset_points(self, member_id: str | None = None) -> None:
         """Reset stored *points* data - see SERVICE_RESET_POINTS in const.py.
 
         Clears the completion log (points_total/points_week/.../history),
-        reward redemptions (so points_available is no longer reduced by past
-        purchases either), and the Meilenstein-/Streak-Bonus tracking state.
-        Task and member *definitions* and the reward catalog itself are left
-        completely untouched - this only ever resets *earned/spent points*,
-        never the household's setup. ``member_id`` left unset (None) resets
-        every member at once; given, only that member's data is cleared.
+        reward redemptions, the coin ledger (v0.36 - milestone/streak coin
+        bonuses and past redemption debits alike, so coins_available is no
+        longer reduced by past purchases either), and the Meilenstein-/
+        Streak-Bonus tracking state. Task and member *definitions* and the
+        reward catalog itself are left completely untouched - this only ever
+        resets *earned/spent points and coins*, never the household's setup.
+        ``member_id`` left unset (None) resets every member at once; given,
+        only that member's data is cleared.
         """
         await self.completions.async_reset(member_id)
         for redemption_id, redemption in list(self.reward_redemptions.data.items()):
             if member_id is None or redemption.get("member_id") == member_id:
                 await self.reward_redemptions.async_delete_item(redemption_id)
+        await self.coin_ledger.async_reset(member_id)
         await self.milestone_bonus_state.async_reset(member_id)
         await self.streak_bonus_state.async_reset(member_id)
         _LOGGER.info("Reset points data for %s", member_id or "every member")
@@ -1935,63 +1971,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         """Turn the household-wide Urlaubsmodus on/off - see switch.py."""
         await self.vacation_mode_state.async_set(is_active)
         await self.async_request_refresh()
-
-    async def _async_correct_negative_balances(self, goal_points: int) -> None:
-        """One-time, per-member top-up for balances left negative by a v0.29/v0.30 bug.
-
-        Before v0.30, storage._available_points (the server-side check in
-        ws_redeem_reward that a redemption doesn't exceed a member's
-        balance) used a stale copy of the spendable-points rule that never
-        picked up the v0.29 weekly-goal restriction applied everywhere else
-        (see storage.weekly_spendable_points) - so a redemption could be
-        accepted for more than a member's true spendable balance, which then
-        showed up as a negative MemberSummaryData.points_available. That
-        validation is fixed now (both call sites share one implementation),
-        so this can no longer happen for a *new* redemption - but a
-        household that already had a member go negative before upgrading
-        needs that historical shortfall corrected, not just prevented going
-        forward.
-
-        Runs every refresh, but only ever tops up a given member once: a
-        member who already has a POINTS_CORRECTION_TASK_ID entry is skipped
-        outright, regardless of their current balance - this is a one-time
-        historical correction, not a standing "never let this go negative"
-        rule that would risk silently masking some future, different bug the
-        same way. The credited amount is exactly the shortfall (redeemed
-        points minus what was actually spendable), which brings
-        points_available to precisely 0, never higher.
-        """
-        for member_id in self.members.data:
-            already_corrected = any(
-                entry["completed_by_member_id"] == member_id
-                and entry["task_id"] == POINTS_CORRECTION_TASK_ID
-                for entry in self.completions.entries
-            )
-            if already_corrected:
-                continue
-
-            spendable = self._weekly_spendable_points(member_id, goal_points)
-            redeemed = sum(
-                redemption.get("points_cost", 0)
-                for redemption in self.reward_redemptions.data.values()
-                if redemption.get("member_id") == member_id
-            )
-            deficit = redeemed - spendable
-            if deficit <= 0:
-                continue
-
-            await self.completions.async_add_entry(
-                task_id=POINTS_CORRECTION_TASK_ID,
-                period_key=dt_util.utcnow().date().isoformat(),
-                member_id=member_id,
-                points_awarded=deficit,
-                task_name="Korrektur: rückwirkender Ausgleich (v0.30)",
-            )
-            _LOGGER.info(
-                "Corrected negative points_available for member %s: credited %s point(s)",
-                member_id,
-                deficit,
-            )
 
     async def _async_admin_member_ids(self) -> list[str]:
         """Family members linked (via person_entity_id) to a HA admin account.

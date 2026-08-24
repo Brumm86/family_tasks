@@ -45,6 +45,8 @@ from .storage import (
     BatteryOverrideStorageCollection,
     ChecklistStateStore,
     ClaimStateStore,
+    CoinLedgerStore,
+    CoinSystemStateStore,
     CompletionLogStore,
     FavoriteStorageCollection,
     MemberStorageCollection,
@@ -58,6 +60,8 @@ from .storage import (
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_claim_state_store,
+    async_create_coin_ledger_store,
+    async_create_coin_system_state_store,
     async_create_favorites_collection,
     async_create_members_collection,
     async_create_milestone_bonus_state_store,
@@ -128,6 +132,8 @@ class FamilyTasksRuntimeData:
     claim_state: ClaimStateStore
     streak_bonus_state: StreakBonusStateStore
     vacation_mode_state: VacationModeStateStore
+    coin_ledger: CoinLedgerStore
+    coin_system_state: CoinSystemStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -148,6 +154,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     completions = CompletionLogStore(hass)
     await completions.async_load()
 
+    # v0.36: created before the websocket API too, same reasoning as
+    # completions above - ws_redeem_reward needs both to work out a member's
+    # current coin balance. See CoinLedgerStore/CoinSystemStateStore in
+    # storage.py.
+    coin_ledger = await async_create_coin_ledger_store(hass)
+    coin_system_state = await async_create_coin_system_state_store(hass)
+
     # The websocket CRUD API is a hass-global registration; only needed once,
     # but harmless/no-ops for a second entry since single_config_entry=True
     # in the manifest already prevents that from happening in practice.
@@ -161,6 +174,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         reward_redemptions,
         completions,
         favorites,
+        coin_ledger,
+        coin_system_state,
     )
 
     trigger_state = await async_create_trigger_state_store(hass)
@@ -192,6 +207,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         claim_state,
         streak_bonus_state,
         vacation_mode_state,
+        coin_ledger,
+        coin_system_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -209,6 +226,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         claim_state=claim_state,
         streak_bonus_state=streak_bonus_state,
         vacation_mode_state=vacation_mode_state,
+        coin_ledger=coin_ledger,
+        coin_system_state=coin_system_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -246,10 +265,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     entry.async_on_unload(
         battery_overrides.async_add_change_set_listener(_async_collection_changed)
     )
-    # A redemption changes the acting member's points_available (v0.9) - see
-    # MemberSummaryData.points_available in coordinator.py - so the
-    # leaderboard card's balance display updates right away instead of
-    # waiting for the next poll interval.
+    # A redemption changes the acting member's coins_available (v0.9, coins
+    # since v0.36) - see MemberSummaryData.coins_available in coordinator.py
+    # - so the leaderboard card's balance display updates right away instead
+    # of waiting for the next poll interval.
     entry.async_on_unload(
         reward_redemptions.async_add_change_set_listener(_async_collection_changed)
     )

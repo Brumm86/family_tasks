@@ -24,21 +24,14 @@
           "battery_alert_auto_complete_on_recovery": "Auto-complete battery alert tasks once the battery recovers",
           "screen_time_minutes_per_point": "Screen time minutes per invested point",
           "weekly_progress_goal_points": "Weekly point goal (progress bar)",
-          "milestone_bonus_enabled": "Award a Meilensteinbonus (milestone bonus)",
-          "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",
-          "milestone_1_bonus_points": "Bonus points at threshold 1",
-          "milestone_2_threshold_percent": "Threshold 2 (% of weekly goal)",
-          "milestone_2_bonus_points": "Bonus points at threshold 2",
-          "streak_bonus_enabled": "Award a Streak-Bonus",
-          "streak_bonus_threshold_points": "Extra points above weekly goal required per week",
-          "streak_bonus_required_weeks": "Consecutive weeks required",
-          "streak_bonus_points": "Bonus points per streak week",
+          "milestone_150_bonus_coins": "Meilensteinbonus coins at 150% of weekly goal",
+          "milestone_200_bonus_coins": "Meilensteinbonus coins at 200% of weekly goal",
+          "streak_bonus_required_weeks": "Consecutive weeks required for a Streak-Bonus",
+          "streak_150_bonus_coins": "Streak-Bonus coins per week maintaining 150%",
+          "streak_200_bonus_coins": "Streak-Bonus coins per week maintaining 200%",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
       }
-    },
-    "error": {
-      "milestone_threshold_order": "Threshold 2 must be greater than threshold 1."
     }
   },
   "selector": {
@@ -58,6 +51,9 @@
       },
       "member_points": {
         "name": "Points"
+      },
+      "member_coins": {
+        "name": "Coins"
       },
       "member_open_tasks": {
         "name": "Open tasks"
@@ -152,7 +148,7 @@
     },
     "reset_points": {
       "name": "Reset points",
-      "description": "Resets stored points data: the completion log/history, reward redemptions, and Meilenstein-/Streak-Bonus tracking. Tasks, members, and the reward catalog itself are left untouched.",
+      "description": "Resets stored points and coins data: the completion log/history, reward redemptions, the coin ledger, and Meilenstein-/Streak-Bonus tracking. Tasks, members, and the reward catalog itself are left untouched.",
       "fields": {
         "member_id": {
           "name": "Member ID",

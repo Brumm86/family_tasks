@@ -27,6 +27,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    COIN_REASON_REDEMPTION,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_REWARDS_OPT_IN,
@@ -63,6 +64,8 @@ from .const import (
     STORAGE_KEY_BATTERY_OVERRIDES,
     STORAGE_KEY_CHECKLIST_STATE,
     STORAGE_KEY_CLAIM_STATE,
+    STORAGE_KEY_COIN_LEDGER,
+    STORAGE_KEY_COIN_SYSTEM_STATE,
     STORAGE_KEY_COMPLETIONS,
     STORAGE_KEY_FAVORITES,
     STORAGE_KEY_MEMBERS,
@@ -585,18 +588,22 @@ class FavoriteStorageCollectionWebsocket(collection.DictStorageCollectionWebsock
         await super().ws_delete_item(hass, connection, msg)
 
 
-# --- Rewards (v0.9) ------------------------------------------------------------
+# --- Rewards (v0.9, currency switched to coins in v0.36) -----------------------
 #
 # The parent-defined reward catalog: each item has a name and a price in
-# points ("points_cost") - see WS_API_PREFIX_REWARDS in const.py. Any
-# participating family member may redeem any catalog item at any time
+# coins ("coin_cost", "points_cost" before v0.36) - see WS_API_PREFIX_REWARDS
+# in const.py. Any participating family member may redeem any catalog item at
+# any time
 # (see RewardRedemptionStorageCollection below), not just a "weekly winner"
 # (v0.8's model, removed in v0.9) - so unlike then, no per-redemption
 # customization (the old free-text "detail") is needed here.
 REWARD_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("name"): str,
     vol.Optional("icon"): str,
-    vol.Optional("points_cost", default=0): vol.All(int, vol.Range(min=0)),
+    # v0.36: "coin_cost" - was "points_cost" before the reward shop's
+    # currency switched from points to coins, see the "Rewards" section of
+    # const.py.
+    vol.Optional("coin_cost", default=0): vol.All(int, vol.Range(min=0)),
     # See CONF_REWARD_SCREEN_TIME_MINUTES/EVENT_REWARD_REDEEMED in const.py.
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(int, vol.Range(min=1)),
     # See CONF_REWARD_AUTO_FULFILL in const.py.
@@ -611,7 +618,7 @@ REWARD_CREATE_SCHEMA: collection.VolDictType = {
 REWARD_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("name"): str,
     vol.Optional("icon"): str,
-    vol.Optional("points_cost"): vol.All(int, vol.Range(min=0)),
+    vol.Optional("coin_cost"): vol.All(int, vol.Range(min=0)),
     # Explicitly setting this to null clears a previously set value - same
     # "clear via null" pattern as BatteryOverrideStorageCollection's
     # "threshold" below.
@@ -634,12 +641,13 @@ class RewardStorageCollection(collection.DictStorageCollection):
 
     Formerly (v0.8) "reward groups" - categories a weekly winner picked from,
     with a free-text detail filled in at claim time. That flow is gone in
-    v0.9: every catalog item now has a fixed price in points instead, and any
-    participating member may redeem it whenever they can afford it (see
-    RewardRedemptionStorageCollection below) - existing items are migrated in
-    place the first time this collection loads (see
+    v0.9: every catalog item now has a fixed price instead (in coins since
+    v0.36, points before that - see _async_migrate_points_cost_to_coin_cost),
+    and any participating member may redeem it whenever they can afford it
+    (see RewardRedemptionStorageCollection below) - existing items are
+    migrated in place the first time this collection loads (see
     _async_migrate_reward_catalog), keeping their name/icon and getting
-    points_cost=0 until an admin sets a real price.
+    coin_cost=0 until an admin sets a real price.
     """
 
     CREATE_SCHEMA = vol.Schema(REWARD_CREATE_SCHEMA)
@@ -670,31 +678,34 @@ class RewardStorageCollection(collection.DictStorageCollection):
         return updated
 
 
-# A redemption: which member spent points on which catalog reward. Only ever
+# A redemption: which member spent coins on which catalog reward (points
+# before v0.36 - see the "Rewards" section header in const.py). Only ever
 # created through ws_redeem_reward below (never the generic
 # "reward_redemption/create" command, see
 # RewardRedemptionStorageCollectionWebsocket) - "member_name", "reward_name"
-# and "points_cost" are denormalized copies taken at redemption time so
+# and "coin_cost" are denormalized copies taken at redemption time so
 # history/display still makes sense even if the member or reward is later
-# renamed, repriced, or deleted. Creating one *is* the point deduction: a
-# member's available balance (see MemberSummaryData.points_available in
-# coordinator.py) is always computed fresh as all-time points earned minus
-# the sum of "points_cost" across their redemptions, so there is nothing else
-# to update once a redemption exists. "screen_time_minutes" (v0.11) is the
-# same kind of denormalized copy, taken from the reward at redemption time -
-# see CONF_REWARD_SCREEN_TIME_MINUTES in const.py - so history/the fired
-# event still show the value that applied at redemption time even if the
-# catalog item's own value is changed or cleared afterwards.
+# renamed, repriced, or deleted. Creating one *is* the coin deduction: it
+# also appends a matching debit entry to storage.CoinLedgerStore (negative
+# amount, reason=COIN_REASON_REDEMPTION) - a member's available coin balance
+# (see MemberSummaryData.coins_available in coordinator.py) is always
+# computed fresh from that ledger plus storage.coins_from_task_points, so
+# there is nothing else to update once a redemption exists.
+# "screen_time_minutes" (v0.11) is a denormalized copy too, taken from the
+# reward at redemption time - see CONF_REWARD_SCREEN_TIME_MINUTES in
+# const.py - so history/the fired event still show the value that applied at
+# redemption time even if the catalog item's own value is changed or cleared
+# afterwards.
 REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     vol.Required("member_id"): str,
     vol.Required("member_name"): str,
     vol.Required("reward_id"): str,
     vol.Required("reward_name"): str,
-    vol.Required("points_cost"): vol.All(int, vol.Range(min=0)),
+    vol.Required("coin_cost"): vol.All(int, vol.Range(min=0)),
     vol.Optional("fulfilled", default=False): bool,
     # vol.Coerce(int), not a bare int (v0.16 fix): for a
     # CONF_REWARD_SCREEN_TIME_INVESTABLE redemption this value is computed
-    # below as points_invested * the household's "Handyzeit-Minuten pro
+    # below as coins_invested * the household's "Handyzeit-Minuten pro
     # investiertem Punkt" bonus factor (CONF_SCREEN_TIME_MINUTES_PER_POINT) -
     # and that factor comes back from the Options flow's NumberSelector as a
     # Python float (e.g. 2.0), even when the admin only ever typed a whole
@@ -708,13 +719,14 @@ REWARD_REDEMPTION_CREATE_SCHEMA: collection.VolDictType = {
     # actual fix; Coerce here is defense in depth so a future numeric drift
     # like this fails obviously instead of silently again.
     vol.Optional(CONF_REWARD_SCREEN_TIME_MINUTES): vol.All(vol.Coerce(int), vol.Range(min=1)),
-    # v0.14: how many points the member chose to invest, only present for a
+    # v0.14: how many coins the member chose to invest, only present for a
     # CONF_REWARD_SCREEN_TIME_INVESTABLE redemption - see ws_redeem_reward.
-    # For that kind of redemption this is the same number as "points_cost"
+    # For that kind of redemption this is the same number as "coin_cost"
     # (both are the deduction), kept as its own field purely so the history/
-    # event payload can label it distinctly ("12 Punkte investiert" instead of
-    # implying a fixed catalog price).
-    vol.Optional("points_invested"): vol.All(int, vol.Range(min=1)),
+    # event payload can label it distinctly ("12 Münzen investiert" instead
+    # of implying a fixed catalog price). Named "points_invested" before
+    # v0.36.
+    vol.Optional("coins_invested"): vol.All(int, vol.Range(min=1)),
     # v0.24: the redeeming member's free-text note, only present for a
     # CONF_REWARD_NOTE_ENABLED reward (e.g. which lunch they'd like) - see
     # ws_redeem_reward, which requires a non-blank value whenever the reward
@@ -738,8 +750,11 @@ class RewardRedemptionStorageCollection(collection.DictStorageCollection):
     calendar week. v0.9 removes that limit entirely - a member may redeem as
     often as their balance allows - existing items are migrated in place the
     first time this collection loads (see _async_migrate_reward_redemptions):
-    mapped onto the new shape with points_cost=0 so they never retroactively
-    reduce anyone's balance, exactly as if that historical claim had been free.
+    mapped onto the new shape with coin_cost=0 so they never retroactively
+    reduce anyone's balance, exactly as if that historical claim had been
+    free. v0.36 additionally renames "points_cost" to "coin_cost" on every
+    existing item (see _async_migrate_points_cost_to_coin_cost) - the reward
+    shop's currency switched from points to coins that release.
     """
 
     CREATE_SCHEMA = vol.Schema(REWARD_REDEMPTION_CREATE_SCHEMA)
@@ -984,12 +999,13 @@ REDEEM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
         vol.Required("type"): WS_API_REWARD_REDEEM,
         vol.Required("reward_id"): str,
         # v0.14: required (and only meaningful) for a
-        # CONF_REWARD_SCREEN_TIME_INVESTABLE reward - how many points the
-        # member wants to invest this time; the backend re-derives the
-        # granted screen time from this (points_spent *
-        # CONF_SCREEN_TIME_MINUTES_PER_POINT) rather than trusting a
-        # client-computed minutes value. Ignored for any other reward.
-        vol.Optional("points_spent"): vol.All(int, vol.Range(min=1)),
+        # CONF_REWARD_SCREEN_TIME_INVESTABLE reward - how many coins the
+        # member wants to invest this time (named "points_spent" before
+        # v0.36); the backend re-derives the granted screen time from this
+        # (coins_spent * CONF_SCREEN_TIME_MINUTES_PER_POINT) rather than
+        # trusting a client-computed minutes value. Ignored for any other
+        # reward.
+        vol.Optional("coins_spent"): vol.All(int, vol.Range(min=1)),
         # v0.24: required (and only meaningful) for a CONF_REWARD_NOTE_ENABLED
         # reward - e.g. which lunch the member wants for "Mittagessen
         # auswählen". Ignored for any other reward; ws_redeem_reward rejects
@@ -1014,37 +1030,42 @@ AWARD_POINTS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
 )
 
 
-def _available_points(
+def _available_coins(
     completions: CompletionLogStore,
-    reward_redemptions: RewardRedemptionStorageCollection,
+    coin_ledger: "CoinLedgerStore",
     member_id: str,
     goal_points: int,
+    coin_system_started_at: datetime,
 ) -> int:
-    """A member's current spendable balance: spendable points minus redemptions.
+    """A member's current spendable coin balance.
 
-    Mirrors FamilyTasksCoordinator._async_update_data's points_available
-    computation (MemberSummaryData.points_available in coordinator.py) -
-    duplicated here, not imported, the same way the old is_weekly_winner
-    check used to be re-derived server-side independently of the coordinator,
-    so a redemption is always validated against the authoritative source
-    (the completion log + redemption history) rather than a value the client
-    happens to have cached.
+    v0.36, replaces the pre-v0.36 _available_points (points-based). Mirrors
+    FamilyTasksCoordinator._async_update_data's coins_available computation
+    (MemberSummaryData.coins_available in coordinator.py) - duplicated here,
+    not imported, so a redemption is always validated against the
+    authoritative source (the completion log + coin ledger) rather than a
+    value the client happens to have cached. Two parts, summed:
 
-    v0.30 bugfix: this used to sum all-time points regardless of the v0.29
-    weekly-goal rule (``goal_points`` - see CONF_WEEKLY_PROGRESS_GOAL_POINTS
-    in const.py), so a redemption could be accepted for more than a member's
-    true spendable balance under that rule, which then surfaced as a
-    negative points_available on the coordinator's next refresh. Now uses
-    the same shared weekly_spendable_points() the coordinator does, so the
-    two can never drift apart again.
+    - storage.coins_from_task_points: points a member has earned *beyond*
+      the weekly goal (CONF_WEEKLY_PROGRESS_GOAL_POINTS, the 100%
+      weekly-progress checkpoint) convert 1:1 to coins - only counting
+      completions from ``coin_system_started_at`` on, so upgrading to v0.36
+      starts every member at 0 rather than retroactively crediting a
+      lifetime of pre-v0.36 "spendable point" surplus (see
+      storage.CoinSystemStateStore).
+    - coin_ledger.balance: every Meilenstein-/Streak-coin-bonus credit
+      (FamilyTasksCoordinator._async_process_milestone_coin_bonus/
+      _async_process_streak_coin_bonus) plus every shop-redemption debit
+      (this same function's caller, ws_redeem_reward, appends one
+      immediately after creating the redemption) - see
+      storage.CoinLedgerStore. Unlike the pre-v0.36 points_available
+      computation, redemption debits are read from here, not by separately
+      summing RewardRedemptionStorageCollection - a redemption's debit
+      ledger entry *is* the deduction now.
     """
-    spendable = weekly_spendable_points(completions, member_id, goal_points)
-    spent = sum(
-        r.get("points_cost", 0)
-        for r in reward_redemptions.data.values()
-        if r.get("member_id") == member_id
-    )
-    return spendable - spent
+    return coins_from_task_points(
+        completions, member_id, goal_points, coin_system_started_at
+    ) + coin_ledger.balance(member_id)
 
 
 @callback
@@ -1058,15 +1079,21 @@ def async_setup_websocket_api(
     reward_redemptions: RewardRedemptionStorageCollection,
     completions: CompletionLogStore,
     favorites: FavoriteStorageCollection,
+    coin_ledger: "CoinLedgerStore",
+    coin_system_state: "CoinSystemStateStore",
 ) -> None:
     """Expose the storage collections over the websocket API for the frontend.
 
     ``entry`` (the config entry) is only needed so ws_redeem_reward can read
-    CONF_SCREEN_TIME_MINUTES_PER_POINT from its options fresh on every
-    redemption - same "read live, don't cache at setup" approach already used
-    for CONF_OVERDUE_AFTER_MINUTES/CONF_BATTERY_WARNING_THRESHOLD in
-    coordinator.py, so a parent changing the bonus factor in Settings applies
-    immediately without a restart.
+    CONF_SCREEN_TIME_MINUTES_PER_POINT/CONF_WEEKLY_PROGRESS_GOAL_POINTS from
+    its options fresh on every redemption - same "read live, don't cache at
+    setup" approach already used for CONF_OVERDUE_AFTER_MINUTES/
+    CONF_BATTERY_WARNING_THRESHOLD in coordinator.py, so a parent changing
+    the bonus factor in Settings applies immediately without a restart.
+
+    ``coin_ledger``/``coin_system_state`` (v0.36) let ws_redeem_reward check
+    and debit a member's *coin* balance instead of the pre-v0.36 points one -
+    see _available_coins/CoinLedgerStore/CoinSystemStateStore.
     """
     collection.DictStorageCollectionWebsocket(
         tasks, WS_API_PREFIX_TASKS, "task", TASK_CREATE_SCHEMA, TASK_UPDATE_SCHEMA
@@ -1130,18 +1157,20 @@ def async_setup_websocket_api(
         No admin permission required - instead the caller must resolve (via
         their linked person entity) to a family member who participates in
         the reward system (see CONF_MEMBER_REWARDS_OPT_IN in const.py), and
-        that member's current available balance (_available_points above)
-        must cover the reward's price. Creating the redemption entry is
-        itself the deduction - there is no separate balance to update.
+        that member's current available *coin* balance (_available_coins
+        above - points before v0.36) must cover the reward's price. Creating
+        the redemption entry, plus the matching debit appended to
+        coin_ledger right after, together are the deduction - there is no
+        separate balance to update.
 
         A CONF_REWARD_SCREEN_TIME_INVESTABLE reward (v0.14) works
-        differently: there is no fixed "points_cost" to check against - the
-        caller supplies "points_spent" instead, and the screen time granted
-        is derived from it (points_spent * CONF_SCREEN_TIME_MINUTES_PER_POINT,
+        differently: there is no fixed "coin_cost" to check against - the
+        caller supplies "coins_spent" instead, and the screen time granted
+        is derived from it (coins_spent * CONF_SCREEN_TIME_MINUTES_PER_POINT,
         the household-wide bonus factor from Options) rather than a value
         stored on the catalog item. The balance check and deduction use
-        points_spent in place of the (unused, for this reward kind)
-        points_cost field.
+        coins_spent in place of the (unused, for this reward kind)
+        coin_cost field.
         """
         member_id = _member_id_for_user(hass, members, connection.user)
         member = members.data.get(member_id) if member_id else None
@@ -1169,20 +1198,20 @@ def async_setup_websocket_api(
             return
 
         is_investable = bool(reward.get(CONF_REWARD_SCREEN_TIME_INVESTABLE))
-        points_invested: int | None = None
+        coins_invested: int | None = None
         screen_time_minutes = reward.get(CONF_REWARD_SCREEN_TIME_MINUTES)
 
         if is_investable:
-            points_invested = msg.get("points_spent")
-            if not points_invested:
+            coins_invested = msg.get("coins_spent")
+            if not coins_invested:
                 connection.send_error(
                     msg["id"],
                     websocket_api.ERR_INVALID_FORMAT,
-                    "Bitte angeben, wie viele Punkte investiert werden sollen.",
+                    "Bitte angeben, wie viele Münzen investiert werden sollen.",
                 )
                 return
-            points_cost = points_invested
-            bonus_per_point = (
+            coin_cost = coins_invested
+            bonus_per_coin = (
                 entry.options.get(
                     CONF_SCREEN_TIME_MINUTES_PER_POINT, DEFAULT_SCREEN_TIME_MINUTES_PER_POINT
                 )
@@ -1190,23 +1219,23 @@ def async_setup_websocket_api(
                 else DEFAULT_SCREEN_TIME_MINUTES_PER_POINT
             )
             # int(), not just the raw product (v0.16 fix): the Options flow's
-            # NumberSelector always returns bonus_per_point as a Python float
+            # NumberSelector always returns bonus_per_coin as a Python float
             # (e.g. 2.0) once an admin has ever saved the integration's
             # options, even for a whole number - so this product came out as
             # a float too, which REWARD_REDEMPTION_CREATE_SCHEMA's
             # screen_time_minutes field then rejected (see the schema
             # comment above), making every investable-reward redemption fail
             # silently. Rounding first avoids truncating down on a
-            # non-integer bonus factor (e.g. 1.5 min/point).
-            screen_time_minutes = int(round(points_invested * bonus_per_point))
+            # non-integer bonus factor (e.g. 1.5 min/coin).
+            screen_time_minutes = int(round(coins_invested * bonus_per_coin))
         else:
-            points_cost = reward.get("points_cost", 0)
+            coin_cost = reward.get("coin_cost", 0)
 
         # v0.24: a CONF_REWARD_NOTE_ENABLED reward (e.g. "Mittagessen
         # auswählen") needs a non-blank note before it may be redeemed at
         # all - checked here, before the balance check below, so a member
         # who forgot to fill it in sees that specific error rather than a
-        # possibly-unrelated "not enough points" one.
+        # possibly-unrelated "not enough Münzen" one.
         note: str | None = None
         if reward.get(CONF_REWARD_NOTE_ENABLED):
             note = (msg.get("note") or "").strip()
@@ -1225,12 +1254,14 @@ def async_setup_websocket_api(
             if entry is not None
             else DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
         )
-        available = _available_points(completions, reward_redemptions, member_id, goal_points)
-        if available < points_cost:
+        available = _available_coins(
+            completions, coin_ledger, member_id, goal_points, coin_system_state.started_at
+        )
+        if available < coin_cost:
             connection.send_error(
                 msg["id"],
                 websocket_api.ERR_INVALID_FORMAT,
-                "Nicht genug Punkte für diese Belohnung.",
+                "Nicht genug Münzen für diese Belohnung.",
             )
             return
 
@@ -1240,12 +1271,12 @@ def async_setup_websocket_api(
                 "member_name": member["name"],
                 "reward_id": reward["id"],
                 "reward_name": reward["name"],
-                "points_cost": points_cost,
+                "coin_cost": coin_cost,
             }
             if screen_time_minutes is not None:
                 redemption_data[CONF_REWARD_SCREEN_TIME_MINUTES] = screen_time_minutes
-            if points_invested is not None:
-                redemption_data["points_invested"] = points_invested
+            if coins_invested is not None:
+                redemption_data["coins_invested"] = coins_invested
             if note is not None:
                 redemption_data["note"] = note
             # See CONF_REWARD_AUTO_FULFILL in const.py: a reward configured
@@ -1257,6 +1288,18 @@ def async_setup_websocket_api(
             if reward.get(CONF_REWARD_AUTO_FULFILL):
                 redemption_data["fulfilled"] = True
             item = await reward_redemptions.async_create_item(redemption_data)
+            # The actual coin deduction (v0.36) - see _available_coins/
+            # CoinLedgerStore. Appended only after the redemption entry
+            # itself was created successfully, so a schema-validation
+            # failure just above never leaves a stray debit with nothing to
+            # show for it.
+            if coin_cost:
+                await coin_ledger.async_add_entry(
+                    member_id=member_id,
+                    amount=-coin_cost,
+                    reason=COIN_REASON_REDEMPTION,
+                    note=reward["name"],
+                )
             connection.send_result(msg["id"], item)
         except vol.Invalid as err:
             connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(msg, err))
@@ -1277,8 +1320,8 @@ def async_setup_websocket_api(
                 "member_name": member["name"],
                 "reward_id": reward["id"],
                 "reward_name": reward["name"],
-                "points_cost": points_cost,
-                "points_invested": points_invested,
+                "coin_cost": coin_cost,
+                "coins_invested": coins_invested,
                 CONF_REWARD_SCREEN_TIME_MINUTES: screen_time_minutes,
                 "note": note,
             },
@@ -1297,10 +1340,11 @@ def async_setup_websocket_api(
         flag" guard used throughout this module (ws_instantiate_favorite,
         reward-redemption "fulfilled", member management). Logged via the
         normal completion log under the internal MANUAL_POINTS_TASK_ID
-        sentinel (same mechanism CompletionLogStore already uses for the
-        Meilensteinbonus) so it counts toward the member's points_total/
-        points_week/points_month/points_available exactly like a real task
-        completion - there is no separate "adjustments" ledger.
+        sentinel so it counts toward the member's points_total/points_week/
+        points_month - and, since it goes through the same completion log a
+        real task completion does, toward the v0.36 coin conversion too (see
+        storage.coins_from_task_points) - exactly like a real task
+        completion. There is no separate "adjustments" ledger.
 
         CompletionLogStore is a plain append-only log, not a
         StorageCollection - unlike tasks/members/reward_redemptions there is
@@ -1686,6 +1730,32 @@ async def _async_migrate_screen_time_investable(rewards: RewardStorageCollection
         await rewards.store.async_save({"items": list(rewards.data.values())})
 
 
+async def _async_migrate_points_cost_to_coin_cost(collection_: collection.DictStorageCollection) -> None:
+    """Rename "points_cost" to "coin_cost" on every item (reward catalog and redemptions).
+
+    v0.36: the reward shop's currency switched from points to coins (see the
+    "Rewards" section header in const.py) - every existing catalog item and
+    redemption history entry still has its price stored under the old field
+    name from v0.9-v0.35, so this renames it in place the first time either
+    collection loads under v0.36. Runs *after* the v0.9-era migrations above
+    (which still correctly use "points_cost" - that was the real field name
+    at the point in history they backfill from), so every item is guaranteed
+    to already have *a* "points_cost" key, old or freshly backfilled, by the
+    time this runs. Generic over which of the two collections is passed in -
+    both share the exact same rename, just under different storage keys.
+    """
+    changed = False
+    for item in collection_.data.values():
+        if "coin_cost" not in item and "points_cost" in item:
+            item["coin_cost"] = item.pop("points_cost")
+            changed = True
+        if "points_invested" in item and "coins_invested" not in item:
+            item["coins_invested"] = item.pop("points_invested")
+            changed = True
+    if changed:
+        await collection_.store.async_save({"items": list(collection_.data.values())})
+
+
 async def async_create_rewards_collection(hass: HomeAssistant) -> RewardStorageCollection:
     """Create and load the reward-catalog storage collection."""
     store: Store = Store(
@@ -1696,6 +1766,7 @@ async def async_create_rewards_collection(hass: HomeAssistant) -> RewardStorageC
     await rewards.async_load()
     await _async_migrate_reward_catalog(rewards)
     await _async_migrate_screen_time_investable(rewards)
+    await _async_migrate_points_cost_to_coin_cost(rewards)
     return rewards
 
 
@@ -1713,6 +1784,7 @@ async def async_create_reward_redemptions_collection(
     reward_redemptions = RewardRedemptionStorageCollection(store, id_manager)
     await reward_redemptions.async_load()
     await _async_migrate_reward_redemptions(reward_redemptions)
+    await _async_migrate_points_cost_to_coin_cost(reward_redemptions)
     return reward_redemptions
 
 
@@ -1841,43 +1913,49 @@ class CompletionLogStore:
         await self._store.async_save(self._entries)
 
 
-def weekly_spendable_points(
-    completions: CompletionLogStore, member_id: str, goal_points: int
+def coins_from_task_points(
+    completions: CompletionLogStore, member_id: str, goal_points: int, since: datetime
 ) -> int:
-    """A member's lifetime *spendable* points under the v0.29 weekly-goal rule.
+    """Points earned beyond the weekly goal (100% checkpoint), converted 1:1 to coins.
 
-    Within each calendar week (Monday 00:00 local), a member's first
-    ``goal_points`` points earned that week count only toward the
-    "Wochenfortschritt" progress bar, not toward their spendable balance -
-    only points earned *beyond* the goal in that week are spendable.
-    ``goal_points <= 0`` (the default) disables the rule entirely: every
-    week's total is fully spendable.
+    v0.36, replaces the pre-v0.36 weekly_spendable_points (which fed
+    points_available, the points-shop's spendable balance - see the
+    "Rewards" section header in const.py for the currency switch). Within
+    each calendar week (Monday 00:00 local, on/after ``since`` only - see
+    below), a member's first ``goal_points`` points earned that week count
+    only toward the "Wochenfortschritt" progress bar; only points earned
+    *beyond* the goal in that week convert to coins. ``goal_points <= 0``
+    (the default) disables the percent mechanic entirely - every point
+    earned on/after ``since`` converts directly, same as pre-v0.29 behavior
+    with no weekly goal configured at all.
 
-    Shared by FamilyTasksCoordinator._weekly_spendable_points (which computes
-    MemberSummaryData.points_available for display) and _available_points
-    below (which validates a redemption server-side, ws_redeem_reward) -
+    ``since`` is storage.CoinSystemStateStore's ``started_at`` - the moment
+    this integration first ran under v0.36 for this household. Completions
+    from before it are excluded entirely (not just the goal-quota portion of
+    them), so upgrading to the coin system starts every member's coin
+    balance at 0 rather than retroactively crediting a lifetime of
+    pre-v0.36 "spendable point" surplus as coins. A week straddling that
+    cutover moment slightly undercounts (only the post-cutover portion of
+    that one week's points count toward its own goal-quota) - a one-time,
+    self-resolving edge case in the household's first partial week under the
+    coin system, not worth a more elaborate correction for.
+
+    Shared by FamilyTasksCoordinator._async_update_data (which computes
+    MemberSummaryData.coins_available for display) and _available_coins
+    above (which validates a redemption server-side, ws_redeem_reward) -
     living here rather than in coordinator.py so storage.py, which
     coordinator.py already imports from, can use it too without an import
     cycle.
-
-    v0.30 bugfix: before this was extracted, _available_points had its own,
-    older copy of this rule that never actually applied the weekly-goal
-    clamp (it just summed all-time points minus redemptions, the pre-v0.29
-    behavior) - so a redemption could be accepted for more than a member's
-    true spendable balance, which then showed up as a negative
-    points_available on the next coordinator refresh once the clamp was
-    applied there. Using one shared implementation for both makes that kind
-    of drift impossible going forward.
     """
     if goal_points <= 0:
-        return completions.points_since(member_id, datetime.min.replace(tzinfo=dt_util.UTC))
+        return completions.points_since(member_id, since)
 
     weekly_totals: dict[date, int] = {}
     for entry in completions.entries:
         if entry["completed_by_member_id"] != member_id or entry["skipped"]:
             continue
         completed_at = dt_util.parse_datetime(entry["completed_at"])
-        if completed_at is None:
+        if completed_at is None or completed_at < since:
             continue
         local_at = dt_util.as_local(completed_at)
         day_start_utc = dt_util.as_utc(dt_util.start_of_local_day(local_at))
@@ -2129,50 +2207,69 @@ async def async_create_milestone_bonus_state_store(hass: HomeAssistant) -> Miles
 
 
 class StreakBonusStateStore:
-    """Per-member Streak-Bonus cursor/counter.
+    """Per-member, per-tier Streak-coin-bonus cursor/counter.
 
-    See CONF_STREAK_BONUS_ENABLED in const.py and
-    FamilyTasksCoordinator._async_process_streak_bonus in coordinator.py.
-    Unlike MilestoneBonusStateStore (which only ever needs to remember the
-    *current* week), a streak has to be judged across consecutive already-
-    elapsed weeks, so this remembers, per member, the UTC start-of-week
-    timestamp already processed ("processed_through" - the coordinator has
-    caught up on every week strictly before this one) and the current
-    consecutive-week streak length ("streak_count"). Not a StorageCollection,
-    coordinator-internal bookkeeping never edited by the user, same as
-    MilestoneBonusStateStore/ClaimStateStore.
+    See CONF_STREAK_BONUS_REQUIRED_WEEKS/CONF_STREAK_150_BONUS_COINS/
+    CONF_STREAK_200_BONUS_COINS in const.py and
+    FamilyTasksCoordinator._async_process_streak_coin_bonus in
+    coordinator.py. Unlike MilestoneBonusStateStore (which only ever needs to
+    remember the *current* week), a streak has to be judged across
+    consecutive already-elapsed weeks, so this remembers, per member and per
+    tier ("150"/"200" - the two fixed PROGRESS_THRESHOLD_PERCENTS checkpoints
+    a streak can apply to, tracked independently since v0.36 - a household
+    upgrading from the pre-v0.36 single-streak shape simply starts every
+    member fresh at both tiers, same as any Store.async_load() encountering
+    a shape it doesn't recognize), the UTC start-of-week timestamp already
+    processed ("processed_through" - the coordinator has caught up on every
+    week strictly before this one) and the current consecutive-week streak
+    length ("streak_count"). Not a StorageCollection, coordinator-internal
+    bookkeeping never edited by the user, same as MilestoneBonusStateStore/
+    ClaimStateStore.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
-        self._store: Store[dict[str, dict[str, Any]]] = Store(
+        self._store: Store[dict[str, dict[str, dict[str, Any]]]] = Store(
             hass, STORAGE_VERSION, STORAGE_KEY_STREAK_BONUS_STATE, minor_version=STORAGE_VERSION_MINOR
         )
-        # member_id -> {"processed_through": iso datetime str, "streak_count": int}
-        self._state: dict[str, dict[str, Any]] = {}
+        # member_id -> tier ("150"/"200") -> {"processed_through": iso
+        # datetime str, "streak_count": int}
+        self._state: dict[str, dict[str, dict[str, Any]]] = {}
 
     async def async_load(self) -> None:
-        """Load per-member streak state from disk."""
-        self._state = await self._store.async_load() or {}
+        """Load per-member, per-tier streak state from disk."""
+        loaded = await self._store.async_load() or {}
+        # v0.36: discard a pre-v0.36 payload (a flat member_id ->
+        # {"processed_through", "streak_count"} shape, no tier level) rather
+        # than misreading it as tier data - every member simply starts fresh
+        # under the new two-tier tracking, same as any other unrecognized
+        # stored shape.
+        self._state = {
+            member_id: tiers
+            for member_id, tiers in loaded.items()
+            if isinstance(tiers, dict) and "streak_count" not in tiers
+        }
 
-    def get(self, member_id: str) -> dict[str, Any] | None:
-        """Return a member's current streak state, if any has been recorded yet."""
-        return self._state.get(member_id)
+    def get(self, member_id: str, tier: str) -> dict[str, Any] | None:
+        """Return a member's current streak state for one tier, if any has been recorded yet."""
+        return self._state.get(member_id, {}).get(tier)
 
-    async def async_set(self, member_id: str, processed_through: datetime, streak_count: int) -> None:
-        """Persist a member's updated cursor/streak length."""
-        self._state[member_id] = {
+    async def async_set(
+        self, member_id: str, tier: str, processed_through: datetime, streak_count: int
+    ) -> None:
+        """Persist a member's updated cursor/streak length for one tier."""
+        self._state.setdefault(member_id, {})[tier] = {
             "processed_through": processed_through.isoformat(),
             "streak_count": streak_count,
         }
         await self._store.async_save(self._state)
 
     async def async_reset(self, member_id: str | None = None) -> None:
-        """Clear streak state - see SERVICE_RESET_POINTS in const.py.
+        """Clear streak state (every tier) - see SERVICE_RESET_POINTS in const.py.
 
         ``member_id`` left unset (None) clears every member; given, only
-        that member's cursor/counter is dropped - their very next elapsed
-        week is then judged fresh, starting a new streak at 0 instead of
-        continuing whatever it was before the reset.
+        that member's cursors/counters (both tiers) are dropped - their very
+        next elapsed week is then judged fresh, starting new streaks at 0
+        instead of continuing whatever they were before the reset.
         """
         if member_id is None:
             self._state = {}
@@ -2182,8 +2279,125 @@ class StreakBonusStateStore:
 
 
 async def async_create_streak_bonus_state_store(hass: HomeAssistant) -> StreakBonusStateStore:
-    """Create and load the Streak-Bonus state store."""
+    """Create and load the Streak-coin-bonus state store."""
     store = StreakBonusStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class CoinLedgerStore:
+    """Append-only ledger of coin credits (bonuses) and debits (redemptions).
+
+    v0.36 - see the "Rewards" section header in const.py for the currency
+    switch this backs. Not a StorageCollection: entries are never edited by
+    the user, only appended (by FamilyTasksCoordinator's Meilenstein-/
+    Streak-coin-bonus processing, and by ws_redeem_reward's redemption
+    debit) and pruned once they age out, same as CompletionLogStore. A
+    member's coin balance is always the sum of their entries here *plus*
+    storage.coins_from_task_points (the base "points earned beyond the
+    weekly goal" conversion, which is derived straight from the completion
+    log rather than logged here - see that function's docstring for why) -
+    never a separately stored/mutated running total, so it can never drift
+    out of sync with the history that produced it.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[list[dict[str, Any]]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_COIN_LEDGER, minor_version=STORAGE_VERSION_MINOR
+        )
+        self._entries: list[dict[str, Any]] = []
+
+    async def async_load(self) -> None:
+        """Load the ledger from disk."""
+        self._entries = await self._store.async_load() or []
+
+    @property
+    def entries(self) -> list[dict[str, Any]]:
+        """Return all ledger entries (most recent last)."""
+        return self._entries
+
+    async def async_add_entry(
+        self, *, member_id: str, amount: int, reason: str, note: str | None = None
+    ) -> dict[str, Any]:
+        """Append a new coin credit (positive ``amount``) or debit (negative) and persist it.
+
+        ``reason`` is one of the COIN_REASON_* sentinels in const.py -
+        purely informational (history/debugging), nothing branches on it.
+        """
+        entry = {
+            CONF_ID: uuid4().hex,
+            "member_id": member_id,
+            "amount": amount,
+            "reason": reason,
+            "note": note,
+            "created_at": dt_util.utcnow().isoformat(),
+        }
+        self._entries.append(entry)
+        if len(self._entries) > MAX_COMPLETION_LOG_ENTRIES:
+            self._entries = self._entries[-MAX_COMPLETION_LOG_ENTRIES:]
+        await self._store.async_save(self._entries)
+        return entry
+
+    def balance(self, member_id: str) -> int:
+        """Sum every credit/debit for a member - see _available_coins above."""
+        return sum(entry["amount"] for entry in self._entries if entry["member_id"] == member_id)
+
+    async def async_reset(self, member_id: str | None = None) -> None:
+        """Clear the ledger - see SERVICE_RESET_POINTS in const.py.
+
+        ``member_id`` left unset (None) clears every member; given, only
+        that member's entries are removed.
+        """
+        if member_id is None:
+            self._entries = []
+        else:
+            self._entries = [e for e in self._entries if e["member_id"] != member_id]
+        await self._store.async_save(self._entries)
+
+
+async def async_create_coin_ledger_store(hass: HomeAssistant) -> CoinLedgerStore:
+    """Create and load the coin ledger."""
+    store = CoinLedgerStore(hass)
+    await store.async_load()
+    return store
+
+
+class CoinSystemStateStore:
+    """The single "coin system started" cutover timestamp - see const.py.
+
+    Set once, the first time this ever loads with nothing on disk yet (i.e.
+    the first refresh after a household upgrades to v0.36, or a brand new
+    install) - every subsequent load just reads the same value back. Backs
+    storage.coins_from_task_points/_available_coins and
+    FamilyTasksCoordinator's matching coins_available computation, all of
+    which only count completions on/after this moment toward the base
+    points-to-coins conversion, so upgrading never retroactively credits a
+    lifetime of pre-v0.36 "spendable point" surplus as coins.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_COIN_SYSTEM_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        self.started_at: datetime = dt_util.utcnow()
+
+    async def async_load(self) -> None:
+        """Load the stored cutover timestamp, seeding/persisting it on first run."""
+        stored = await self._store.async_load()
+        if stored and stored.get("started_at"):
+            parsed = dt_util.parse_datetime(stored["started_at"])
+            if parsed is not None:
+                self.started_at = parsed
+                return
+        # First run under v0.36 (or a brand new install) - seed with "now"
+        # and persist immediately so a restart before any coin activity
+        # doesn't drift the cutover forward again.
+        await self._store.async_save({"started_at": self.started_at.isoformat()})
+
+
+async def async_create_coin_system_state_store(hass: HomeAssistant) -> CoinSystemStateStore:
+    """Create and load the coin-system cutover-timestamp store."""
+    store = CoinSystemStateStore(hass)
     await store.async_load()
     return store
 

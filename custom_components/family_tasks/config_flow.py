@@ -27,33 +27,25 @@ from .const import (
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_DEFAULT_ROTATION_STRATEGY,
-    CONF_MILESTONE_1_BONUS_POINTS,
-    CONF_MILESTONE_1_THRESHOLD_PERCENT,
-    CONF_MILESTONE_2_BONUS_POINTS,
-    CONF_MILESTONE_2_THRESHOLD_PERCENT,
-    CONF_MILESTONE_BONUS_ENABLED,
+    CONF_MILESTONE_150_BONUS_COINS,
+    CONF_MILESTONE_200_BONUS_COINS,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
-    CONF_STREAK_BONUS_ENABLED,
-    CONF_STREAK_BONUS_POINTS,
+    CONF_STREAK_150_BONUS_COINS,
+    CONF_STREAK_200_BONUS_COINS,
     CONF_STREAK_BONUS_REQUIRED_WEEKS,
-    CONF_STREAK_BONUS_THRESHOLD_POINTS,
     CONF_VACATION_MODE_DEFAULT,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
-    DEFAULT_MILESTONE_1_BONUS_POINTS,
-    DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
-    DEFAULT_MILESTONE_2_BONUS_POINTS,
-    DEFAULT_MILESTONE_2_THRESHOLD_PERCENT,
-    DEFAULT_MILESTONE_BONUS_ENABLED,
+    DEFAULT_MILESTONE_150_BONUS_COINS,
+    DEFAULT_MILESTONE_200_BONUS_COINS,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
-    DEFAULT_STREAK_BONUS_ENABLED,
-    DEFAULT_STREAK_BONUS_POINTS,
+    DEFAULT_STREAK_150_BONUS_COINS,
+    DEFAULT_STREAK_200_BONUS_COINS,
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
-    DEFAULT_STREAK_BONUS_THRESHOLD_POINTS,
     DEFAULT_VACATION_MODE,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
@@ -110,19 +102,13 @@ class FamilyTasksOptionsFlow(OptionsFlow):
         """Manage the options."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            # v0.30: threshold 2 must exceed threshold 1 - the Meilensteinbonus
-            # awards each threshold independently as points_week crosses it
-            # (see FamilyTasksCoordinator._async_process_milestone_bonus), so
-            # a threshold 2 at or below threshold 1 would make it either
-            # unreachable in a meaningful order or award both simultaneously
-            # every time, neither of which matches "two distinct milestones".
-            if (
-                user_input[CONF_MILESTONE_2_THRESHOLD_PERCENT]
-                <= user_input[CONF_MILESTONE_1_THRESHOLD_PERCENT]
-            ):
-                errors["base"] = "milestone_threshold_order"
-            else:
-                return self.async_create_entry(data=user_input)
+            # v0.36: the old threshold-2-must-exceed-threshold-1 validation
+            # is gone along with the configurable thresholds themselves - the
+            # Meilenstein-/Streak-Bonus checkpoints are now the fixed 150%/
+            # 200% weekly-progress bands (PROGRESS_THRESHOLD_PERCENTS in
+            # const.py), so there is no ordering left for a household to get
+            # wrong here.
+            return self.async_create_entry(data=user_input)
 
         # On a validation error, re-show the form pre-filled with what the
         # user just submitted (not the previously saved options) so a typo'd
@@ -202,77 +188,43 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
-                # v0.30: "Meilensteinbonus" - replaces the old weekly-winner
-                # bonus. Whether/how many bonus points a member earns, live,
-                # the moment they cross each of two progress thresholds
-                # (percentages of the weekly goal just above) - see
-                # FamilyTasksCoordinator._async_process_milestone_bonus. Only
-                # takes effect if the weekly goal above is > 0, since both
-                # thresholds are defined as a percentage of it.
+                # v0.36: "Meilensteinbonus" - replaces the old configurable-
+                # threshold, points-based version (v0.30). Bonus coins (the
+                # reward-shop currency, not points - see the "Rewards"
+                # section in const.py) credited live, the moment a member's
+                # current-week points cross the fixed 150%/200%
+                # weekly-progress checkpoints (see PROGRESS_THRESHOLD_PERCENTS
+                # in const.py and
+                # FamilyTasksCoordinator._async_process_milestone_coin_bonus).
+                # A tier is off exactly when its bonus is 0. Only takes
+                # effect if the weekly goal above is > 0, since both
+                # checkpoints are a percentage of it.
                 vol.Optional(
-                    CONF_MILESTONE_BONUS_ENABLED,
+                    CONF_MILESTONE_150_BONUS_COINS,
                     default=current.get(
-                        CONF_MILESTONE_BONUS_ENABLED, DEFAULT_MILESTONE_BONUS_ENABLED
-                    ),
-                ): BooleanSelector(),
-                vol.Optional(
-                    CONF_MILESTONE_1_THRESHOLD_PERCENT,
-                    default=current.get(
-                        CONF_MILESTONE_1_THRESHOLD_PERCENT,
-                        DEFAULT_MILESTONE_1_THRESHOLD_PERCENT,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=1, max=1000, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
-                    )
-                ),
-                vol.Optional(
-                    CONF_MILESTONE_1_BONUS_POINTS,
-                    default=current.get(
-                        CONF_MILESTONE_1_BONUS_POINTS, DEFAULT_MILESTONE_1_BONUS_POINTS
+                        CONF_MILESTONE_150_BONUS_COINS, DEFAULT_MILESTONE_150_BONUS_COINS
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
                 vol.Optional(
-                    CONF_MILESTONE_2_THRESHOLD_PERCENT,
+                    CONF_MILESTONE_200_BONUS_COINS,
                     default=current.get(
-                        CONF_MILESTONE_2_THRESHOLD_PERCENT,
-                        DEFAULT_MILESTONE_2_THRESHOLD_PERCENT,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=1, max=1000, mode=NumberSelectorMode.BOX, unit_of_measurement="%"
-                    )
-                ),
-                vol.Optional(
-                    CONF_MILESTONE_2_BONUS_POINTS,
-                    default=current.get(
-                        CONF_MILESTONE_2_BONUS_POINTS, DEFAULT_MILESTONE_2_BONUS_POINTS
+                        CONF_MILESTONE_200_BONUS_COINS, DEFAULT_MILESTONE_200_BONUS_COINS
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
-                # v0.32: "Streak-Bonus" - bonus points for reaching
-                # weekly_progress_goal_points + streak_bonus_threshold_points
-                # in streak_bonus_required_weeks consecutive calendar weeks -
-                # see CONF_STREAK_BONUS_ENABLED in const.py and
-                # FamilyTasksCoordinator._async_process_streak_bonus.
-                vol.Optional(
-                    CONF_STREAK_BONUS_ENABLED,
-                    default=current.get(
-                        CONF_STREAK_BONUS_ENABLED, DEFAULT_STREAK_BONUS_ENABLED
-                    ),
-                ): BooleanSelector(),
-                vol.Optional(
-                    CONF_STREAK_BONUS_THRESHOLD_POINTS,
-                    default=current.get(
-                        CONF_STREAK_BONUS_THRESHOLD_POINTS,
-                        DEFAULT_STREAK_BONUS_THRESHOLD_POINTS,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
-                ),
+                # v0.36: "Streak-Bonus" - replaces the old single
+                # configurable-threshold, points-based version (v0.32). Bonus
+                # coins for *maintaining* a fixed checkpoint (150% or 200% of
+                # the weekly goal) for more than streak_bonus_required_weeks
+                # consecutive calendar weeks - one bonus amount per tier, so
+                # a household can reward the two checkpoints differently. See
+                # CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in
+                # const.py and
+                # FamilyTasksCoordinator._async_process_streak_coin_bonus. A
+                # tier is off exactly when its bonus is 0.
                 vol.Optional(
                     CONF_STREAK_BONUS_REQUIRED_WEEKS,
                     default=current.get(
@@ -283,9 +235,17 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     NumberSelectorConfig(min=1, max=52, mode=NumberSelectorMode.BOX)
                 ),
                 vol.Optional(
-                    CONF_STREAK_BONUS_POINTS,
+                    CONF_STREAK_150_BONUS_COINS,
                     default=current.get(
-                        CONF_STREAK_BONUS_POINTS, DEFAULT_STREAK_BONUS_POINTS
+                        CONF_STREAK_150_BONUS_COINS, DEFAULT_STREAK_150_BONUS_COINS
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_STREAK_200_BONUS_COINS,
+                    default=current.get(
+                        CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)

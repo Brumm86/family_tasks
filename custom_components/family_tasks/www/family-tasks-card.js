@@ -528,6 +528,16 @@
     return `${esc(n)} ${n === 1 ? "Punkt" : "Punkte"}`;
   }
 
+  // v0.36: gleiches Prinzip wie pointsLabel oben, für die neue
+  // Belohnungs-Shop-Währung "Münzen" (CoinLedgerStore in storage.py) - jede
+  // Stelle, an der ein Belohnungspreis, ein Münzen-Guthaben oder ein
+  // Meilenstein-/Streak-Bonus als das Wort "Münzen" dargestellt wird, geht
+  // hierüber.
+  function coinsLabel(value) {
+    const n = Number(value) || 0;
+    return `${esc(n)} ${n === 1 ? "Münze" : "Münzen"}`;
+  }
+
   // Kleiner "· +30 Min. Bildschirmzeit"-Zusatz, gemeinsam genutzt vom
   // Belohnungs-Katalog und dem Einlöse-Verlauf - undefined/null/"" bedeuten
   // alle "nicht gesetzt".
@@ -787,7 +797,7 @@
     return {
       name: "",
       icon: "",
-      points_cost: 0,
+      coin_cost: 0,
       reward_type: "custom",
       screen_time_minutes: "",
       auto_fulfill: false,
@@ -801,7 +811,7 @@
     return {
       name: reward?.name ?? "",
       icon: reward?.icon ?? "",
-      points_cost: reward?.points_cost ?? 0,
+      coin_cost: reward?.coin_cost ?? 0,
       // "Belohnungstyp" ist ein reines Formular-Konzept, kein eigenes
       // gespeichertes Feld - abgeleitet davon, ob ein Bildschirmzeit-Wert
       // gesetzt ist (siehe _renderRewardForm). Zurückschalten auf "Sonstige"
@@ -863,6 +873,15 @@
       this._memberForm = emptyMemberForm();
       this._ownTaskForm = emptyOwnTaskForm();
       this._hideNotDue = undefined;
+      // v0.36: which recurrence-type groups within the "nicht fällig"
+      // (not-due) part of the task list are currently expanded - see
+      // _renderNotDueGroups. Array of recurrence "type" strings (task.recurrence.type,
+      // same keys as RECURRENCE_LABELS); a group not listed here starts
+      // collapsed. Starts as an empty array (every group collapsed) on a
+      // genuinely fresh device, same "start compact" reasoning as
+      // _hideMembers/_hideBattery - only actually seeded once, in
+      // setConfig, same pattern as every other persisted toggle here.
+      this._openRecurrenceGroups = undefined;
       // v0.28: "Erledigte ausblenden" for the task list itself - separate
       // from _hideNotDue (which bundles "done" in with "idle"/waiting-for-
       // sensor tasks and is admin-only, see showVisibilityControls). This
@@ -899,10 +918,10 @@
       // Welche Katalog-Belohnung gerade ihren "wirklich einlösen?"-
       // Bestätigungsschritt für den aktuellen Nutzer zeigt - immer nur eine.
       this._pendingRedeemId = null;
-      // Wie viele Punkte der aktuelle Nutzer in das "Punkte investieren"-Feld
+      // Wie viele Münzen der aktuelle Nutzer in das "Münzen investieren"-Feld
       // für die anstehende investierbare (Handyzeit-)Einlösung eingetragen
       // hat - siehe CONF_REWARD_SCREEN_TIME_INVESTABLE in const.py.
-      this._pendingInvestPoints = 1;
+      this._pendingInvestCoins = 1;
       // Freitext für die anstehende Einlösung einer CONF_REWARD_NOTE_ENABLED-
       // Belohnung (v0.24), z. B. das gewünschte Mittagessen - siehe
       // _selectReward/_confirmRedeem.
@@ -1014,6 +1033,7 @@
           saved?.hideLeaderboard ??
           !!(this._config.hide_progress_section ?? this._config.hide_leaderboard_section);
         this._hideRewards = saved?.hideRewards ?? !!this._config.hide_rewards_section;
+        this._openRecurrenceGroups = saved?.openRecurrenceGroups ?? [];
       }
     }
 
@@ -1069,6 +1089,7 @@
             hideFulfilled: this._hideFulfilled,
             hideProgress: this._hideProgress,
             hideRewards: this._hideRewards,
+            openRecurrenceGroups: this._openRecurrenceGroups,
           })
         );
       } catch (err) {
@@ -1299,86 +1320,80 @@
       );
     }
 
-    // Aktuelles einlösbares Guthaben: Gesamtpunkte abzüglich aller bereits
-    // eingelösten Belohnungen - siehe MemberSummaryData.points_available in
+    // Aktuelles Münzen-Guthaben (v0.36, ersetzt das alte punktebasierte
+    // "einlösbare Guthaben") - siehe MemberSummaryData.coins_available in
     // coordinator.py. Wird unabhängig von der Woche/Monat-Ansicht immer
     // angezeigt, da es die tatsächliche Währung des Belohnungs-Katalogs
-    // unten ist, keine periodenbezogene Rangliste-Kennzahl.
-    _availablePointsFor(memberId) {
-      return Number(this._pointsSensorForMember(memberId)?.attributes?.points_available ?? 0);
+    // unten ist, keine periodenbezogene Rangliste-Kennzahl. Liest das
+    // "coins_available"-Attribut, das (wie schon die übrigen
+    // Options-Werte) auf dem Punkte-Sensor mitreitet - siehe
+    // FamilyTasksMemberPointsSensor in sensor.py; es gibt zusätzlich einen
+    // eigenen Münzen-Sensor pro Mitglied, dieser hier braucht ihn aber
+    // nicht extra nachzuschlagen.
+    _coinsAvailableFor(memberId) {
+      return Number(this._pointsSensorForMember(memberId)?.attributes?.coins_available ?? 0);
     }
 
-    // v0.30: household-wide "Meilensteinbonus" settings (see
-    // CONF_MILESTONE_BONUS_ENABLED and the CONF_MILESTONE_1_*/CONF_MILESTONE_2_*
-    // constants in const.py) - rides along as an attribute on every member's
-    // points sensor (identical on all of them, see
-    // FamilyTasksMemberPointsSensor in sensor.py), so any one of them will
-    // do; "points_week" is a unique-enough discriminator to find a points
-    // sensor specifically (the open-tasks sensor also carries a bare
-    // "member_id" attribute but not this one). Replaces the pre-v0.30
-    // _weeklyWinnerBonus() entirely.
+    // v0.36: household-wide "Meilensteinbonus" coin amounts (see
+    // CONF_MILESTONE_150_BONUS_COINS/CONF_MILESTONE_200_BONUS_COINS in
+    // const.py) - rides along as an attribute on every member's points
+    // sensor (identical on all of them, see FamilyTasksMemberPointsSensor
+    // in sensor.py), so any one of them will do; "points_week" is a
+    // unique-enough discriminator to find a points sensor specifically (the
+    // open-tasks/coins sensors also carry a bare "member_id" attribute but
+    // not this one). Replaces the pre-v0.36 configurable-threshold,
+    // points-based version entirely - the two checkpoints are now fixed at
+    // 150%/200% of the weekly goal.
     _milestoneBonus() {
-      const empty = {
-        enabled: false,
-        threshold1Percent: 100,
-        bonus1: 0,
-        threshold2Percent: 200,
-        bonus2: 0,
-        threshold1Points: 0,
-        threshold2Points: 0,
-      };
+      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0 };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
       );
       if (!sensor) return empty;
       return {
-        enabled: !!sensor.attributes.milestone_bonus_enabled,
-        threshold1Percent: Number(sensor.attributes.milestone_1_threshold_percent ?? 100),
-        bonus1: Number(sensor.attributes.milestone_1_bonus_points ?? 0),
-        threshold2Percent: Number(sensor.attributes.milestone_2_threshold_percent ?? 200),
-        bonus2: Number(sensor.attributes.milestone_2_bonus_points ?? 0),
-        // v0.32: the absolute point value of each threshold, computed once
-        // server-side (round(), see FamilyTasksData.milestone_1_threshold_points
-        // in coordinator.py) - used directly instead of recomputing
-        // threshold_percent -> points here in JS, since Python's round()
-        // (banker's rounding) and JS's Math.round() (always rounds .5 up)
-        // can disagree on an exact .5 value, which would otherwise show a
-        // marker at a slightly different point value than the backend
-        // actually awards at.
-        threshold1Points: Number(sensor.attributes.milestone_1_threshold_points ?? 0),
-        threshold2Points: Number(sensor.attributes.milestone_2_threshold_points ?? 0),
+        bonus150: Number(sensor.attributes.milestone_150_bonus_coins ?? 0),
+        bonus200: Number(sensor.attributes.milestone_200_bonus_coins ?? 0),
+        // v0.32: the absolute point value of each checkpoint, computed once
+        // server-side (round(), see
+        // FamilyTasksData.milestone_150_threshold_points in coordinator.py)
+        // - used directly instead of recomputing percent -> points here in
+        // JS, since Python's round() (banker's rounding) and JS's
+        // Math.round() (always rounds .5 up) can disagree on an exact .5
+        // value, which would otherwise show a marker at a slightly
+        // different point value than the backend actually awards at.
+        threshold150Points: Number(sensor.attributes.milestone_150_threshold_points ?? 0),
+        threshold200Points: Number(sensor.attributes.milestone_200_threshold_points ?? 0),
       };
     }
 
-    // v0.32: household-wide "Streak-Bonus" settings - same "rides along on
-    // every member's points sensor" pattern as _milestoneBonus above.
+    // v0.36: household-wide "Streak-Bonus" coin amounts, one per fixed tier
+    // - same "rides along on every member's points sensor" pattern as
+    // _milestoneBonus above. Replaces the pre-v0.36 single
+    // configurable-threshold, points-based version entirely.
     _streakBonus() {
-      const empty = {
-        enabled: false,
-        thresholdPoints: 0,
-        requiredWeeks: 2,
-        bonusPoints: 0,
-        targetPoints: 0,
-      };
+      const empty = { requiredWeeks: 2, bonus150: 0, bonus200: 0 };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
       );
       if (!sensor) return empty;
       return {
-        enabled: !!sensor.attributes.streak_bonus_enabled,
-        thresholdPoints: Number(sensor.attributes.streak_bonus_threshold_points ?? 0),
         requiredWeeks: Number(sensor.attributes.streak_bonus_required_weeks ?? 2),
-        bonusPoints: Number(sensor.attributes.streak_bonus_points ?? 0),
-        targetPoints: Number(sensor.attributes.streak_bonus_target_points ?? 0),
+        bonus150: Number(sensor.attributes.streak_150_bonus_coins ?? 0),
+        bonus200: Number(sensor.attributes.streak_200_bonus_coins ?? 0),
       };
     }
 
-    // v0.32: a member's current consecutive-week Streak-Bonus length - see
-    // MemberSummaryData.streak_weeks in coordinator.py.
+    // v0.36: a member's current consecutive-week streak length, one per
+    // fixed tier - see MemberSummaryData.streak_weeks_150/streak_weeks_200
+    // in coordinator.py.
     _streakWeeksFor(memberId) {
-      return Number(this._pointsSensorForMember(memberId)?.attributes?.streak_weeks ?? 0);
+      const sensor = this._pointsSensorForMember(memberId);
+      return {
+        weeks150: Number(sensor?.attributes?.streak_weeks_150 ?? 0),
+        weeks200: Number(sensor?.attributes?.streak_weeks_200 ?? 0),
+      };
     }
 
     // v0.32: whether the household-wide Urlaubsmodus switch is currently on
@@ -1817,7 +1832,7 @@
       const noteEnabled = !!f.note_enabled;
       const payload = {
         name: f.name.trim(),
-        points_cost: Math.max(0, Number(f.points_cost) || 0),
+        coin_cost: Math.max(0, Number(f.coin_cost) || 0),
         auto_fulfill: !!f.auto_fulfill,
         screen_time_investable: isInvestable,
         note_enabled: noteEnabled,
@@ -1862,7 +1877,7 @@
 
     _selectReward(rewardId) {
       this._pendingRedeemId = rewardId;
-      this._pendingInvestPoints = 1;
+      this._pendingInvestCoins = 1;
       this._pendingRedeemNote = "";
       this._render();
     }
@@ -1885,14 +1900,14 @@
       const reward = this._rewards[rewardId];
       const msg = { type: "family_tasks/reward_redemption/redeem", reward_id: rewardId };
       if (reward?.screen_time_investable) {
-        msg.points_spent = Math.max(1, Number(this._pendingInvestPoints) || 1);
+        msg.coins_spent = Math.max(1, Number(this._pendingInvestCoins) || 1);
       }
       if (reward?.note_enabled) {
         msg.note = (this._pendingRedeemNote || "").trim();
       }
       await this._callWS(msg);
       this._pendingRedeemId = null;
-      this._pendingInvestPoints = 1;
+      this._pendingInvestCoins = 1;
       this._pendingRedeemNote = "";
       this._render();
     }
@@ -2459,9 +2474,6 @@
       if (this._hideCompleted) {
         ids = ids.filter((id) => (this._statusStateForTask(id)?.state ?? "pending") !== "done");
       }
-      if (this._hideNotDue) {
-        ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
-      }
       const filterMemberId = this._effectiveTaskMemberFilterId();
       if (filterMemberId !== null) {
         ids = ids.filter((id) => {
@@ -2480,13 +2492,85 @@
           return eligibleIds.includes(filterMemberId);
         });
       }
+      // v0.36: hideNotDue (admin-only, "nicht fällige ausblenden") still
+      // drops every not-due occurrence entirely, same as before - moved
+      // down here (after the member-filter chips, which used to run after
+      // it) purely so the not-due/due split just below sees the exact same
+      // filtered id set hideNotDue itself would have used, without
+      // duplicating the member-filter logic for both branches.
+      if (this._hideNotDue) {
+        ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
+      }
       if (!ids.length) {
         return `<p class="muted">${totalCount ? "Keine fälligen Aufgaben." : "Noch keine Aufgaben angelegt."}</p>`;
       }
 
-      return `<div class="list">${ids
-        .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
-        .join("")}</div>`;
+      if (this._hideNotDue) {
+        return `<div class="list">${ids
+          .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
+          .join("")}</div>`;
+      }
+
+      // v0.36: not-due occurrences (idle/done) are split out of the flat
+      // list and grouped into collapsible per-recurrence-type subsections
+      // instead - see _renderNotDueGroups. Only reached when hideNotDue
+      // itself is off (every not-due occurrence was already dropped above
+      // otherwise, leaving nothing left to group). Due occurrences
+      // (DUE_STATUSES) stay exactly as before: a flat list, always
+      // expanded, at the top.
+      const dueIds = ids.filter((id) =>
+        DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending")
+      );
+      const notDueIds = ids.filter((id) => !dueIds.includes(id));
+      const dueList = dueIds.length
+        ? `<div class="list">${dueIds
+            .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
+            .join("")}</div>`
+        : "";
+      return `${dueList}${this._renderNotDueGroups(notDueIds, isAdmin, isParentUser, currentMemberId)}`;
+    }
+
+    // v0.36: groups the not-due (idle/done) part of the task list by
+    // recurrence type (task.recurrence.type, same keys as RECURRENCE_LABELS)
+    // to improve overview on a household with a lot of tasks - "Nicht
+    // fällige Aufgaben sollen in aufklappbare Untergruppen (z. B. nach
+    // Wiederholungsintervall) aufgeteilt werden". Each group is collapsed by
+    // default (this._openRecurrenceGroups, persisted per device - see
+    // _loadUiState/_saveUiState) and toggled independently via the
+    // "toggle-recurrence-group" action, same pattern as
+    // "toggle-hide-excluded-batteries". Groups are ordered the same way
+    // RECURRENCE_LABELS itself is defined (daily/weekly/interval_days/once/
+    // trigger/confirmation-absent/battery), with any type not in that map
+    // (shouldn't normally happen) appended at the end under its raw name
+    // rather than silently dropped.
+    _renderNotDueGroups(ids, isAdmin, isParentUser, currentMemberId) {
+      if (!ids.length) return "";
+      const groups = {};
+      for (const id of ids) {
+        const type = this._tasks[id]?.recurrence?.type || "once";
+        (groups[type] || (groups[type] = [])).push(id);
+      }
+      const knownTypes = Object.keys(RECURRENCE_LABELS).filter((type) => groups[type]?.length);
+      const otherTypes = Object.keys(groups).filter((type) => !RECURRENCE_LABELS[type]);
+      const types = [...knownTypes, ...otherTypes];
+      return types
+        .map((type) => {
+          const groupIds = groups[type];
+          const label = RECURRENCE_LABELS[type] ?? type;
+          const isOpen = (this._openRecurrenceGroups ?? []).includes(type);
+          return `
+            <div class="recurrence-group">
+              <button type="button" class="link recurrence-group-toggle" data-action="toggle-recurrence-group" data-recurrence-type="${esc(type)}">
+                <span class="recurrence-group-caret">${isOpen ? "▾" : "▸"}</span> ${esc(label)} (${groupIds.length})
+              </button>
+              ${isOpen
+                ? `<div class="list">${groupIds
+                    .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
+                    .join("")}</div>`
+                : ""}
+            </div>`;
+        })
+        .join("");
     }
 
     // v0.30: extracted out of _renderTaskList (which still uses this for
@@ -2745,7 +2829,18 @@
         // _isVacationPaused / the matching filter in _renderTaskList.
         if (this._isVacationPaused(id)) return false;
         const status = this._statusStateForTask(id)?.state ?? "pending";
-        return status !== "done";
+        if (status === "done") return false;
+        // v0.36: a sensor-triggered ("trigger" recurrence) pool task should
+        // only show up here once its bound sensor has actually opened an
+        // occurrence - before that its status is "idle" (no open_occurrence
+        // yet, see TriggerStateStore/_current_period_key in
+        // coordinator.py), and showing it here all week regardless would
+        // offer "Annehmen" on something nobody can actually act on yet.
+        // Every other (non-"trigger") pool task has no "due" concept of its
+        // own and keeps the previous always-visible-for-the-whole-week
+        // behavior unchanged.
+        if (this._tasks[id]?.recurrence?.type === "trigger" && status === "idle") return false;
+        return true;
       });
       if (!ids.length) return "";
 
@@ -2948,26 +3043,26 @@
 
       const goal = this._weeklyProgressGoal();
       const members = this._progressMembers(isChildUser, currentMemberId);
-      // v0.30: Meilensteinbonus - siehe _milestoneBonus. Nur wirksam, wenn
-      // zusätzlich ein Wochenziel > 0 konfiguriert ist (beide Schwellen sind
-      // Prozentsätze *davon*) - siehe
-      // FamilyTasksCoordinator._async_process_milestone_bonus.
+      // v0.36: Meilensteinbonus - siehe _milestoneBonus. Die beiden
+      // Schwellen sind jetzt fest bei 150%/200% des Wochenziels
+      // (PROGRESS_THRESHOLD_PERCENTS in const.py), nicht mehr
+      // konfigurierbar - nur wirksam, wenn zusätzlich ein Wochenziel > 0
+      // konfiguriert ist, da beide Prozentsätze *davon* sind. Siehe
+      // FamilyTasksCoordinator._async_process_milestone_coin_bonus.
       const milestone = goal > 0 ? this._milestoneBonus() : null;
-      // v0.32: muss vor progressList unten deklariert werden, da dessen
-      // .map()-Callback streak.enabled bereits liest (sonst
-      // ReferenceError: Cannot access 'streak' before initialization bei
-      // jedem Render mit mindestens einem Mitglied - const-Deklarationen
-      // werden nicht gehoisted nutzbar, "const" bleibt bis zur eigenen
-      // Zeile in der "temporal dead zone").
+      // v0.36: muss vor progressList unten deklariert werden, da dessen
+      // .map()-Callback streak bereits liest (sonst ReferenceError: Cannot
+      // access 'streak' before initialization bei jedem Render mit
+      // mindestens einem Mitglied - const-Deklarationen werden nicht
+      // gehoisted nutzbar, "const" bleibt bis zur eigenen Zeile in der
+      // "temporal dead zone").
       const streak = this._streakBonus();
-      // Der Balken reicht über 100% hinaus, sobald Schwelle 2 über 100%
-      // liegt (der Normalfall, Standard 200%) - andernfalls füllte "100% vom
-      // Wochenziel" bereits die ganze Breite und die zweite Schwellen-Marke
-      // läge außerhalb des sichtbaren Balkens. barMaxPercent ist damit immer
-      // mindestens 100.
-      const barMaxPercent = milestone?.enabled
-        ? Math.max(milestone.threshold2Percent, 100)
-        : 100;
+      // v0.36: der Balken deckt jetzt immer fest 0-200% des Wochenziels ab
+      // (PROGRESS_THRESHOLD_PERCENTS in const.py) statt variabel je nach
+      // konfigurierter Meilenstein-2-Schwelle - die Schwellen sind selbst
+      // jetzt fest, also gibt es nichts mehr, worüber sich barMaxPercent
+      // noch strecken müsste.
+      const barMaxPercent = 200;
 
       // v0.22: jede Zeile öffnet per Klick einen Dialog mit den diese Woche
       // von diesem Mitglied erledigten Aufgaben - siehe
@@ -2982,57 +3077,80 @@
             .map(({ id, member }) => {
               const sensor = this._pointsSensorForMember(id);
               const weekPoints = Number(sensor?.attributes?.points_week ?? 0);
-              const available = this._availablePointsFor(id);
+              const available = this._coinsAvailableFor(id);
               const pct = goal > 0
                 ? Math.min(100, Math.round((weekPoints / (goal * barMaxPercent / 100)) * 100))
                 : 100;
               const goalReached = goal > 0 && weekPoints >= goal;
-              // v0.32: Marken für die beiden Meilenstein-Schwellen, als
-              // Prozent-Position *innerhalb* des Balkens (nicht vom
-              // Wochenziel) - siehe barMaxPercent oben. Die Punktwerte selbst
-              // kommen jetzt fertig berechnet vom Backend
-              // (milestone.threshold1Points/threshold2Points, siehe
-              // _milestoneBonus) statt hier per Math.round() aus dem Prozentsatz
-              // neu berechnet zu werden - so kann die Karte nie einen anderen
-              // Punktwert anzeigen als der, gegen den der Bonus tatsächlich
-              // vergeben wird (Python round() und JS Math.round() runden einen
-              // exakten .5-Wert nicht immer gleich). Nur eine Schwelle mit
-              // Prozentsatz > 0 bekommt überhaupt eine Marke.
-              const milestone1Points = milestone && milestone.threshold1Percent > 0
-                ? milestone.threshold1Points
-                : null;
-              const milestone2Points = milestone && milestone.threshold2Percent > 0
-                ? milestone.threshold2Points
-                : null;
-              const milestone1Reached = milestone1Points !== null && weekPoints >= milestone1Points;
-              const milestone2Reached = milestone2Points !== null && weekPoints >= milestone2Points;
-              const markers = [
-                milestone1Points !== null
-                  ? { left: (milestone.threshold1Percent / barMaxPercent) * 100, points: milestone1Points, bonus: milestone.bonus1, percent: milestone.threshold1Percent, reached: milestone1Reached }
+              // v0.36: leichte Marken bei 50%/100% zeigen zusätzlich die
+              // Handyzeit-Tick-Bänder (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES
+              // in const.py) - rein informativ, kein eigener Bonus, daher
+              // ohne "reached"-Zustand.
+              const bandMarkers = goal > 0
+                ? [50, 100].map((percent) => ({
+                    left: (percent / barMaxPercent) * 100,
+                    title:
+                      percent === 100
+                        ? "100% des Wochenziels - Handyzeit-Ticks laufen ab hier mit voller Länge"
+                        : "50% des Wochenziels - Handyzeit-Ticks fallen bis hierhin um 2 Min. kleiner aus, danach um 1 Min.",
+                  }))
+                : [];
+              const bandMarkersHtml = bandMarkers
+                .map((m) => `<div class="bar-band-marker" style="left:${Math.min(100, m.left)}%" title="${esc(m.title)}"></div>`)
+                .join("");
+              // v0.36: Marken für die beiden festen Meilenstein-Schwellen
+              // (150%/200%), als Prozent-Position *innerhalb* des Balkens
+              // (nicht vom Wochenziel) - siehe barMaxPercent oben. Die
+              // Punktwerte selbst kommen fertig berechnet vom Backend
+              // (milestone.threshold150Points/threshold200Points, siehe
+              // _milestoneBonus) statt hier per Math.round() aus dem
+              // Prozentsatz neu berechnet zu werden - so kann die Karte nie
+              // einen anderen Punktwert anzeigen als der, gegen den der
+              // Bonus tatsächlich vergeben wird (Python round() und JS
+              // Math.round() runden einen exakten .5-Wert nicht immer
+              // gleich).
+              const milestone150Points = milestone ? milestone.threshold150Points : null;
+              const milestone200Points = milestone ? milestone.threshold200Points : null;
+              const milestone150Reached = milestone150Points !== null && weekPoints >= milestone150Points;
+              const milestone200Reached = milestone200Points !== null && weekPoints >= milestone200Points;
+              const milestoneMarkers = [
+                milestone150Points !== null
+                  ? { left: (150 / barMaxPercent) * 100, points: milestone150Points, bonus: milestone.bonus150, percent: 150, reached: milestone150Reached }
                   : null,
-                milestone2Points !== null
-                  ? { left: (milestone.threshold2Percent / barMaxPercent) * 100, points: milestone2Points, bonus: milestone.bonus2, percent: milestone.threshold2Percent, reached: milestone2Reached }
+                milestone200Points !== null
+                  ? { left: (200 / barMaxPercent) * 100, points: milestone200Points, bonus: milestone.bonus200, percent: 200, reached: milestone200Reached }
                   : null,
               ].filter(Boolean);
-              // v0.32: die Marke selbst zeigt jetzt den absoluten Punktwert
-              // ("ab X Pkt.") statt des Prozentsatzes - der Prozentsatz steht
-              // nur noch ergänzend in Klammern im Tooltip.
-              const markersHtml = markers
-                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels)${m.bonus > 0 ? ` · +${m.bonus} Bonuspunkte` : ""}`)}"></div>`)
+              // v0.32: die Marke selbst zeigt den absoluten Punktwert ("ab X
+              // Pkt.") statt nur des Prozentsatzes - der Prozentsatz steht
+              // nur noch ergänzend in Klammern im Tooltip. v0.36: der Bonus
+              // ist jetzt in Münzen, nicht mehr Punkten.
+              const milestoneMarkersHtml = milestoneMarkers
+                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels)${m.bonus > 0 ? ` · +${coinsLabel(m.bonus)}` : ""}`)}"></div>`)
                 .join("");
-              const barFillClass = milestone2Reached
+              const barFillClass = milestone200Reached
                 ? " milestone-2-reached"
-                : milestone1Reached
+                : milestone150Reached
                   ? " milestone-1-reached"
                   : goalReached
                     ? " goal-reached"
                     : "";
               const pointsLine = goal > 0 ? `${esc(weekPoints)} / ${esc(goal)} Pkt. diese Woche` : `${esc(weekPoints)} Pkt. diese Woche`;
+              // v0.36: ein Streak kann jetzt für die 150%- und die
+              // 200%-Marke unabhängig voneinander laufen - siehe
+              // _streakWeeksFor.
               const streakWeeks = this._streakWeeksFor(id);
-              const streakSuffix = streak.enabled && streakWeeks > 0 ? ` · 🔥 ${streakWeeks} Wochen Streak` : "";
+              const streakParts = [];
+              if (streak.bonus150 > 0 && streakWeeks.weeks150 > 0) {
+                streakParts.push(`🔥 ${streakWeeks.weeks150} Wochen (150%)`);
+              }
+              if (streak.bonus200 > 0 && streakWeeks.weeks200 > 0) {
+                streakParts.push(`🔥 ${streakWeeks.weeks200} Wochen (200%)`);
+              }
+              const streakSuffix = streakParts.length ? ` · ${streakParts.join(" · ")}` : "";
               const balanceLine = (goal > 0 && !goalReached
-                ? `${pointsLabel(available)} verfügbar · noch ${esc(goal - weekPoints)} bis zum Wochenziel`
-                : `${pointsLabel(available)} verfügbar`) + streakSuffix;
+                ? `${coinsLabel(available)} verfügbar · noch ${esc(goal - weekPoints)} Pkt. bis zum Wochenziel`
+                : `${coinsLabel(available)} verfügbar`) + streakSuffix;
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
@@ -3042,7 +3160,8 @@
                     </div>
                     <div class="bar-track">
                       <div class="bar-fill${barFillClass}" style="width:${pct}%"></div>
-                      ${markersHtml}
+                      ${bandMarkersHtml}
+                      ${milestoneMarkersHtml}
                     </div>
                     <div class="balance">${balanceLine}</div>
                   </div>
@@ -3052,35 +3171,42 @@
             .join("")}</div>`
         : `<p class="muted">${isChildUser ? "Kein verknüpftes Familienmitglied gefunden." : "Noch keine teilnehmenden Kinder."}</p>`;
 
-      // v0.30/v0.32: kurze Legende der beiden Meilenstein-Schwellen samt
-      // Bonus oben im Abschnitt, sofern der Haushalt die Funktion aktiviert
-      // hat - reine Anzeige (auch für Screenreader/schmale Displays, wo die
-      // Balken-Marken selbst schlecht lesbar sind); die eigentliche Vergabe
-      // übernimmt FamilyTasksCoordinator._async_process_milestone_bonus.
-      // Ersetzt die frühere "Wochensieger-Bonus: N Punkte"-Zeile vollständig.
-      // v0.32: zeigt jetzt den absoluten Punktwert statt des Prozentsatzes -
-      // siehe die Marker-Berechnung oben für die Rundungs-Begründung; der
-      // Prozentsatz steht nur noch ergänzend in Klammern dahinter.
-      const milestoneLegend = milestone?.enabled
+      // v0.30/v0.36: kurze Legende der beiden festen Meilenstein-Schwellen
+      // samt Münzen-Bonus oben im Abschnitt, sofern der Haushalt mindestens
+      // eine davon konfiguriert hat - reine Anzeige (auch für
+      // Screenreader/schmale Displays, wo die Balken-Marken selbst schlecht
+      // lesbar sind); die eigentliche Vergabe übernimmt
+      // FamilyTasksCoordinator._async_process_milestone_coin_bonus. v0.32:
+      // zeigt den absoluten Punktwert statt nur des Prozentsatzes - siehe
+      // die Marker-Berechnung oben für die Rundungs-Begründung.
+      const milestoneLegend = milestone
         ? [
-            milestone.threshold1Percent > 0
-              ? `Meilenstein 1: ab ${pointsLabel(milestone.threshold1Points)} (${milestone.threshold1Percent}%)${milestone.bonus1 > 0 ? ` → +${pointsLabel(milestone.bonus1)}` : ""}`
+            milestone.bonus150 > 0
+              ? `150%: ab ${pointsLabel(milestone.threshold150Points)} → +${coinsLabel(milestone.bonus150)}`
               : null,
-            milestone.threshold2Percent > 0
-              ? `Meilenstein 2: ab ${pointsLabel(milestone.threshold2Points)} (${milestone.threshold2Percent}%)${milestone.bonus2 > 0 ? ` → +${pointsLabel(milestone.bonus2)}` : ""}`
+            milestone.bonus200 > 0
+              ? `200%: ab ${pointsLabel(milestone.threshold200Points)} → +${coinsLabel(milestone.bonus200)}`
               : null,
           ]
             .filter(Boolean)
             .join(" · ")
         : "";
 
-      // v0.32: "Streak-Bonus" Legende - siehe _streakBonus/CONF_STREAK_BONUS_ENABLED
-      // in const.py. Nur eine Text-Zeile (kein Balken-Marker, da die Schwelle
-      // sich wochenweise über die Zeit erstreckt, nicht auf einer einzelnen
-      // Woche liegt). streak selbst ist bereits weiter oben deklariert (vor
-      // progressList).
-      const streakLegend = streak.enabled
-        ? `Streak-Bonus: ${streak.requiredWeeks}× in Folge ab ${pointsLabel(streak.targetPoints)}/Woche → +${pointsLabel(streak.bonusPoints)}`
+      // v0.36: "Streak-Bonus" Legende - siehe _streakBonus/
+      // CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in const.py.
+      // Nur Text-Zeilen (kein Balken-Marker, da die Schwelle sich
+      // wochenweise über die Zeit erstreckt, nicht auf einer einzelnen
+      // Woche liegt) - eine pro konfiguriertem Tier. streak selbst ist
+      // bereits weiter oben deklariert (vor progressList).
+      const streakLegendParts = [];
+      if (streak.bonus150 > 0) {
+        streakLegendParts.push(`150%: ${streak.requiredWeeks}× in Folge → +${coinsLabel(streak.bonus150)}`);
+      }
+      if (streak.bonus200 > 0) {
+        streakLegendParts.push(`200%: ${streak.requiredWeeks}× in Folge → +${coinsLabel(streak.bonus200)}`);
+      }
+      const streakLegend = streakLegendParts.length
+        ? `Streak-Bonus: ${streakLegendParts.join(" · ")}`
         : "";
 
       return `
@@ -3138,10 +3264,10 @@
     _renderRewardsContent(canManageRewards, currentMemberId) {
       const currentMember = currentMemberId ? this._members[currentMemberId] : null;
       const currentParticipates = !!currentMember && currentMember.participates_in_rewards !== false;
-      const availablePoints = currentMemberId ? this._availablePointsFor(currentMemberId) : 0;
+      const availableCoins = currentMemberId ? this._coinsAvailableFor(currentMemberId) : 0;
 
       const rewardIds = Object.keys(this._rewards).sort(
-        (a, b) => (this._rewards[a].points_cost ?? 0) - (this._rewards[b].points_cost ?? 0)
+        (a, b) => (this._rewards[a].coin_cost ?? 0) - (this._rewards[b].coin_cost ?? 0)
       );
       // Jede Katalog-Belohnung samt Preis ist für jeden immer sichtbar - auch
       // für ein Kind, das sehen soll was verfügbar ist und was es kostet,
@@ -3153,14 +3279,14 @@
             .map((id) => {
               const r = this._rewards[id];
               const isInvestable = !!r.screen_time_investable;
-              const cost = r.points_cost ?? 0;
+              const cost = r.coin_cost ?? 0;
               // Eine investierbare Handyzeit-Belohnung (v0.14) hat keinen
               // festen Preis - das Mitglied wählt beim Einlösen, wie viele
-              // Punkte investiert werden - daher genügt für Leistbarkeit
-              // mindestens 1 verfügbarer Punkt statt eines konkreten Preises.
-              const affordable = currentParticipates && (isInvestable ? availablePoints >= 1 : availablePoints >= cost);
+              // Münzen investiert werden - daher genügt für Leistbarkeit
+              // mindestens 1 verfügbare Münze statt eines konkreten Preises.
+              const affordable = currentParticipates && (isInvestable ? availableCoins >= 1 : availableCoins >= cost);
               const isPending = this._pendingRedeemId === id;
-              const priceLabel = isInvestable ? "Punkte frei wählbar" : `${pointsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}`;
+              const priceLabel = isInvestable ? "Münzen frei wählbar" : `${coinsLabel(cost)}${screenTimeSuffix(r.screen_time_minutes)}`;
               // v0.24: CONF_REWARD_NOTE_ENABLED - siehe const.py. Ein
               // Freitext-Feld im Bestätigungsschritt, z. B. für "Mittagessen
               // auswählen" (welches Mittagessen gewünscht ist), statt nur
@@ -3168,7 +3294,7 @@
               const noteEnabled = !!r.note_enabled;
               const noteLabel = r.note_label?.trim() || "Text";
               const noteValid = !noteEnabled || !!(this._pendingRedeemNote || "").trim();
-              const investValid = !isInvestable || (this._pendingInvestPoints >= 1 && this._pendingInvestPoints <= availablePoints);
+              const investValid = !isInvestable || (this._pendingInvestCoins >= 1 && this._pendingInvestCoins <= availableCoins);
               return `
                 <div class="row-wrap">
                   <div class="row">
@@ -3186,9 +3312,9 @@
                   ${isPending ? `
                   <div class="confirm-row">
                     ${isInvestable ? `
-                    <label>Punkte investieren
-                      <input type="number" min="1" max="${availablePoints}" data-action="invest-points" data-reward-id="${id}" value="${esc(this._pendingInvestPoints ?? 1)}">
-                    </label>` : `<span>„${esc(r.name)}" für ${pointsLabel(cost)} einlösen?</span>`}
+                    <label>Münzen investieren
+                      <input type="number" min="1" max="${availableCoins}" data-action="invest-points" data-reward-id="${id}" value="${esc(this._pendingInvestCoins ?? 1)}">
+                    </label>` : `<span>„${esc(r.name)}" für ${coinsLabel(cost)} einlösen?</span>`}
                     ${noteEnabled ? `
                     <label>${esc(noteLabel)}
                       <input type="text" data-action="redeem-note" data-reward-id="${id}" value="${esc(this._pendingRedeemNote ?? "")}" required>
@@ -3218,7 +3344,7 @@
                 <div class="row">
                   <div class="row-main">
                     <span class="name">${esc(r.member_name)} · ${esc(r.reward_name)}</span>
-                    <span class="muted">${pointsLabel(r.points_cost ?? 0)}${screenTimeSuffix(r.screen_time_minutes)}${r.fulfilled ? " · erledigt" : ""}</span>
+                    <span class="muted">${coinsLabel(r.coin_cost ?? 0)}${screenTimeSuffix(r.screen_time_minutes)}${r.fulfilled ? " · erledigt" : ""}</span>
                     ${r.note ? `<span class="muted">„${esc(r.note)}"</span>` : ""}
                   </div>
                   ${!r.fulfilled && canManageRewards ? `
@@ -3237,7 +3363,7 @@
           <h4>Belohnungen</h4>
           <button class="link" data-action="toggle-hide-rewards">Ausblenden</button>
         </div>
-        ${currentMemberId ? `<p class="muted">Dein Guthaben: ${pointsLabel(availablePoints)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
+        ${currentMemberId ? `<p class="muted">Dein Guthaben: ${coinsLabel(availableCoins)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
         ${catalogList}
         ${canManageRewards ? `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>` : ""}
         <div class="section-header">
@@ -3257,7 +3383,7 @@
           <label>Name<input type="text" data-reward-field="name" placeholder="z. B. Filmabend aussuchen" value="${esc(f.name)}" required></label>
           <label>Icon (optional)<ha-icon-picker data-reward-field="icon" placeholder="mdi:gift" value="${esc(f.icon)}"></ha-icon-picker></label>
           ${isInvestable ? "" : `
-          <label>Preis (Punkte)<input type="number" min="0" data-reward-field="points_cost" value="${esc(f.points_cost)}"></label>
+          <label>Preis (Münzen)<input type="number" min="0" data-reward-field="coin_cost" value="${esc(f.coin_cost)}"></label>
           `}
           <label>Belohnungstyp
             <select data-reward-field="reward_type">
@@ -3268,7 +3394,7 @@
           ${isScreenTime ? `
           <label class="checkbox-label">
             <input type="checkbox" data-reward-field="screen_time_investable" ${isInvestable ? "checked" : ""}>
-            Kind wählt Punkte selbst aus (Minuten = investierte Punkte × Bonusfaktor aus den Integrations-Optionen)
+            Kind wählt Münzen selbst aus (Minuten = investierte Münzen × Bonusfaktor aus den Integrations-Optionen)
           </label>
           ` : ""}
           ${isScreenTime && !isInvestable ? `
@@ -3837,8 +3963,21 @@
            eigentliche Information. */
         .bar-milestone { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
                          background: var(--card-background-color, #fff); opacity: 0.9; }
+        /* v0.36: leichte, nicht-interaktive Marken bei 50%/100% des
+           Wochenziels (Handyzeit-Tick-Bänder, siehe bandMarkers in
+           _renderProgressSection) - bewusst unauffälliger als
+           .bar-milestone oben, da sie keinen eigenen Bonus markieren,
+           sondern nur informativ die Tick-Anpassungs-Grenzen zeigen. */
+        .bar-band-marker { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px;
+                            background: var(--card-background-color, #fff); opacity: 0.5; }
         .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
                        border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
+        /* v0.36: aufklappbare Untergruppen für nicht fällige Aufgaben, nach
+           Wiederholungsintervall - siehe _renderNotDueGroups. */
+        .recurrence-group { margin: 2px 0; }
+        .recurrence-group-toggle { display: block; width: 100%; text-align: left; padding: 6px 4px;
+                                    font-size: 0.9em; color: var(--secondary-text-color); }
+        .recurrence-group-caret { display: inline-block; width: 1em; }
         /* Each collapsed-section "... anzeigen" button gets its own block-
            level row (v0.9) - without this, two adjacent buttons with no
            wrapping element between them would sit side by side. */
@@ -3970,6 +4109,17 @@
           this._hideExcludedBatteries = !this._hideExcludedBatteries;
           this._saveUiState();
           this._render();
+        } else if (action === "toggle-recurrence-group") {
+          // v0.36: see _renderNotDueGroups - one entry per currently
+          // expanded recurrence-type group within the not-due part of the
+          // task list, persisted the same way as every other toggle here.
+          const type = el.dataset.recurrenceType;
+          const open = this._openRecurrenceGroups ?? [];
+          this._openRecurrenceGroups = open.includes(type)
+            ? open.filter((t) => t !== type)
+            : [...open, type];
+          this._saveUiState();
+          this._render();
         } else if (action === "filter-member") {
           this._taskMemberFilter = el.dataset.memberId || null;
           this._saveUiState();
@@ -4093,13 +4243,13 @@
           return;
         }
 
-        // Points-to-invest field for an investable Handyzeit redemption
-        // (v0.14) - not part of the reward-catalog form itself, just the
-        // pending-redeem confirm row, so it's handled separately from the
-        // data-reward-field inputs below.
+        // Coins-to-invest field for an investable Handyzeit redemption
+        // (v0.14, coins since v0.36) - not part of the reward-catalog form
+        // itself, just the pending-redeem confirm row, so it's handled
+        // separately from the data-reward-field inputs below.
         const investEl = ev.target.closest('[data-action="invest-points"]');
         if (investEl) {
-          this._pendingInvestPoints = Math.max(1, Number(investEl.value) || 1);
+          this._pendingInvestCoins = Math.max(1, Number(investEl.value) || 1);
           this._render();
           return;
         }

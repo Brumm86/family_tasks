@@ -11,12 +11,19 @@ blueprint:
     eigenen Werten, keine Logikänderung nötig.
 
     Die automatischen Zeit-Ticks pausieren, solange entweder der
-    Pause-Schalter unten manuell "aus" ist, ODER (neu) solange
-    family_tasks für dieses Kind eine überfällige Pflichtaufgabe
-    ("TASK_KIND_MANDATORY") führt - siehe "family_tasks:
-    Handyzeitgewährung-aktiv-Sensor" unten. Beide Bedingungen wirken
-    unabhängig voneinander und betreffen ausschließlich die automatischen
-    Ticks, nicht die manuellen Buttons und nicht Belohnungs-Einlösungen.
+    Pause-Schalter unten manuell "aus" ist, ODER solange family_tasks für
+    dieses Kind eine überfällige Pflichtaufgabe ("TASK_KIND_MANDATORY")
+    führt - siehe "family_tasks: Handyzeitgewährung-aktiv-Sensor" unten.
+    Beide Bedingungen wirken unabhängig voneinander und betreffen
+    ausschließlich die automatischen Ticks, nicht die manuellen Buttons
+    und nicht Belohnungs-Einlösungen.
+
+    Optional (neu, v0.36) lässt sich die Erhöhung pro automatischem Tick
+    zusätzlich an den Wochenfortschritt koppeln: siehe "family_tasks:
+    Wochenfortschritt-Sensor für Tick-Anpassung" unten - solange ein Kind
+    diese Woche noch nicht mindestens 50% seines Wochenziels erreicht hat,
+    fällt jeder Tick um 2 Minuten kleiner aus, ab 50% um 1 Minute, ab 100%
+    unverändert.
   domain: automation
   input:
     child_name:
@@ -160,6 +167,27 @@ blueprint:
           max: 60
           mode: box
 
+    screen_time_tick_adjustment_source_entity:
+      name: "family_tasks: Wochenfortschritt-Sensor für Tick-Anpassung (optional)"
+      description: >-
+        Der Punkte-Sensor dieses Kindes in family_tasks (sensor.<name>_punkte)
+        - trägt das Attribut "screen_time_tick_adjustment_minutes"
+        (MemberSummaryData.screen_time_tick_adjustment_minutes in
+        coordinator.py): -2, solange dieses Kind diese Woche noch keine
+        50% seines Wochenziels erreicht hat, -1 ab 50%, 0 ab 100%. Wird nur
+        auf automatische Zeit-Ticks angewendet (Trigger "plus_tick"),
+        NICHT auf die manuellen Buttons und NICHT auf
+        Belohnungs-Einlösungen - beide zählen weiterhin unverändert den
+        vollen Wert. Die effektive Erhöhung pro Tick (Erhöhung pro Tick
+        oben plus diese Anpassung) wird nie unter 0 Minuten gekürzt. Leer
+        lassen, um jeden Tick unverändert mit "Erhöhung pro Tick" laufen zu
+        lassen (z. B. wenn für dieses Kind kein Wochenziel konfiguriert
+        ist).
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
 triggers:
   - id: reset
     trigger: time
@@ -187,6 +215,7 @@ actions:
       automation_toggle_entity: !input automation_toggle_entity
       screen_time_grant_active_entity: !input screen_time_grant_active_entity
       increment_minutes: !input increment_minutes
+      screen_time_tick_adjustment_source_entity: !input screen_time_tick_adjustment_source_entity
 
   # Frühe Ausstiege, bevor überhaupt eine neue Handyzeit berechnet wird -
   # derselbe "stop"-Stil wie in der ursprünglichen Automation.
@@ -240,7 +269,9 @@ actions:
         {% if trigger.id == 'reset' %}
           {{ 0 }}
         {% elif trigger.id == 'plus_tick' %}
-          {{ current + (increment_minutes | int) }}
+          {% set adjustment = (state_attr(screen_time_tick_adjustment_source_entity, 'screen_time_tick_adjustment_minutes') | int(0)) if (screen_time_tick_adjustment_source_entity | default('') != '') else 0 %}
+          {% set tick_increment = [(increment_minutes | int) + adjustment, 0] | max %}
+          {{ current + tick_increment }}
         {% elif trigger.id == 'buttons' and trigger.entity_id == plus_button_entity %}
           {{ current + (increment_minutes | int) }}
         {% elif trigger.id == 'buttons' and trigger.entity_id == minus_button_entity %}

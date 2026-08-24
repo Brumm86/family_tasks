@@ -49,92 +49,111 @@ CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY: Final = (
 # redemption without needing a restart.
 CONF_SCREEN_TIME_MINUTES_PER_POINT: Final = "screen_time_minutes_per_point"
 
-# v0.30: replaces the old weekly-winner bonus. Rather than a single
-# household-wide "winner" taking all, every participating member who crosses
-# one of two configurable progress thresholds *during* the current week
-# (percentages of CONF_WEEKLY_PROGRESS_GOAL_POINTS - see
-# CONF_MILESTONE_1_THRESHOLD_PERCENT/CONF_MILESTONE_2_THRESHOLD_PERCENT below)
-# earns that threshold's "Meilensteinbonus" points immediately, live, the
-# first refresh after they cross it - see
-# FamilyTasksCoordinator._async_process_milestone_bonus in coordinator.py.
-# Off by default so nothing changes for a household that doesn't opt in.
-CONF_MILESTONE_BONUS_ENABLED: Final = "milestone_bonus_enabled"
-# Threshold 1, as a percentage of CONF_WEEKLY_PROGRESS_GOAL_POINTS (default
-# 100%, i.e. "reached the weekly goal") - vol.Range(min=1) both here and in
-# its NumberSelector, since a 0% threshold would trigger before any points
-# were earned at all.
-CONF_MILESTONE_1_THRESHOLD_PERCENT: Final = "milestone_1_threshold_percent"
-CONF_MILESTONE_1_BONUS_POINTS: Final = "milestone_1_bonus_points"
-# Threshold 2 (default 200%, i.e. "double the weekly goal"). Must exceed
-# threshold 1 - enforced by the options flow's schema, not just the default
-# ordering, so the "first still-uncrossed threshold this week" logic in
-# _async_process_milestone_bonus can rely on threshold 1 < threshold 2.
-CONF_MILESTONE_2_THRESHOLD_PERCENT: Final = "milestone_2_threshold_percent"
-CONF_MILESTONE_2_BONUS_POINTS: Final = "milestone_2_bonus_points"
+# v0.36: fixed weekly-progress-percent checkpoints (percentages of
+# CONF_WEEKLY_PROGRESS_GOAL_POINTS) the whole coin system is built around -
+# replaces the pre-v0.36 Meilensteinbonus/Streak-Bonus, which let a household
+# pick its own percent thresholds, with five checkpoints fixed the same way
+# for everyone. 100% is "reached the weekly goal". Only meaningful while a
+# weekly goal > 0 is configured - see CONF_WEEKLY_PROGRESS_GOAL_POINTS below,
+# PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES, and the coin-bonus constants below
+# for what happens at each one.
+PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
 
-# Internal-only sentinel task_ids for completion-log entries created by
-# FamilyTasksCoordinator._async_process_milestone_bonus - never a real task,
-# so neither shows up in the task list, and both are excluded from the
-# per-member weekly completion history the card shows when a Bestenliste row
-# is clicked (see WS_API_MEMBER_WEEKLY_COMPLETIONS below) even though the
-# points themselves count normally toward that member's totals. Two distinct
-# sentinels (not one) so a member who crosses both thresholds in the same
-# week gets two independent completion-log entries rather than one
-# overwriting/ambiguous with the other. Lives here (not in coordinator.py,
-# where it originated) so storage.py's websocket handler for that history
-# can exclude it too without an import cycle.
+# v0.36: replaces the pre-v0.36 tick-based screen-time automation's fixed
+# per-tick increment with one that responds to how a child is doing against
+# their weekly-progress percent (see PROGRESS_THRESHOLD_PERCENTS above) -
+# "Bei 0% soll die im Blueprint eingestellte Handyzeit pro Tick um 2 Minuten
+# reduziert werden. Bei 50% soll die Zeit um 1 Minute pro Tick reduziert
+# werden. Im Übrigen soll sie nicht geändert werden." Keyed by the *band* a
+# member's current weekly-progress percent falls into: below 50% -> -2,
+# 50% up to (not including) 100% -> -1, 100% and above -> unchanged. See
+# FamilyTasksCoordinator._screen_time_tick_adjustment_minutes, which computes
+# the per-member minutes value exposed as an attribute on
+# FamilyTasksMemberPointsSensor
+# (screen_time_tick_adjustment_minutes) for a household's
+# Handyzeit-Verwaltung blueprint to read and subtract from its own configured
+# per-tick increment (clamped at 0, never negative) - see
+# blueprints/handyzeit_verwaltung.yaml. Not configurable - fixed household-
+# wide amounts, same as PROGRESS_THRESHOLD_PERCENTS itself.
+PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -2, 50: -1, 100: 0}
+
+# v0.36: bonus *coins* (see the "Münzen"/coin-shop section below) awarded
+# live, the moment a participating member's weekly points cross the fixed
+# 150%/200% weekly-progress checkpoints (PROGRESS_THRESHOLD_PERCENTS) -
+# replaces the pre-v0.36 Meilensteinbonus (which paid *points* at an admin-
+# chosen percent) entirely. 0 (the default) means no bonus at that
+# checkpoint - no separate "enabled" switch, same as the pre-v0.36 bonus-
+# points fields already worked when 0. See
+# FamilyTasksCoordinator._async_process_milestone_coin_bonus.
+CONF_MILESTONE_150_BONUS_COINS: Final = "milestone_150_bonus_coins"
+CONF_MILESTONE_200_BONUS_COINS: Final = "milestone_200_bonus_coins"
+
+# v0.36: extra bonus coins for *maintaining* the 150%/200% checkpoint above
+# in more than one consecutive calendar week - on top of (not instead of) the
+# per-week Meilenstein coin bonus above, same idea as the pre-v0.36
+# Streak-Bonus paid on top of the weekly goal itself. Judged once a week has
+# actually ended - see FamilyTasksCoordinator._async_process_streak_coin_bonus
+# and StreakBonusStateStore in storage.py (tracks the 150%/200% tiers
+# independently per member since v0.36).
+# CONF_STREAK_BONUS_REQUIRED_WEEKS is shared by both tiers - default 2, i.e.
+# "mehr als eine Woche in Folge".
+CONF_STREAK_BONUS_REQUIRED_WEEKS: Final = "streak_bonus_required_weeks"
+CONF_STREAK_150_BONUS_COINS: Final = "streak_150_bonus_coins"
+CONF_STREAK_200_BONUS_COINS: Final = "streak_200_bonus_coins"
+
+# Internal-only sentinel "reason" values for CoinLedgerStore entries created
+# by FamilyTasksCoordinator._async_process_milestone_coin_bonus/
+# _async_process_streak_coin_bonus - see storage.CoinLedgerStore. Unlike the
+# points-based bonuses they replace, these never touch CompletionLogStore at
+# all (a coin bonus must never count toward weekly-progress percent, or
+# crossing 150% could itself push a member toward 200% purely from the bonus
+# just paid for 150%) - the coin ledger is its own, separate append-only log,
+# so there is no completion-log sentinel task_id to exclude from
+# WS_API_MEMBER_WEEKLY_COMPLETIONS history here the way
+# MILESTONE_BONUS_1_TASK_ID/STREAK_BONUS_TASK_ID below used to need.
+COIN_REASON_MILESTONE_150: Final = "milestone_150"
+COIN_REASON_MILESTONE_200: Final = "milestone_200"
+COIN_REASON_STREAK_150: Final = "streak_150"
+COIN_REASON_STREAK_200: Final = "streak_200"
+# A shop redemption (negative amount) - see ws_redeem_reward in storage.py.
+COIN_REASON_REDEMPTION: Final = "redemption"
+
+# v0.30-v0.35 sentinel task_ids, retired in v0.36 along with the points-based
+# Meilensteinbonus/Streak-Bonus/negative-balance-correction machinery that
+# created completion-log entries under them (see coordinator.py's CHANGELOG
+# history) - no longer created by anything, but kept defined and still
+# excluded from WS_API_MEMBER_WEEKLY_COMPLETIONS history in storage.py, since
+# a household upgrading from an older version may still have real historical
+# completion-log entries carrying these task_ids that should keep being
+# hidden from that per-member weekly drill-down.
 MILESTONE_BONUS_1_TASK_ID: Final = "__milestone_bonus_1__"
 MILESTONE_BONUS_2_TASK_ID: Final = "__milestone_bonus_2__"
-
-# v0.30 bugfix: internal-only sentinel for the one-time retroactive
-# correction FamilyTasksCoordinator._async_correct_negative_balances applies
-# to any member whose points_available had already gone negative because of
-# the _available_points/weekly_spendable_points drift fixed in storage.py
-# (see weekly_spendable_points there) - see that method's docstring for the
-# full story. Guarded so it only ever tops a member up once, ever: excluded
-# from the weekly completion history for the same reason as the sentinels
-# above (it isn't a completed task).
 POINTS_CORRECTION_TASK_ID: Final = "__points_correction__"
+STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 
-# v0.24: same sentinel pattern as MILESTONE_BONUS_1_TASK_ID/
-# MILESTONE_BONUS_2_TASK_ID/POINTS_CORRECTION_TASK_ID above, for a manual
-# points award/deduction a parent makes independent of any task (see
-# WS_API_POINTS_AWARD/ws_award_points in storage.py) - never a real task, and
-# excluded from the per-member weekly completion history for the same reason
-# (it isn't a completed task), while still counting normally toward the
-# member's points_total/points_week/points_month/points_available - and,
-# since v0.30, toward points_week for Meilensteinbonus threshold-crossing
-# purposes too (see FamilyTasksCoordinator._async_process_milestone_bonus) -
-# a manually-awarded point is just as "real" as a task-completion one.
+# v0.24: sentinel task_id for a manual points award/deduction a parent makes
+# independent of any task (see WS_API_POINTS_AWARD/ws_award_points in
+# storage.py) - never a real task, and excluded from the per-member weekly
+# completion history for the same reason as the retired sentinels above (it
+# isn't a completed task), while still counting normally toward the member's
+# points_total/points_week/points_month - a manually-awarded point is just as
+# "real" as a task-completion one, including toward the v0.36 coin
+# conversion (see storage.coins_from_task_points).
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 
 # v0.29: household-wide weekly point goal backing each child's
 # "Wochenfortschritt" progress bar (replaces the flat Bestenliste ranking -
-# see family-tasks-card.js). Points a member earns within a calendar week
-# (Monday 00:00 local - Sunday 23:59, the same boundary points_week already
-# uses) up to this many points only count toward reaching the goal itself;
-# only points earned *beyond* the goal in that week are added to their
-# spendable points_available balance, redeemable in the reward shop exactly
-# as before. 0 (the default) disables the rule entirely - every point earned
-# is immediately spendable, identical to the pre-v0.29 behavior. See
-# FamilyTasksCoordinator._weekly_spendable_points in coordinator.py.
+# see family-tasks-card.js) and, since v0.36, the fixed
+# PROGRESS_THRESHOLD_PERCENTS checkpoints. Points a member earns within a
+# calendar week (Monday 00:00 local - Sunday 23:59, the same boundary
+# points_week already uses) up to this many points count toward reaching the
+# 100% checkpoint; points earned *beyond* it in that week convert 1:1 to
+# spendable "Münzen" instead (see storage.coins_from_task_points) - points
+# themselves are never directly spendable in the reward shop any more (v0.36;
+# before that, this same "beyond the goal" surplus was the spendable balance
+# itself, points_available). 0 (the default) disables the whole percent
+# mechanic - see FamilyTasksCoordinator._async_update_data.
 CONF_WEEKLY_PROGRESS_GOAL_POINTS: Final = "weekly_progress_goal_points"
-
-# v0.32: household-wide "Streak-Bonus" - bonus points for a member who earns
-# at least CONF_STREAK_BONUS_THRESHOLD_POINTS points *above*
-# CONF_WEEKLY_PROGRESS_GOAL_POINTS in CONF_STREAK_BONUS_REQUIRED_WEEKS
-# consecutive calendar weeks. Unlike the Meilensteinbonus (which awards live,
-# mid-week, the moment a threshold is crossed), a streak can only be judged
-# once a week has actually ended - see
-# FamilyTasksCoordinator._async_process_streak_bonus, which processes each
-# member's fully-elapsed weeks one at a time via StreakBonusStateStore. Once
-# a member's streak reaches the required length, every further consecutive
-# week keeps earning the bonus again (rolling), not just the one that first
-# reached it - a maintained streak is rewarded every week, not once.
-CONF_STREAK_BONUS_ENABLED: Final = "streak_bonus_enabled"
-CONF_STREAK_BONUS_THRESHOLD_POINTS: Final = "streak_bonus_threshold_points"
-CONF_STREAK_BONUS_REQUIRED_WEEKS: Final = "streak_bonus_required_weeks"
-CONF_STREAK_BONUS_POINTS: Final = "streak_bonus_points"
 
 # v0.32: household-wide "Urlaubsmodus" - see switch.py
 # (FamilyTasksVacationModeSwitch) for the actual on/off entity, which is the
@@ -162,24 +181,13 @@ DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
 DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY: Final = False
 DEFAULT_SCREEN_TIME_MINUTES_PER_POINT: Final = 1
-DEFAULT_MILESTONE_BONUS_ENABLED: Final = False
-DEFAULT_MILESTONE_1_THRESHOLD_PERCENT: Final = 100
-DEFAULT_MILESTONE_1_BONUS_POINTS: Final = 0
-DEFAULT_MILESTONE_2_THRESHOLD_PERCENT: Final = 200
-DEFAULT_MILESTONE_2_BONUS_POINTS: Final = 0
 DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS: Final = 0
-DEFAULT_STREAK_BONUS_ENABLED: Final = False
-DEFAULT_STREAK_BONUS_THRESHOLD_POINTS: Final = 0
+DEFAULT_MILESTONE_150_BONUS_COINS: Final = 0
+DEFAULT_MILESTONE_200_BONUS_COINS: Final = 0
 DEFAULT_STREAK_BONUS_REQUIRED_WEEKS: Final = 2
-DEFAULT_STREAK_BONUS_POINTS: Final = 0
+DEFAULT_STREAK_150_BONUS_COINS: Final = 0
+DEFAULT_STREAK_200_BONUS_COINS: Final = 0
 DEFAULT_VACATION_MODE: Final = False
-
-# Internal-only sentinel task_id for a completion-log entry created by
-# FamilyTasksCoordinator._async_process_streak_bonus - same sentinel pattern
-# as MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID above (never a real
-# task, excluded from ws_list_member_weekly_completions, still counts
-# normally toward the member's point totals).
-STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
 ROTATION_STRATEGY_RANDOM: Final = "random"
@@ -450,16 +458,29 @@ STORAGE_KEY_REWARDS: Final = f"{DOMAIN}.reward_groups"
 # _async_migrate_reward_redemptions.
 STORAGE_KEY_REWARD_REDEMPTIONS: Final = f"{DOMAIN}.rewards"
 # v0.30: tracks, for the current calendar week only, which members have
-# already been awarded each Meilensteinbonus threshold - so
-# FamilyTasksCoordinator only ever awards a given member/threshold/week combo
-# once, regardless of how often the coordinator refreshes. Reset (pruned)
-# automatically whenever the current week rolls over - see
+# already been awarded each Meilenstein coin-bonus checkpoint (150%/200%,
+# "threshold_1"/"threshold_2" internally - unchanged field names since v0.36
+# only changed what gets awarded there, not the tracking shape) - so
+# FamilyTasksCoordinator only ever awards a given member/checkpoint/week
+# combo once, regardless of how often the coordinator refreshes. Reset
+# (pruned) automatically whenever the current week rolls over - see
 # storage.MilestoneBonusStateStore. Physical storage key/file unchanged since
-# v0.14, where it tracked the (now removed) weekly-winner bonus instead - the
-# old "last_awarded_week" shape is simply ignored by the new code the first
-# time it loads under v0.30, same as any Store.async_load() encountering keys
-# it doesn't recognize.
+# v0.14, where it tracked the (now removed) weekly-winner bonus instead - an
+# unrecognized older shape is simply ignored the first time it loads under
+# whichever version actually changed it, same as any Store.async_load()
+# encountering keys it doesn't recognize.
 STORAGE_KEY_WEEKLY_BONUS_STATE: Final = f"{DOMAIN}.weekly_bonus_state"
+# v0.36: the coin-shop ledger - every credit (task-progress conversion is
+# *not* logged here, see COIN_REASON_* above and storage.coins_from_task_points;
+# only the Meilenstein/Streak coin bonuses are) and debit (a shop redemption)
+# a member's coin balance is made up of - see storage.CoinLedgerStore.
+STORAGE_KEY_COIN_LEDGER: Final = f"{DOMAIN}.coin_ledger"
+# v0.36: the single timestamp the coin system "started" counting from - see
+# storage.CoinSystemStateStore. Set once, the first time this integration
+# runs with v0.36 or later, so upgrading a household starts every member's
+# coin balance at 0 instead of retroactively crediting a lifetime of
+# already-earned, pre-v0.36 "spendable" point surplus as coins.
+STORAGE_KEY_COIN_SYSTEM_STATE: Final = f"{DOMAIN}.coin_system_state"
 # v0.17: the parent-maintained Favoriten template catalog - see
 # WS_API_PREFIX_FAVORITES above.
 STORAGE_KEY_FAVORITES: Final = f"{DOMAIN}.favorites"
@@ -497,21 +518,26 @@ WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
 # ws_list_member_weekly_completions in storage.py.
 WS_API_MEMBER_WEEKLY_COMPLETIONS: Final = f"{WS_API_PREFIX_MEMBERS}/weekly_completions"
 
-# --- Rewards (v0.9) ------------------------------------------------------------
+# --- Rewards (v0.9, currency switched to coins in v0.36) -----------------------
 #
-# A points-shop: parents maintain a catalog of rewards, each with a price in
-# points (WS_API_PREFIX_REWARDS, plain admin CRUD - see RewardStorageCollection
-# in storage.py). Any family member who participates in the reward system (see
-# CONF_MEMBER_REWARDS_OPT_IN above) can redeem any catalog reward at any time,
-# provided their available point balance (all-time points earned minus
-# everything they've already redeemed - see MemberSummaryData.points_available
-# in coordinator.py) covers its price. Redeeming is not exposed through the
-# generic storage-collection "create" command for WS_API_PREFIX_REWARD_REDEMPTIONS
-# (see RewardRedemptionStorageCollectionWebsocket in storage.py) because it
-# needs the extra participation/balance checks - only WS_API_REWARD_REDEEM can
-# create a redemption entry, and creating one *is* the point deduction: balance
-# is always computed fresh from history, never stored/mutated directly.
-# Parents (not children, regardless of HA admin flag) can mark a redemption
+# A coin-shop: parents maintain a catalog of rewards, each with a price in
+# "Münzen"/coins (WS_API_PREFIX_REWARDS, plain admin CRUD - see
+# RewardStorageCollection in storage.py). Any family member who participates
+# in the reward system (see CONF_MEMBER_REWARDS_OPT_IN above) can redeem any
+# catalog reward at any time, provided their available coin balance (see
+# MemberSummaryData.coins_available in coordinator.py) covers its price.
+# Before v0.36 this was a *points*-shop - a reward's price was "points_cost"
+# and the balance was points_available (all-time points minus redemptions).
+# v0.36 splits the two currencies entirely: points now only ever drive the
+# "Wochenfortschritt" weekly-progress percent, never shop spending directly -
+# see CONF_WEEKLY_PROGRESS_GOAL_POINTS above and storage.coins_from_task_points
+# for how points convert into coins instead. Redeeming is not exposed through
+# the generic storage-collection "create" command for
+# WS_API_PREFIX_REWARD_REDEMPTIONS (see RewardRedemptionStorageCollectionWebsocket
+# in storage.py) because it needs the extra participation/balance checks -
+# only WS_API_REWARD_REDEEM can create a redemption entry, and creating one
+# *is* the coin deduction (a debit entry in storage.CoinLedgerStore). Parents
+# (not children, regardless of HA admin flag) can mark a redemption
 # "fulfilled" once they've handed the reward over.
 WS_API_PREFIX_REWARDS: Final = f"{DOMAIN}/reward"
 WS_API_PREFIX_REWARD_REDEMPTIONS: Final = f"{DOMAIN}/reward_redemption"
@@ -540,14 +566,16 @@ CONF_REWARD_SCREEN_TIME_MINUTES: Final = "screen_time_minutes"
 # ever manually resolve.
 CONF_REWARD_AUTO_FULFILL: Final = "auto_fulfill"
 
-# v0.14: marks a "Handyzeit" catalog reward as using the "invest points"
-# flow instead of a fixed price/fixed screen_time_minutes pair - the member
-# chooses how many points to spend at redemption time (family_tasks/
-# reward_redemption/redeem's new "points_spent"), and the screen time granted
-# is points_spent * CONF_SCREEN_TIME_MINUTES_PER_POINT (the household-wide
-# bonus factor from Options), not a value stored on the catalog item itself.
-# "points_cost" is ignored for a reward with this flag set - see
-# ws_redeem_reward in storage.py. Existing rewards that already had
+# v0.14: marks a "Handyzeit" catalog reward as using the "invest coins" flow
+# (points before v0.36) instead of a fixed price/fixed screen_time_minutes
+# pair - the member chooses how many coins to spend at redemption time
+# (family_tasks/reward_redemption/redeem's "coins_spent", named
+# "points_spent" before v0.36), and the screen time granted is coins_spent *
+# CONF_SCREEN_TIME_MINUTES_PER_POINT (the household-wide bonus factor from
+# Options - name/option-key kept as-is across the v0.36 currency switch so an
+# already-configured value isn't silently reset), not a value stored on the
+# catalog item itself. "coin_cost" is ignored for a reward with this flag
+# set - see ws_redeem_reward in storage.py. Existing rewards that already had
 # screen_time_minutes set are migrated to this flag on first load after the
 # upgrade (see _async_migrate_screen_time_investable in storage.py), so a
 # household's existing Handyzeit rewards switch to the new dynamic flow
@@ -572,7 +600,7 @@ CONF_REWARD_NOTE_LABEL: Final = "note_label"
 
 # Fired on hass.bus the moment a redemption is created (end of ws_redeem_reward
 # in storage.py), carrying member_id/member_name/reward_id/reward_name/
-# points_cost/screen_time_minutes. This - not a hardcoded call into a specific
+# coin_cost/screen_time_minutes. This - not a hardcoded call into a specific
 # automation entity_id - is the integration's extension point for "redeeming
 # this reward should immediately *do* something": a household automation
 # listens for this event (event trigger) and branches on event_data.member_id
@@ -612,9 +640,8 @@ EVENT_TASK_REJECTED: Final = f"{DOMAIN}_task_rejected"
 # "half-yearly report card" bonus, or fixing a mistaken completion without
 # having to fabricate a fake task for it. Not a StorageCollection: creating
 # one just appends to the existing completion log (see
-# MANUAL_POINTS_TASK_ID/CompletionLogStore.async_add_entry, same mechanism
-# the Meilensteinbonus already uses) rather than being its own persisted,
-# editable entity - there's nothing to later edit/delete, only ever more
+# MANUAL_POINTS_TASK_ID/CompletionLogStore.async_add_entry) rather than being
+# its own persisted, editable entity - there's nothing to later edit/delete, only ever more
 # awards on top, same as a task completion itself is never edited after the
 # fact. Parent-only (not a child, regardless of HA admin flag - same
 # "_member_role_for_user != MEMBER_ROLE_CHILD" guard used throughout
@@ -642,9 +669,10 @@ SERVICE_TOGGLE_SUBTASK: Final = "toggle_subtask"
 # any eligible family member, not just admins, needs to be able to call them.
 SERVICE_CLAIM_TASK: Final = "claim_task"
 SERVICE_RELEASE_TASK: Final = "release_task"
-# v0.32: wipes stored *points* data - the completion log, reward redemptions,
-# and Meilenstein-/Streak-Bonus tracking - back to zero, optionally scoped to
-# one member (ATTR_MEMBER_ID) or, left unset, every member at once. Task and
+# v0.32: wipes stored *points/coins* data - the completion log, reward
+# redemptions, the coin ledger, and Meilenstein-/Streak-Bonus tracking - back
+# to zero, optionally scoped to one member (ATTR_MEMBER_ID) or, left unset,
+# every member at once. Task and
 # member *definitions* and the reward catalog itself are untouched - see
 # FamilyTasksCoordinator.async_reset_points in coordinator.py. Admin-only is
 # not enforceable at the plain-service level (unlike the websocket API), same
