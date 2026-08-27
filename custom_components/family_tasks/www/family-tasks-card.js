@@ -728,6 +728,9 @@
       active: true,
       role: "parent",
       participates_in_rewards: true,
+      // v0.37: see CONF_MEMBER_PAUSED in const.py - a brand-new member never
+      // starts out paused.
+      paused: false,
       notify_service: "",
     };
   }
@@ -789,6 +792,8 @@
       active: member.active !== false,
       role: member.role ?? "parent",
       participates_in_rewards: member.participates_in_rewards !== false,
+      // v0.37: see CONF_MEMBER_PAUSED in const.py.
+      paused: member.paused === true,
       notify_service: member.notify_service ?? "",
     };
   }
@@ -1475,6 +1480,9 @@
         .map((id) => ({ id, member: this._members[id] }))
         .filter((entry) => entry.member && entry.member.active !== false)
         .filter((entry) => entry.member.participates_in_rewards !== false)
+        // v0.37: a paused member (see CONF_MEMBER_PAUSED) temporarily has no
+        // bar here either, same reasoning as participates_in_rewards.
+        .filter((entry) => entry.member.paused !== true)
         .sort((a, b) => a.member.name.localeCompare(b.member.name, "de"));
     }
 
@@ -1703,6 +1711,8 @@
         active: form.active,
         role: form.role || "parent",
         participates_in_rewards: !!form.participates_in_rewards,
+        // v0.37: see CONF_MEMBER_PAUSED in const.py.
+        paused: !!form.paused,
       };
       if (form.person_entity_id) payload.person_entity_id = form.person_entity_id;
       if (form.icon) payload.icon = form.icon.trim();
@@ -2961,6 +2971,7 @@
           if (member.active === false) statusParts.push("inaktiv");
           if (member.role === "child") statusParts.push("Kind");
           if (member.participates_in_rewards === false) statusParts.push("nimmt nicht an Belohnungen teil");
+          if (member.paused === true) statusParts.push("pausiert");
           // v0.24: "Punkte vergeben" - siehe _selectAwardPoints/
           // _confirmAwardPoints. Gleiches canManageMembers-Gate wie
           // Bearbeiten/Löschen (Eltern-only, serverseitig zusätzlich über
@@ -3077,7 +3088,6 @@
             .map(({ id, member }) => {
               const sensor = this._pointsSensorForMember(id);
               const weekPoints = Number(sensor?.attributes?.points_week ?? 0);
-              const available = this._coinsAvailableFor(id);
               const pct = goal > 0
                 ? Math.min(100, Math.round((weekPoints / (goal * barMaxPercent / 100)) * 100))
                 : 100;
@@ -3147,10 +3157,19 @@
               if (streak.bonus200 > 0 && streakWeeks.weeks200 > 0) {
                 streakParts.push(`🔥 ${streakWeeks.weeks200} Wochen (200%)`);
               }
-              const streakSuffix = streakParts.length ? ` · ${streakParts.join(" · ")}` : "";
-              const balanceLine = (goal > 0 && !goalReached
-                ? `${coinsLabel(available)} verfügbar · noch ${esc(goal - weekPoints)} Pkt. bis zum Wochenziel`
-                : `${coinsLabel(available)} verfügbar`) + streakSuffix;
+              // v0.37: no longer shows the Münzen balance here - coins now
+              // persist independently of the calendar week (see
+              // WeeklyCoinConversionStateStore/coins_available in
+              // coordinator.py), so there's no reason to fold them into a
+              // *weekly* progress readout any more; the balance still shows
+              // in the Belohnungen section (_renderRewardsContent) and on
+              // each member's dedicated Münzen sensor. Just the remaining
+              // goal distance plus any streak - and only rendered at all
+              // when there's actually something to say.
+              const goalNote = goal > 0 && !goalReached
+                ? `noch ${esc(goal - weekPoints)} Pkt. bis zum Wochenziel`
+                : "";
+              const balanceLine = [goalNote, streakParts.join(" · ")].filter(Boolean).join(" · ");
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
@@ -3163,7 +3182,7 @@
                       ${bandMarkersHtml}
                       ${milestoneMarkersHtml}
                     </div>
-                    <div class="balance">${balanceLine}</div>
+                    ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
                   </div>
                   <span class="disclosure-icon">${svgIcon("chevron-right", 20)}</span>
                 </div>`;
@@ -3263,7 +3282,10 @@
 
     _renderRewardsContent(canManageRewards, currentMemberId) {
       const currentMember = currentMemberId ? this._members[currentMemberId] : null;
-      const currentParticipates = !!currentMember && currentMember.participates_in_rewards !== false;
+      // v0.37: a paused member (CONF_MEMBER_PAUSED) can't redeem either -
+      // mirrors the server-side check in ws_redeem_reward (storage.py).
+      const currentParticipates =
+        !!currentMember && currentMember.participates_in_rewards !== false && currentMember.paused !== true;
       const availableCoins = currentMemberId ? this._coinsAvailableFor(currentMemberId) : 0;
 
       const rewardIds = Object.keys(this._rewards).sort(
@@ -3771,6 +3793,8 @@
           </label>
           <label class="inline"><input type="checkbox" data-field="active" ${f.active ? "checked" : ""}> Aktiv (nimmt an der Rotation teil)</label>
           <label class="inline"><input type="checkbox" data-field="participates_in_rewards" ${f.participates_in_rewards ? "checked" : ""}> Nimmt am Belohnungssystem teil (Leaderboard &amp; Belohnungen einlösen)</label>
+          <label class="inline"><input type="checkbox" data-field="paused" ${f.paused ? "checked" : ""}> Pausiert (z. B. diese Woche nicht zuhause)</label>
+          <p class="muted">Solange pausiert: bekommt keine neuen Aufgaben zugewiesen (Rotation überspringt dieses Mitglied, eine Aufgabe, die nur noch pausierten Mitgliedern zugewiesen ist, wird nicht fällig) und nimmt vorübergehend nicht am Belohnungssystem teil (Wochenfortschritt, Meilenstein-/Streak-Bonus, Belohnungen einlösen). Bereits verdiente Punkte &amp; Münzen bleiben unangetastet und stehen nach dem Entpausieren wieder normal zur Verfügung.</p>
           <label>Notify-Service für Push-Benachrichtigungen (optional)<input type="text" data-field="notify_service" placeholder="z. B. mobile_app_pixel_8" value="${esc(f.notify_service)}"></label>
           <p class="muted">Wird bei neuen, diesem Mitglied zugewiesenen Aufgaben aufgerufen (notify.&lt;Wert&gt;), damit die Benachrichtigung wirklich auf dem Handy erscheint - ohne das hier landet nur eine Home-Assistant-interne Benachrichtigung, keine echte Push-Nachricht. Der Name der Companion-App-Notify-Entity ist unter Einstellungen → Geräte &amp; Dienste → &lt;Gerätename&gt; zu finden.</p>
           <div class="form-actions">

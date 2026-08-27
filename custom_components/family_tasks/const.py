@@ -117,6 +117,18 @@ COIN_REASON_STREAK_150: Final = "streak_150"
 COIN_REASON_STREAK_200: Final = "streak_200"
 # A shop redemption (negative amount) - see ws_redeem_reward in storage.py.
 COIN_REASON_REDEMPTION: Final = "redemption"
+# v0.37: a fully-elapsed calendar week's "points beyond the weekly goal"
+# surplus, finalized into the ledger - see
+# FamilyTasksCoordinator._async_process_weekly_coin_conversion and
+# storage.WeeklyCoinConversionStateStore. Replaces recomputing that surplus
+# live from CompletionLogStore for *every* past week on every refresh (the
+# pre-v0.37 approach - see coins_from_task_points): once a week is over, its
+# converted coins live here permanently instead, so they can never silently
+# shrink just because old completion-log entries eventually age out past
+# MAX_COMPLETION_LOG_ENTRIES. Only the *current*, still-open week keeps being
+# computed live straight from the completion log (see the coins_available
+# calculation in _async_update_data) - there's nothing to finalize yet.
+COIN_REASON_WEEKLY_CONVERSION: Final = "weekly_conversion"
 
 # v0.30-v0.35 sentinel task_ids, retired in v0.36 along with the points-based
 # Meilensteinbonus/Streak-Bonus/negative-balance-correction machinery that
@@ -312,6 +324,36 @@ MEMBER_ROLES: Final = [MEMBER_ROLE_PARENT, MEMBER_ROLE_CHILD]
 # was introduced (opting members out is an explicit admin action).
 CONF_MEMBER_REWARDS_OPT_IN: Final = "participates_in_rewards"
 
+# v0.37: a member marked "paused" is temporarily away from the household's
+# task/reward system entirely - e.g. a child on a school trip for the week -
+# without an admin having to touch their permanent CONF_MEMBER_REWARDS_OPT_IN/
+# "active" configuration (both of which are meant as lasting household setup,
+# not something to flip on and off every time someone travels). Distinct from
+# both:
+#   - CONF_MEMBER_REWARDS_OPT_IN: a permanent "this member never competes for
+#     points/rewards at all" choice (e.g. for a parent's own account).
+#   - "active": a permanent "this member no longer exists/uses the household
+#     at all" toggle.
+# While paused, a member (see FamilyTasksCoordinator._member_paused):
+#   - is skipped when picking who a rotating/fixed task's occurrence is
+#     assigned to (FamilyTasksCoordinator._async_update_data) - a task whose
+#     *every* current assignee is paused is treated exactly like a household-
+#     wide Urlaubsmodus-paused task (skipped entirely, not due) instead of
+#     sitting there overdue with nobody able to act on it.
+#   - is never added as a fallback "other eligible member" for an overdue
+#     task or an Aufgabenpool occurrence - no new work lands on someone who
+#     isn't there to do it.
+#   - is excluded from Meilenstein-/Streak-coin-bonus eligibility, the
+#     "Wochenfortschritt" progress bar, and reward-catalog redemption -
+#     mirroring what CONF_MEMBER_REWARDS_OPT_IN already does, just
+#     temporarily.
+# Toggled via the same member-edit form as "active"/CONF_MEMBER_REWARDS_OPT_IN
+# (family_tasks/member/update) - defaults to False so every existing member
+# keeps behaving exactly as before this field was introduced. Nothing already
+# earned (points, coins) is touched by pausing/unpausing - only new
+# assignment and reward-system participation are gated.
+CONF_MEMBER_PAUSED: Final = "paused"
+
 # v0.14: optional notify.* service (just the part after "notify.", e.g.
 # "mobile_app_pixel_8") this member's phone actually reads pushes from. See
 # EVENT_TASK_ASSIGNED below - a plain persistent_notification.create is
@@ -494,6 +536,11 @@ STORAGE_KEY_STREAK_BONUS_STATE: Final = f"{DOMAIN}.streak_bonus_state"
 # v0.32: the household-wide Urlaubsmodus on/off state - see
 # VacationModeStateStore in storage.py and CONF_VACATION_MODE_DEFAULT above.
 STORAGE_KEY_VACATION_MODE: Final = f"{DOMAIN}.vacation_mode"
+# v0.37: per-member cursor tracking which fully-elapsed calendar weeks have
+# already had their "beyond the weekly goal" point surplus finalized into
+# CoinLedgerStore - see WeeklyCoinConversionStateStore in storage.py and
+# COIN_REASON_WEEKLY_CONVERSION above.
+STORAGE_KEY_WEEKLY_COIN_CONVERSION_STATE: Final = f"{DOMAIN}.weekly_coin_conversion_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 

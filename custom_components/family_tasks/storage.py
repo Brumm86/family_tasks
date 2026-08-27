@@ -30,6 +30,7 @@ from .const import (
     COIN_REASON_REDEMPTION,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_NOTIFY_SERVICE,
+    CONF_MEMBER_PAUSED,
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_REWARD_AUTO_FULFILL,
     CONF_REWARD_NOTE_ENABLED,
@@ -76,6 +77,7 @@ from .const import (
     STORAGE_KEY_TRIGGER_STATE,
     STORAGE_KEY_VACATION_MODE,
     STORAGE_KEY_WEEKLY_BONUS_STATE,
+    STORAGE_KEY_WEEKLY_COIN_CONVERSION_STATE,
     STORAGE_VERSION,
     STORAGE_VERSION_MINOR,
     STREAK_BONUS_TASK_ID,
@@ -303,6 +305,9 @@ MEMBER_CREATE_SCHEMA: collection.VolDictType = {
     # True so every existing member keeps behaving exactly as before this
     # field was introduced.
     vol.Optional(CONF_MEMBER_REWARDS_OPT_IN, default=True): bool,
+    # See CONF_MEMBER_PAUSED in const.py - defaults to False (not paused) so
+    # a brand-new member always starts out fully participating.
+    vol.Optional(CONF_MEMBER_PAUSED, default=False): bool,
     # See CONF_MEMBER_NOTIFY_SERVICE in const.py.
     vol.Optional(CONF_MEMBER_NOTIFY_SERVICE): str,
 }
@@ -314,6 +319,12 @@ MEMBER_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("active"): bool,
     vol.Optional("role"): vol.In(MEMBER_ROLES),
     vol.Optional(CONF_MEMBER_REWARDS_OPT_IN): bool,
+    # No default here - same reasoning as every other plain optional flag on
+    # this update schema (and see the ROTATION_SCHEMA "current_index" comment
+    # in TaskStorageCollection._update_data for what goes wrong when an
+    # Optional *does* carry a default on an update-only schema: a default
+    # would silently reset "paused" to False on every unrelated member edit).
+    vol.Optional(CONF_MEMBER_PAUSED): bool,
     # Explicitly setting this to null clears a previously configured notify
     # service, same "clear via null" pattern used elsewhere in this module.
     vol.Optional(CONF_MEMBER_NOTIFY_SERVICE): vol.Any(None, str),
@@ -357,7 +368,28 @@ class TaskStorageCollection(collection.DictStorageCollection):
         if "recurrence" in validated:
             updated["recurrence"] = {**item["recurrence"], **validated["recurrence"]}
         if "rotation" in validated:
-            updated["rotation"] = {**item["rotation"], **validated["rotation"]}
+            # v0.37 bug fix: ROTATION_SCHEMA is shared with TASK_CREATE_SCHEMA
+            # and declares "current_index" as vol.Optional(..., default=0) -
+            # voluptuous fills in that default whenever the key is *absent*
+            # from the input, not just when it's explicitly given. The card's
+            # task-edit form never sends "current_index" at all (it's
+            # coordinator-internal rotation bookkeeping, not something the
+            # edit form exposes), so every single task edit that touches
+            # "rotation" was silently resetting an in-progress round-robin
+            # rotation back to member_ids[0] - see
+            # FamilyTasksCoordinator._assigned_member_id. For a task rotating
+            # among 2+ members this reassigned the occurrence to whoever's
+            # first in the list the moment *anything* about the task was
+            # saved, even an edit with nothing to do with rotation (e.g. just
+            # fixing the due time) - and for a household using the "own
+            # tasks" filter, the task then appeared to vanish for whoever it
+            # was actually assigned to before the edit. Preserve the existing
+            # current_index unless the caller's *raw* update_data (before
+            # ROTATION_SCHEMA's default reinjection) actually included one.
+            new_rotation = {**item["rotation"], **validated["rotation"]}
+            if "current_index" not in (update_data.get("rotation") or {}):
+                new_rotation["current_index"] = item["rotation"].get("current_index", 0)
+            updated["rotation"] = new_rotation
         if updated["recurrence"]["type"] == RECURRENCE_TRIGGER and "trigger" not in updated[
             "recurrence"
         ]:
@@ -1182,11 +1214,15 @@ def async_setup_websocket_api(
             )
             return
 
-        if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True):
+        # v0.37: a member currently "paused" (CONF_MEMBER_PAUSED - e.g. away
+        # for the week) is blocked from redeeming exactly like one who has
+        # permanently opted out via CONF_MEMBER_REWARDS_OPT_IN - see that
+        # constant's docstring for how the two differ.
+        if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or member.get(CONF_MEMBER_PAUSED, False):
             connection.send_error(
                 msg["id"],
                 websocket_api.ERR_UNAUTHORIZED,
-                "Dieses Familienmitglied nimmt nicht am Belohnungssystem teil.",
+                "Dieses Familienmitglied nimmt aktuell nicht am Belohnungssystem teil.",
             )
             return
 
@@ -2292,8 +2328,11 @@ class CoinLedgerStore:
     switch this backs. Not a StorageCollection: entries are never edited by
     the user, only appended (by FamilyTasksCoordinator's Meilenstein-/
     Streak-coin-bonus processing, and by ws_redeem_reward's redemption
-    debit) and pruned once they age out, same as CompletionLogStore. A
-    member's coin balance is always the sum of their entries here *plus*
+    debit). Unlike CompletionLogStore (a bounded, display/audit log that's
+    fine to trim), this is never pruned - see the v0.37 fix in
+    async_add_entry below for why a size cap here was a real bug, not just a
+    memory-saving trim. A member's coin balance is always the sum of their
+    entries here *plus*
     storage.coins_from_task_points (the base "points earned beyond the
     weekly goal" conversion, which is derived straight from the completion
     log rather than logged here - see that function's docstring for why) -
@@ -2323,6 +2362,19 @@ class CoinLedgerStore:
 
         ``reason`` is one of the COIN_REASON_* sentinels in const.py -
         purely informational (history/debugging), nothing branches on it.
+
+        v0.37 bug fix: this used to trim to MAX_COMPLETION_LOG_ENTRIES, same
+        as CompletionLogStore. That's fine for CompletionLogStore (a bounded
+        display/audit log a member's *coin balance is deliberately no longer
+        summed from*, precisely so it's safe to trim) but was wrong here:
+        balance() sums every entry in this store, so silently dropping the
+        oldest ones once a household passed 500 lifetime bonus credits/
+        redemption debits would have quietly changed a member's spendable
+        balance - a dropped debit (redemption) effectively refunding coins
+        that were already spent, or a dropped credit (bonus) erasing coins
+        that were legitimately earned - with no user action involved.
+        Coins are meant to persist until deliberately redeemed (see
+        ws_redeem_reward below), so this ledger is never pruned.
         """
         entry = {
             CONF_ID: uuid4().hex,
@@ -2333,8 +2385,6 @@ class CoinLedgerStore:
             "created_at": dt_util.utcnow().isoformat(),
         }
         self._entries.append(entry)
-        if len(self._entries) > MAX_COMPLETION_LOG_ENTRIES:
-            self._entries = self._entries[-MAX_COMPLETION_LOG_ENTRIES:]
         await self._store.async_save(self._entries)
         return entry
 
@@ -2398,6 +2448,93 @@ class CoinSystemStateStore:
 async def async_create_coin_system_state_store(hass: HomeAssistant) -> CoinSystemStateStore:
     """Create and load the coin-system cutover-timestamp store."""
     store = CoinSystemStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class WeeklyCoinConversionStateStore:
+    """Per-member cursor: which fully-elapsed calendar weeks are already
+    converted into durable CoinLedgerStore credits.
+
+    v0.37. Before this store existed, a member's "points earned beyond the
+    weekly goal" coin balance (coins_from_task_points) was recomputed live,
+    on every refresh, straight from CompletionLogStore - for *every* week
+    since CoinSystemStateStore.started_at, not just the current one. That
+    log is intentionally bounded (MAX_COMPLETION_LOG_ENTRIES, see its
+    docstring) since it's meant as recent display/audit history, not
+    permanent financial state - but coins_from_task_points depended on it
+    staying complete forever, so once a household's old completions aged out
+    past that cap, whatever "beyond the goal" surplus they represented
+    silently vanished from every affected member's coin balance, weeks or
+    months after it was actually earned. Coins are meant to persist until a
+    member actually redeems them (see ws_redeem_reward), not shrink on their
+    own.
+
+    FamilyTasksCoordinator._async_process_weekly_coin_conversion now walks
+    every fully-elapsed week (oldest first, using this store's cursor - same
+    "catch up one member at a time, capped per refresh" shape as
+    StreakBonusStateStore) and, the first time it sees a given week has
+    ended, finalizes that week's surplus as a real CoinLedgerStore credit
+    (reason COIN_REASON_WEEKLY_CONVERSION) - from then on it lives in the
+    (never-pruned, see CoinLedgerStore) ledger forever, independent of
+    whatever later happens to the completion log. Only the *current*, still-
+    open week is still computed live from the completion log (see the
+    coins_available calculation in FamilyTasksCoordinator._async_update_data)
+    - there's nothing to finalize yet, and today's/this week's completions
+    are in no danger of having aged out of the log before the week is over.
+
+    Not a StorageCollection, coordinator-internal bookkeeping never edited by
+    the user, same as StreakBonusStateStore/MilestoneBonusStateStore.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, str]] = Store(
+            hass,
+            STORAGE_VERSION,
+            STORAGE_KEY_WEEKLY_COIN_CONVERSION_STATE,
+            minor_version=STORAGE_VERSION_MINOR,
+        )
+        # member_id -> ISO UTC datetime string: every week strictly before
+        # this one has already been converted for that member.
+        self._state: dict[str, str] = {}
+
+    async def async_load(self) -> None:
+        """Load per-member conversion cursors from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def processed_through(self, member_id: str) -> datetime | None:
+        """Return the UTC instant up to which ``member_id`` is already converted, if any."""
+        value = self._state.get(member_id)
+        return dt_util.parse_datetime(value) if value else None
+
+    async def async_set(self, member_id: str, processed_through: datetime) -> None:
+        """Persist a member's updated conversion cursor."""
+        self._state[member_id] = processed_through.isoformat()
+        await self._store.async_save(self._state)
+
+    async def async_reset(self, member_id: str | None = None) -> None:
+        """Clear conversion cursors - see SERVICE_RESET_POINTS in const.py.
+
+        ``member_id`` left unset (None) clears every member; given, only that
+        member's cursor is dropped. Paired with CoinLedgerStore.async_reset
+        and CompletionLogStore.async_reset (both called by the same
+        FamilyTasksCoordinator.async_reset_points) so a member whose points
+        history was just wiped doesn't keep a stale "already converted
+        through <date>" cursor pointing at weeks that no longer have any
+        completions behind them.
+        """
+        if member_id is None:
+            self._state = {}
+        else:
+            self._state.pop(member_id, None)
+        await self._store.async_save(self._state)
+
+
+async def async_create_weekly_coin_conversion_state_store(
+    hass: HomeAssistant,
+) -> WeeklyCoinConversionStateStore:
+    """Create and load the weekly-coin-conversion cursor store."""
+    store = WeeklyCoinConversionStateStore(hass)
     await store.async_load()
     return store
 

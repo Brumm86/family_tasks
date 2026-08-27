@@ -57,6 +57,7 @@ from .storage import (
     TaskStorageCollection,
     TriggerStateStore,
     VacationModeStateStore,
+    WeeklyCoinConversionStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_claim_state_store,
@@ -71,6 +72,7 @@ from .storage import (
     async_create_tasks_collection,
     async_create_trigger_state_store,
     async_create_vacation_mode_state_store,
+    async_create_weekly_coin_conversion_state_store,
     async_member_id_for_context,
     async_setup_websocket_api,
 )
@@ -134,6 +136,7 @@ class FamilyTasksRuntimeData:
     vacation_mode_state: VacationModeStateStore
     coin_ledger: CoinLedgerStore
     coin_system_state: CoinSystemStateStore
+    weekly_coin_conversion_state: WeeklyCoinConversionStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -160,6 +163,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     # storage.py.
     coin_ledger = await async_create_coin_ledger_store(hass)
     coin_system_state = await async_create_coin_system_state_store(hass)
+    # v0.37: see WeeklyCoinConversionStateStore in storage.py - not needed by
+    # the websocket API below, only by the coordinator's own refresh loop.
+    weekly_coin_conversion_state = await async_create_weekly_coin_conversion_state_store(hass)
 
     # The websocket CRUD API is a hass-global registration; only needed once,
     # but harmless/no-ops for a second entry since single_config_entry=True
@@ -209,6 +215,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         vacation_mode_state,
         coin_ledger,
         coin_system_state,
+        weekly_coin_conversion_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -228,6 +235,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         vacation_mode_state=vacation_mode_state,
         coin_ledger=coin_ledger,
         coin_system_state=coin_system_state,
+        weekly_coin_conversion_state=weekly_coin_conversion_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence

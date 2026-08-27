@@ -30,11 +30,13 @@ from .const import (
     COIN_REASON_MILESTONE_200,
     COIN_REASON_STREAK_150,
     COIN_REASON_STREAK_200,
+    COIN_REASON_WEEKLY_CONVERSION,
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MEMBER_NOTIFY_SERVICE,
+    CONF_MEMBER_PAUSED,
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_MILESTONE_150_BONUS_COINS,
     CONF_MILESTONE_200_BONUS_COINS,
@@ -97,6 +99,7 @@ from .storage import (
     TaskStorageCollection,
     TriggerStateStore,
     VacationModeStateStore,
+    WeeklyCoinConversionStateStore,
     coins_from_task_points,
 )
 
@@ -507,6 +510,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         vacation_mode_state: VacationModeStateStore,
         coin_ledger: CoinLedgerStore,
         coin_system_state: CoinSystemStateStore,
+        weekly_coin_conversion_state: WeeklyCoinConversionStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -529,6 +533,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # v0.36: see CoinLedgerStore/CoinSystemStateStore in storage.py.
         self.coin_ledger = coin_ledger
         self.coin_system_state = coin_system_state
+        # v0.37: see WeeklyCoinConversionStateStore in storage.py.
+        self.weekly_coin_conversion_state = weekly_coin_conversion_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -577,6 +583,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # is nothing left for it to correct.
         await self._async_process_milestone_coin_bonus(start_of_week, weekly_progress_goal_points)
         await self._async_process_streak_coin_bonus(start_of_week, weekly_progress_goal_points)
+        # v0.37: finalize every fully-elapsed week's "points beyond the
+        # weekly goal" surplus into a durable coin-ledger credit - see
+        # WeeklyCoinConversionStateStore and
+        # _async_process_weekly_coin_conversion below for why this replaces
+        # recomputing that surplus live from the (bounded) completion log for
+        # every past week on every refresh.
+        await self._async_process_weekly_coin_conversion(start_of_week, weekly_progress_goal_points)
 
         # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
         # storage.py. Read once per refresh, same pattern as
@@ -627,8 +640,33 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
             rotation = task["rotation"]
             member_ids = rotation.get("member_ids") or []
-            assigned_member_id = self._assigned_member_id(rotation, member_ids)
-            assigned_member_ids = self._assigned_member_ids(rotation, member_ids)
+            # v0.37: a member marked "paused" (CONF_MEMBER_PAUSED - away for
+            # a while, see that constant's docstring in const.py) shouldn't
+            # receive new task assignments for the duration. If *every*
+            # current assignee of a fixed/rotating task is paused, treat the
+            # whole task exactly like a household-wide Urlaubsmodus-paused
+            # one above: skipped entirely, no status entry, not due - there
+            # is nobody around to act on it anyway. member_ids being empty
+            # (an Aufgabenpool task, see is_pool_task below) never matches
+            # here (all() of an empty rotation.member_ids would otherwise be
+            # vacuously true) - a pool task stays governed purely by which
+            # *other*, non-paused members are eligible to claim it, handled
+            # separately below.
+            if member_ids and all(self._member_paused(mid) for mid in member_ids):
+                continue
+            # For a *partially* paused rotation/fixed assignment, the
+            # non-paused subset stands in for member_ids when picking who
+            # this occurrence actually belongs to - round-robin/least-points
+            # rotate only among whoever's actually around, and a fixed
+            # multi-assignee task is carried solely by its non-paused
+            # members. Falls back to the full member_ids (the branch above
+            # already ruled out "every assignee paused") only in the
+            # impossible case that filtering left nothing.
+            rotation_member_ids = [
+                mid for mid in member_ids if not self._member_paused(mid)
+            ] or member_ids
+            assigned_member_id = self._assigned_member_id(rotation, rotation_member_ids)
+            assigned_member_ids = self._assigned_member_ids(rotation, rotation_member_ids)
             # v0.30: "Aufgabenpool" - a task with no fixed assignee(s) *and*
             # no rotation at all (member_ids empty either way, regardless of
             # "strategy" - see ROTATION_SCHEMA in storage.py). Nobody is
@@ -728,6 +766,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     if (
                         other_id not in eligible_member_ids
                         and other_member.get("active", True)
+                        # v0.37: a paused member isn't offered someone else's
+                        # overdue task either - see CONF_MEMBER_PAUSED.
+                        and not self._member_paused(other_id)
                         and self._member_role(other_id) == MEMBER_ROLE_CHILD
                     ):
                         eligible_member_ids.append(other_id)
@@ -756,6 +797,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     if (
                         other_id not in eligible_member_ids
                         and other_member.get("active", True)
+                        # v0.37: a paused member isn't offered pool work
+                        # either - see CONF_MEMBER_PAUSED.
+                        and not self._member_paused(other_id)
                     ):
                         eligible_member_ids.append(other_id)
 
@@ -912,18 +956,28 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             )
             points_week = self.completions.points_since(member_id, start_of_week)
             # v0.36: coins_available replaces the old spendable_points minus
-            # redeemed_points computation entirely - coins_from_task_points
-            # already only counts points earned beyond the weekly goal since
-            # the v0.36 cutover, and self.coin_ledger.balance nets out every
-            # bonus credit *and* every past redemption debit on its own (see
-            # ws_redeem_reward in storage.py, which appends the debit at
-            # redemption time) - see MemberSummaryData.coins_available's
-            # docstring.
+            # redeemed_points computation entirely - self.coin_ledger.balance
+            # nets out every bonus credit *and* every past redemption debit
+            # on its own (see ws_redeem_reward in storage.py, which appends
+            # the debit at redemption time) - see
+            # MemberSummaryData.coins_available's docstring.
+            #
+            # v0.37: coins_from_task_points here is now scoped to *only* the
+            # still-open current week (since=max(coin_system_state.started_at,
+            # start_of_week), rather than the full history since started_at)
+            # - every fully-elapsed week's surplus has already been finalized
+            # into self.coin_ledger by _async_process_weekly_coin_conversion
+            # above, so counting it again here would double it. The current
+            # week's own surplus isn't in the ledger yet (it can't be judged
+            # until the week is over - see that method), so it's still
+            # computed live from the completion log, same as before; unlike
+            # a past week, there's no risk of *this* week's completions
+            # having already aged out of that log by the time this runs.
             coins_available = coins_from_task_points(
                 self.completions,
                 member_id,
                 weekly_progress_goal_points,
-                self.coin_system_state.started_at,
+                max(self.coin_system_state.started_at, start_of_week),
             ) + self.coin_ledger.balance(member_id)
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
@@ -1442,6 +1496,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         member = self.members.data.get(member_id)
         return member.get("role", MEMBER_ROLE_PARENT) if member else MEMBER_ROLE_PARENT
 
+    def _member_paused(self, member_id: str) -> bool:
+        """Whether a member is currently "paused" - see CONF_MEMBER_PAUSED in const.py."""
+        member = self.members.data.get(member_id)
+        return bool(member and member.get(CONF_MEMBER_PAUSED, False))
+
     def _assigned_member_id(self, rotation: dict, member_ids: list[str]) -> str | None:
         """Return who a task's next/current occurrence is assigned to.
 
@@ -1784,8 +1843,12 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         )
 
         for member_id, member in self.members.data.items():
-            if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or not member.get(
-                "active", True
+            if (
+                not member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                or not member.get("active", True)
+                # v0.37: paused (temporarily away) is excluded here too -
+                # see CONF_MEMBER_PAUSED.
+                or member.get(CONF_MEMBER_PAUSED, False)
             ):
                 continue
             points_week = self.completions.points_since(member_id, start_of_week)
@@ -1871,8 +1934,12 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 continue
             target_points = round(goal_points * percent / 100)
             for member_id, member in self.members.data.items():
-                if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or not member.get(
-                    "active", True
+                if (
+                    not member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                    or not member.get("active", True)
+                    # v0.37: paused (temporarily away) is excluded here too -
+                    # see CONF_MEMBER_PAUSED.
+                    or member.get(CONF_MEMBER_PAUSED, False)
                 ):
                     continue
                 await self._async_process_member_streak_tier(
@@ -1944,18 +2011,114 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if weeks_processed:
             await self.streak_bonus_state.async_set(member_id, tier, cursor, streak_count)
 
+    async def _async_process_weekly_coin_conversion(
+        self, start_of_week: datetime, goal_points: int
+    ) -> None:
+        """Finalize every member's fully-elapsed weeks into durable coin credits.
+
+        See WeeklyCoinConversionStateStore/COIN_REASON_WEEKLY_CONVERSION in
+        const.py for why this exists - in short, coins_from_task_points used
+        to be recomputed live from CompletionLogStore for every week since
+        the coin system started, which quietly lost old weeks' surplus once
+        their completions aged out of that (intentionally bounded) log. Once
+        a week is over, its surplus is credited here instead, exactly once,
+        and lives in CoinLedgerStore (never pruned) from then on - only the
+        still-open current week keeps being computed live (see
+        coins_available in _async_update_data above).
+
+        Unlike the Meilenstein-/Streak-coin bonuses, there is no
+        enabled/amount check to gate this on - the base points-to-coins
+        conversion always applies, the same as it unconditionally did before
+        this method existed.
+        """
+        since = self.coin_system_state.started_at
+        for member_id in self.members.data:
+            await self._async_process_member_weekly_coin_conversion(
+                member_id, start_of_week, goal_points, since
+            )
+
+    async def _async_process_member_weekly_coin_conversion(
+        self,
+        member_id: str,
+        start_of_week: datetime,
+        goal_points: int,
+        since: datetime,
+    ) -> None:
+        """Catch up one member's weekly-coin-conversion cursor through every elapsed week.
+
+        Weeks are walked Monday-to-Monday (local time), same boundary
+        coins_from_task_points itself buckets by and start_of_week already
+        uses - starting from whichever is later: the cursor's last processed
+        week, or the calendar week ``since`` (the coin system's cutover
+        instant) falls in. A week's own point total is clamped to not
+        include anything before ``since`` (points_between(max(week_start,
+        since), week_end)), same "a week straddling the cutover slightly
+        undercounts" one-time edge case coins_from_task_points' docstring
+        already accepts - everything *after* the cutover is unaffected.
+
+        Each week's surplus (points beyond ``goal_points``, or the week's
+        full total if no goal is configured - mirrors coins_from_task_points'
+        two branches) is floored at 0 individually before being credited, so
+        one week with more manual-deduction penalties than points earned can
+        never eat into coins a *different*, already-finalized week legitimately
+        earned - slightly more conservative than the pre-v0.37 lifetime-sum
+        behaviour for the no-goal-configured case, and intentionally so.
+
+        Capped at 104 weeks per refresh, same reasoning as
+        _async_process_member_streak_tier's cap: a household offline for a
+        very long time (or upgrading long after the coin system's cutover)
+        still ends up correct, just caught up over a few extra refreshes
+        instead of one long blocking loop.
+        """
+        local_since = dt_util.as_local(since)
+        since_week_start = dt_util.as_utc(
+            dt_util.start_of_local_day(local_since) - timedelta(days=local_since.weekday())
+        )
+        cursor = self.weekly_coin_conversion_state.processed_through(member_id)
+        if cursor is None or cursor < since_week_start:
+            cursor = since_week_start
+
+        weeks_processed = 0
+        while cursor < start_of_week and weeks_processed < 104:
+            week_end = cursor + timedelta(days=7)
+            week_points = self.completions.points_between(member_id, max(cursor, since), week_end)
+            surplus = max(0, week_points - goal_points) if goal_points > 0 else max(0, week_points)
+            if surplus > 0:
+                await self.coin_ledger.async_add_entry(
+                    member_id=member_id,
+                    amount=surplus,
+                    reason=COIN_REASON_WEEKLY_CONVERSION,
+                    note=(
+                        f"Wochenabschluss {dt_util.as_local(cursor).date().isoformat()}: "
+                        f"{surplus} Punkt(e) in Münzen umgewandelt"
+                    ),
+                )
+                _LOGGER.debug(
+                    "Converted %s point(s) beyond the weekly goal to coin(s) for %s, "
+                    "week of %s",
+                    surplus,
+                    member_id,
+                    dt_util.as_local(cursor).date().isoformat(),
+                )
+            cursor = week_end
+            weeks_processed += 1
+
+        if weeks_processed:
+            await self.weekly_coin_conversion_state.async_set(member_id, cursor)
+
     async def async_reset_points(self, member_id: str | None = None) -> None:
         """Reset stored *points* data - see SERVICE_RESET_POINTS in const.py.
 
         Clears the completion log (points_total/points_week/.../history),
         reward redemptions, the coin ledger (v0.36 - milestone/streak coin
-        bonuses and past redemption debits alike, so coins_available is no
-        longer reduced by past purchases either), and the Meilenstein-/
-        Streak-Bonus tracking state. Task and member *definitions* and the
-        reward catalog itself are left completely untouched - this only ever
-        resets *earned/spent points and coins*, never the household's setup.
-        ``member_id`` left unset (None) resets every member at once; given,
-        only that member's data is cleared.
+        bonuses, weekly-conversion credits (v0.37), and past redemption
+        debits alike, so coins_available is no longer reduced by past
+        purchases either), and the Meilenstein-/Streak-Bonus/weekly-coin-
+        conversion (v0.37) tracking state. Task and member *definitions* and
+        the reward catalog itself are left completely untouched - this only
+        ever resets *earned/spent points and coins*, never the household's
+        setup. ``member_id`` left unset (None) resets every member at once;
+        given, only that member's data is cleared.
         """
         await self.completions.async_reset(member_id)
         for redemption_id, redemption in list(self.reward_redemptions.data.items()):
@@ -1964,6 +2127,12 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self.coin_ledger.async_reset(member_id)
         await self.milestone_bonus_state.async_reset(member_id)
         await self.streak_bonus_state.async_reset(member_id)
+        # v0.37: without this, a member whose completion history was just
+        # wiped would keep a stale "already converted through <date>" cursor
+        # pointing at weeks that no longer have any completions behind them,
+        # instead of those weeks being (correctly, now that they're empty)
+        # re-judged as contributing 0 coins next refresh.
+        await self.weekly_coin_conversion_state.async_reset(member_id)
         _LOGGER.info("Reset points data for %s", member_id or "every member")
         await self.async_request_refresh()
 
