@@ -27,10 +27,12 @@ from .const import (
     CARD_FILENAME,
     CARD_URL_PATH,
     CONF_MEMBER_NOTIFY_SERVICE,
+    CONF_MEMBER_PAUSED,
     CONF_VACATION_MODE_DEFAULT,
     DEFAULT_VACATION_MODE,
     DOMAIN,
     EVENT_TASK_ASSIGNED,
+    EVENT_TASK_POOL_ADDED,
     PLATFORMS,
     SERVICE_CLAIM_TASK,
     SERVICE_COMPLETE_TASK,
@@ -303,9 +305,16 @@ def _get_coordinator(hass: HomeAssistant) -> FamilyTasksCoordinator:
 
 
 async def _async_notify_member(
-    hass: HomeAssistant, member_id: str, member: dict, task_id: str, task_name: str
+    hass: HomeAssistant,
+    member_id: str,
+    member: dict,
+    task_id: str,
+    task_name: str,
+    *,
+    message: str | None = None,
+    event_type: str = EVENT_TASK_ASSIGNED,
 ) -> None:
-    """Best-effort notify one member that a new task now involves them.
+    """Best-effort notify one member about a new task.
 
     Two channels, same reasoning as CONF_MEMBER_NOTIFY_SERVICE in const.py -
     but only one of them ever fires for a given member (v0.16 change): a
@@ -319,13 +328,18 @@ async def _async_notify_member(
     complaint this fixes - once push is set up for someone, Home Assistant's
     own notification list should stay quiet for them. A member with no
     notify_service still gets the persistent_notification as before, since
-    that's the only channel they have. EVENT_TASK_ASSIGNED fires
-    unconditionally on top either way, for a household that wants to react
-    some other way entirely (same extension-point pattern as
-    EVENT_REWARD_REDEEMED).
+    that's the only channel they have. ``event_type`` fires unconditionally
+    on top either way, for a household that wants to react some other way
+    entirely (same extension-point pattern as EVENT_REWARD_REDEEMED).
+
+    ``message``/``event_type`` (v0.39): let a caller other than "you were
+    assigned a task" (see EVENT_TASK_POOL_ADDED below) reuse the exact same
+    two-channel delivery instead of duplicating it - default to the original
+    "Neue Aufgabe: ..." wording and EVENT_TASK_ASSIGNED so every existing
+    call site is unaffected.
     """
     title = "Family Tasks"
-    message = f"Neue Aufgabe: {task_name}"
+    message = message or f"Neue Aufgabe: {task_name}"
 
     notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
     if notify_service:
@@ -344,7 +358,7 @@ async def _async_notify_member(
             _LOGGER.warning("Failed to raise persistent notification for %s: %s", member_id, err)
 
     hass.bus.async_fire(
-        EVENT_TASK_ASSIGNED,
+        event_type,
         {
             "member_id": member_id,
             "member_name": member.get("name"),
@@ -355,7 +369,7 @@ async def _async_notify_member(
 
 
 def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStorageCollection):
-    """Build a tasks change-set listener that notifies newly assigned members.
+    """Build a tasks change-set listener that notifies about a new task.
 
     Registered alongside the other family_tasks.task change-set listeners in
     async_setup_entry (see tasks.async_add_change_set_listener below) -
@@ -364,6 +378,17 @@ def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStora
     both go through TaskStorageCollection.async_create_item the same way.
     Only "added" changes are notified - an edit that merely changes who a
     task is assigned to isn't treated as "a new task" here.
+
+    A task with fixed/rotating assignee(s) notifies exactly those members, as
+    before. v0.39: a task with *no* assignee at all - an "Aufgabenpool" task,
+    see is_pool_task in coordinator.py - used to notify nobody, so the only
+    way to learn about one was to happen to open the card's "Aufgabenpool"
+    section. Every active, non-paused member is now notified instead, since
+    any of them could be the one to claim it (see eligible_member_ids for a
+    pool task in FamilyTasksCoordinator._async_update_data) - excluding an
+    auto-generated parent-confirmation task (item.get("confirms") set),
+    which also has no member_ids but is never something a member "claims",
+    the same way is_pool_task excludes it.
     """
 
     async def _listener(change_sets) -> None:
@@ -372,9 +397,23 @@ def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStora
                 continue
             item = change.item
             member_ids = (item.get("rotation") or {}).get("member_ids") or []
-            if not member_ids:
-                continue
             task_name = item.get("name", "Aufgabe")
+            if not member_ids:
+                if item.get("confirms"):
+                    continue
+                for member_id, member in members.data.items():
+                    if not member.get("active", True) or member.get(CONF_MEMBER_PAUSED, False):
+                        continue
+                    await _async_notify_member(
+                        hass,
+                        member_id,
+                        member,
+                        item.get("id", ""),
+                        task_name,
+                        message=f"Neue Aufgabe im Aufgabenpool: {task_name}",
+                        event_type=EVENT_TASK_POOL_ADDED,
+                    )
+                continue
             for member_id in member_ids:
                 member = members.data.get(member_id)
                 if not member or not member.get("active", True):

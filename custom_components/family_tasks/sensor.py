@@ -110,12 +110,14 @@ class FamilyTasksTaskStatusSensor(
             # alongside the trigger definition.
             "trigger_sensor_value": task.trigger_sensor_value,
             "trigger_sensor_unit": task.trigger_sensor_unit,
-            # Only non-empty for a TASK_KIND_CHECKLIST task: every sub-item
-            # with its current checked state, as {id, name, checked}.
+            # Only non-empty for a task that has a checklist (no longer tied
+            # to a "kind" of its own since v0.39 - see TASK_KIND_CHECKLIST in
+            # const.py): every sub-item with its current checked state, as
+            # {id, name, checked}.
             "subtasks": task.subtasks,
-            # standard / checklist / mandatory (v0.14) - see TASK_KINDS in
-            # const.py, lets an automation identify a "Pflichtaufgabe"
-            # without needing the raw stored task object.
+            # standard / mandatory (v0.14) - see TASK_KINDS in const.py, lets
+            # an automation identify a "Pflichtaufgabe" without needing the
+            # raw stored task object.
             "kind": task.kind,
             # v0.22: only set for a task a "child" member created for
             # themselves - see CONF_TASK_CREATED_BY_MEMBER_ID in const.py.

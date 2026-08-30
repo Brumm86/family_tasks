@@ -74,7 +74,6 @@ from .const import (
     ROTATION_STRATEGY_LEAST_POINTS,
     ROTATION_STRATEGY_RANDOM,
     ROTATION_STRATEGY_ROUND_ROBIN,
-    TASK_KIND_CHECKLIST,
     TASK_KIND_MANDATORY,
     TASK_KIND_STANDARD,
     TASK_STATUS_AWAITING_CONFIRMATION,
@@ -128,16 +127,16 @@ class TaskStatusData:
     assigned_member_id: str | None
     last_completed_by: str | None = None
     last_completed_at: datetime | None = None
-    # v0.27: due_at plus the task's Karenzzeit (overdue_after_minutes) - the
-    # actual clock moment this occurrence flips from pending to
-    # TASK_STATUS_OVERDUE (see the `now > due_at + overdue_after` check in
-    # _async_update_data). Previously that Karenzzeit only ever existed as an
-    # internal minutes value used to compute the overdue *status*; this
-    # exposes the resulting deadline itself as a real timestamp so the card
-    # can show each task's "Zu erledigen bis HH:MM" instead of the parent
-    # having to work it out by hand from the Karenzzeit setting. None
-    # wherever due_at itself is None (recurrence "trigger"/"confirmation"
-    # with no open occurrence yet).
+    # v0.27: the actual clock moment this occurrence flips from pending to
+    # TASK_STATUS_OVERDUE (see the `now > deadline_at` check and
+    # _deadline_at() in _async_update_data) - since v0.39 usually the task's
+    # own absolute "Überfällig ab" time-of-day (task["overdue_time"]) on the
+    # period's date, falling back to the legacy Karenzzeit *duration*
+    # (overdue_after_minutes) added to due_at for a task that predates that
+    # field. Exposed as a real timestamp so the card can show each task's
+    # "Zu erledigen bis HH:MM" without working it out by hand. None wherever
+    # due_at itself is None (recurrence "trigger"/"confirmation" with no open
+    # occurrence yet).
     deadline_at: datetime | None = None
     # v0.27: "Annehmen" reservation state - see ClaimStateStore in storage.py
     # and FamilyTasksCoordinator.async_claim_task/_async_expire_claim. While
@@ -204,7 +203,9 @@ class TaskStatusData:
     # instead of just the entity_id.
     trigger_sensor_value: str | None = None
     trigger_sensor_unit: str | None = None
-    # Only populated for a TASK_KIND_CHECKLIST task: every sub-item with its
+    # Only populated for a task that has a checklist (task["subtasks"] is
+    # non-empty - see const.py's "Task kinds / checklists" section; no longer
+    # tied to a "kind" of its own since v0.39): every sub-item with its
     # current checked state for this period, as dicts {id, name, checked} -
     # see FamilyTasksCoordinator.async_toggle_subtask.
     subtasks: list[dict] = field(default_factory=list)
@@ -390,8 +391,17 @@ class FamilyTasksData:
     pool_tasks_open: int = 0
 
 
-def _current_period_date(recurrence: dict, today: date) -> date:
-    """Return the date identifying the current occurrence's period."""
+def _current_period_date(recurrence: dict, today: date, created_at: date | None = None) -> date:
+    """Return the date identifying the current occurrence's period.
+
+    ``created_at`` (v0.39): the date the task itself was created, if known -
+    ``None`` for a task saved before this field existed. Only affects a
+    "weekly" recurrence: without it, a task created e.g. on a Sunday for a
+    Monday-only schedule would resolve to *last* Monday (the most recent
+    matching weekday) - a date before the task ever existed - and show up
+    immediately as overdue, even though it has never actually had a chance
+    to be completed. See the v0.39 CHANGELOG entry.
+    """
     rtype = recurrence["type"]
 
     if rtype == "daily" or rtype == RECURRENCE_BATTERY:
@@ -404,6 +414,20 @@ def _current_period_date(recurrence: dict, today: date) -> date:
         weekdays = recurrence.get("weekdays") or [0]
         for offset in range(7):
             candidate = today - timedelta(days=offset)
+            if candidate.weekday() in weekdays and (
+                created_at is None or candidate >= created_at
+            ):
+                return candidate
+        # Every matching weekday found by the backward search predates the
+        # task's own creation (or "today" itself is before created_at,
+        # e.g. clock skew) - this task's first-ever occurrence hasn't
+        # happened yet. Look *forward* instead of falling back to "today"
+        # (which might not even be a matching weekday), starting from
+        # whichever of today/created_at is later, so the first period a
+        # brand-new task resolves to is its *next* matching weekday.
+        search_from = max(today, created_at) if created_at else today
+        for offset in range(1, 8):
+            candidate = search_from + timedelta(days=offset)
             if candidate.weekday() in weekdays:
                 return candidate
         return today
@@ -425,7 +449,7 @@ def _current_period_date(recurrence: dict, today: date) -> date:
     return today
 
 
-def _pool_period_date(recurrence: dict, today: date) -> date:
+def _pool_period_date(recurrence: dict, today: date, created_at: date | None = None) -> date:
     """Like _current_period_date, but for an "Aufgabenpool" task (see below).
 
     Only differs for recurrence type "weekly": _current_period_date always
@@ -441,15 +465,23 @@ def _pool_period_date(recurrence: dict, today: date) -> date:
     section, and a child should be able to reserve one as soon as the week
     starts, not only once its weekday is already here.
 
-    Bounded to the *current* calendar week (Monday-Sunday, the same
+    Normally bounded to the *current* calendar week (Monday-Sunday, the same
     boundary start_of_week uses): prefers the most recent matching weekday
     within this week if one has already occurred (today included), and
     otherwise looks *forward* to the earliest still-upcoming matching
-    weekday later this same week - never reaching back into a previous week
-    the way _current_period_date's unbounded backward search would.
+    weekday - never reaching back into a previous week the way
+    _current_period_date's unbounded backward search would. ``created_at``
+    (v0.39, see _current_period_date) excludes any candidate before the
+    task's own creation date from that backward search - a task created on,
+    say, a Sunday for a Monday-only schedule then has no matching weekday
+    left *this* week at all (Monday already happened before it existed, and
+    there are no more matching days before Sunday, the last day of the
+    week), so the forward search below is no longer bounded to the rest of
+    the current week either in that case, and instead looks into the
+    following week(s) as needed.
     """
     if recurrence["type"] != "weekly":
-        return _current_period_date(recurrence, today)
+        return _current_period_date(recurrence, today, created_at)
 
     weekdays = recurrence.get("weekdays") or [0]
     week_start = today - timedelta(days=today.weekday())
@@ -457,14 +489,15 @@ def _pool_period_date(recurrence: dict, today: date) -> date:
     latest_so_far: date | None = None
     for offset in range(today.weekday() + 1):  # Monday of this week .. today
         candidate = week_start + timedelta(days=offset)
-        if candidate.weekday() in weekdays:
+        if candidate.weekday() in weekdays and (created_at is None or candidate >= created_at):
             latest_so_far = candidate
     if latest_so_far is not None:
         return latest_so_far
 
-    for offset in range(today.weekday() + 1, 7):  # tomorrow .. Sunday of this week
-        candidate = week_start + timedelta(days=offset)
-        if candidate.weekday() in weekdays:
+    search_from = max(today, created_at) if created_at else today
+    for offset in range(1, 15):  # up to two weeks out - a weekly match is always within 7
+        candidate = search_from + timedelta(days=offset)
+        if candidate.weekday() in weekdays and (created_at is None or candidate >= created_at):
             return candidate
 
     return today
@@ -496,6 +529,36 @@ def _due_at(period_start: date, due_time: str | None) -> datetime:
         naive = datetime.combine(period_start, datetime.max.time().replace(microsecond=0))
     # as_utc treats a naive datetime as being in the configured local time zone.
     return dt_util.as_utc(naive)
+
+
+def _deadline_at(due_at: datetime, period_start: date, task: dict) -> datetime:
+    """Return the datetime after which an occurrence counts as overdue.
+
+    v0.39: the card's task form now sets an absolute "Überfällig ab"
+    time-of-day (``task["overdue_time"]``, same "HH:MM" shape as
+    ``due_time``) instead of a "Karenzzeit" grace-period *duration*
+    (``task["overdue_after_minutes"]``) - see the CHANGELOG entry. A task
+    saved before this version (or never re-saved since) has no
+    ``overdue_time`` at all, so it keeps behaving exactly as before:
+    ``due_at`` plus its stored (or the default) grace-period duration.
+
+    If a stored ``overdue_time`` would land *before* ``due_at`` on the same
+    date (e.g. due at 20:00 but "overdue_time" is 08:00 - not achievable via
+    the card's own form, which only offers a time on/after due_time, but
+    reachable via the websocket API directly, or a due_time edited after the
+    fact), the deadline rolls to the next day instead of claiming an
+    occurrence was already overdue before it was even due.
+    """
+    overdue_time = task.get("overdue_time")
+    if overdue_time:
+        deadline = _due_at(period_start, overdue_time)
+        if deadline < due_at:
+            deadline += timedelta(days=1)
+        return deadline
+    overdue_after = timedelta(
+        minutes=task.get("overdue_after_minutes", DEFAULT_OVERDUE_AFTER_MINUTES)
+    )
+    return due_at + overdue_after
 
 
 class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
@@ -652,9 +715,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 continue
 
             recurrence = task["recurrence"]
-            overdue_after = timedelta(
-                minutes=task.get("overdue_after_minutes", DEFAULT_OVERDUE_AFTER_MINUTES)
-            )
+            # v0.39: the date this task definition was created, if known (see
+            # TaskStorageCollection._process_create_data in storage.py) - a
+            # task saved before this field existed has none, and every
+            # period-date/overdue computation below treats that exactly like
+            # before (see _current_period_date/_pool_period_date).
+            created_at_raw = task.get("created_at")
+            created_date: date | None = None
+            if created_at_raw:
+                parsed_created_at = dt_util.parse_datetime(created_at_raw)
+                if parsed_created_at is not None:
+                    created_date = dt_util.as_local(parsed_created_at).date()
 
             rotation = task["rotation"]
             member_ids = rotation.get("member_ids") or []
@@ -739,21 +810,28 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     continue
                 period_key = open_occurrence["period_key"]
                 due_at = dt_util.parse_datetime(open_occurrence["triggered_at"])
+                # A trigger/confirmation occurrence's "period" is whenever it
+                # was actually triggered, not a calendar period_start - use
+                # that same date as the reference day for combining with an
+                # absolute overdue_time below (see _deadline_at).
+                period_start = dt_util.as_local(due_at).date()
             else:
                 period_start = (
-                    _pool_period_date(recurrence, today)
+                    _pool_period_date(recurrence, today, created_date)
                     if is_pool_task
-                    else _current_period_date(recurrence, today)
+                    else _current_period_date(recurrence, today, created_date)
                 )
                 period_key = period_start.isoformat()
                 due_at = _due_at(period_start, task.get("due_time"))
+
+            deadline_at = _deadline_at(due_at, period_start, task)
 
             last_entry = self.completions.get_last_entry(task_id, period_key)
             if last_entry is not None:
                 status = TASK_STATUS_DONE
             elif (task_id, period_key) in pending_confirmations:
                 status = TASK_STATUS_AWAITING_CONFIRMATION
-            elif now > due_at + overdue_after:
+            elif now > deadline_at:
                 status = TASK_STATUS_OVERDUE
             else:
                 status = TASK_STATUS_PENDING
@@ -836,7 +914,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             claim_expires_at: datetime | None = None
             claimable = (
                 not task.get("confirms")
-                and task.get("kind") != TASK_KIND_CHECKLIST
+                and not task.get("subtasks")
                 and status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE)
                 and len(eligible_member_ids) > 1
             )
@@ -907,7 +985,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 pool_tasks_open += 1
 
             subtasks_status: list[dict] = []
-            if task.get("kind") == TASK_KIND_CHECKLIST:
+            if task.get("subtasks"):
                 checked_ids = self.checklist_state.checked_ids(task_id, period_key)
                 subtasks_status = [
                     {"id": s["id"], "name": s["name"], "checked": s["id"] in checked_ids}
@@ -943,7 +1021,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 task.get("kind") == TASK_KIND_MANDATORY
                 and status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE)
                 and due_at is not None
-                and now > due_at + overdue_after
+                and now > deadline_at
             ):
                 # See MemberSummaryData.screen_time_grant_active: an overdue
                 # mandatory task pauses tick-based screen-time granting for
@@ -959,7 +1037,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 status=status,
                 period_key=period_key,
                 due_at=due_at,
-                deadline_at=due_at + overdue_after if due_at else None,
+                deadline_at=deadline_at,
                 assigned_member_id=assigned_member_id,
                 assigned_member_ids=assigned_member_ids,
                 eligible_member_ids=eligible_member_ids,
@@ -1439,7 +1517,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             return
 
         task = self.tasks.data[task_id]
-        if task.get("confirms") or task.get("kind") == TASK_KIND_CHECKLIST:
+        if task.get("confirms") or task.get("subtasks"):
             return
 
         period_key = self._current_period_key(task_id, task)
@@ -2225,7 +2303,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     async def async_toggle_subtask(
         self, task_id: str, subtask_id: str, member_id: str | None = None
     ) -> None:
-        """Check/uncheck one sub-item of a TASK_KIND_CHECKLIST task.
+        """Check/uncheck one sub-item of a task's checklist.
 
         Mirrors async_handle_sensor_trigger: the "is this task now done"
         decision is made right here, immediately after the toggle, instead of
@@ -2243,8 +2321,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
 
         task = self.tasks.data[task_id]
-        if task.get("kind") != TASK_KIND_CHECKLIST:
-            raise HomeAssistantError(f"Task '{task_id}' is not a checklist task")
+        if not task.get("subtasks"):
+            raise HomeAssistantError(f"Task '{task_id}' has no checklist")
 
         subtasks = task.get("subtasks", [])
         if not any(s["id"] == subtask_id for s in subtasks):

@@ -139,16 +139,18 @@
  * role, and (unlike hide_not_due_tasks) starts hidden by default - see
  * hide_completed_tasks above and _hideCompleted in the constructor.
  *
- * Task types: a task defaults to a single "Erledigt" action. Setting
- * "Aufgabentyp" to "Checkliste" instead gives it an open-ended list of named
+ * Task types: a task defaults to a single "Erledigt" action. Any task -
+ * "Standard" or "Pflichtaufgabe" alike - can *optionally* also carry a
+ * checklist (v0.8; no longer a separate "Aufgabentyp" of its own since v0.39
+ * - see TASK_KIND_CHECKLIST in const.py): an open-ended list of named
  * sub-items (e.g. "Kofferpacken" with one sub-item per thing to pack) that
  * get checked off individually - checked items render struck-through - and
  * the task itself only becomes "Erledigt" once every sub-item is checked for
- * the current period; the manual "Erledigt" button is disabled for these
- * (see FamilyTasksCoordinator.async_toggle_subtask in coordinator.py). A
- * "child" member creating a task for themselves (see below) can also pick
- * "Checkliste" (v0.8) - the same self-service restrictions apply (no points,
- * assigned only to themselves).
+ * the current period; the manual "Erledigt" button is disabled whenever a
+ * task has any subtasks at all (see FamilyTasksCoordinator.async_toggle_subtask
+ * in coordinator.py). A "child" member creating a task for themselves (see
+ * below) can add a checklist too - the same self-service restrictions apply
+ * (no points, assigned only to themselves).
  *
  * Editing a task (admin) or adding one's own task (child) opens in a modal
  * dialog (v0.8, native <dialog>/showModal) instead of being inlined into the
@@ -671,6 +673,14 @@
       // still empty - see _applyFieldChange's due_time branch for the fix.
       _dueTimeHour: "",
       _dueTimeMinute: "",
+      // v0.39: "Überfällig ab" - an absolute time-of-day, same shape/fallback
+      // pattern as due_time above, replacing the old "Karenz (Min.)" number
+      // field (overdue_after_minutes, still kept below purely so a task
+      // saved before this version round-trips unchanged until it's next
+      // edited - see TASK_UPDATE_SCHEMA in storage.py).
+      overdue_time: "",
+      _overdueTimeHour: "",
+      _overdueTimeMinute: "",
       overdue_after_minutes: 60,
       requires_confirmation: true,
       kind: "standard",
@@ -711,6 +721,10 @@
       // v0.31: see the matching comment in emptyTaskForm above.
       _dueTimeHour: "",
       _dueTimeMinute: "",
+      // v0.39: see the matching comment in emptyTaskForm above.
+      overdue_time: "",
+      _overdueTimeHour: "",
+      _overdueTimeMinute: "",
       overdue_after_minutes: 60,
       requires_confirmation: true,
       kind: "standard",
@@ -749,9 +763,18 @@
       // the user starts changing the selection.
       _dueTimeHour: "",
       _dueTimeMinute: "",
+      // v0.39: see the matching comment in emptyTaskForm above.
+      overdue_time: task.overdue_time ?? "",
+      _overdueTimeHour: "",
+      _overdueTimeMinute: "",
       overdue_after_minutes: task.overdue_after_minutes ?? 60,
       requires_confirmation: task.requires_confirmation ?? true,
-      kind: task.kind ?? "standard",
+      // v0.39: "checklist" is no longer a selectable "Aufgabentyp" (see
+      // TASK_KIND_CHECKLIST in const.py) - a task saved with that legacy
+      // kind normalizes to "standard" for editing purposes, its subtasks
+      // carrying over unchanged, and the next save persists that
+      // normalization (kind: "standard") automatically.
+      kind: task.kind === "checklist" ? "standard" : task.kind ?? "standard",
       subtasks: (task.subtasks ?? []).map((s) => ({ ...s })),
       completion_button_entity_id: task.completion_button_entity_id ?? "",
       // v0.32: see the matching comment in emptyTaskForm above.
@@ -850,7 +873,8 @@
       points: favorite?.points ?? 0,
       icon: favorite?.icon ?? "",
       member_ids: [...(favorite?.member_ids ?? [])],
-      kind: favorite?.kind ?? "standard",
+      // v0.39: see the matching comment in taskToForm above.
+      kind: favorite?.kind === "checklist" ? "standard" : favorite?.kind ?? "standard",
       subtasks: (favorite?.subtasks ?? []).map((s) => ({ ...s })),
     };
   }
@@ -1561,14 +1585,6 @@
       const form = this._taskForm;
       if (!form.name.trim()) return;
 
-      if (form.kind === "checklist") {
-        const names = form.subtasks.map((s) => s.name.trim()).filter(Boolean);
-        if (!names.length) {
-          alert("Bitte mindestens eine Unteraufgabe für die Checkliste angeben.");
-          return;
-        }
-      }
-
       const recurrence = { type: form.recurrence.type };
       if (form.recurrence.type === "weekly") {
         recurrence.weekdays = form.recurrence.weekdays.length ? form.recurrence.weekdays : [0];
@@ -1615,17 +1631,25 @@
           only_children: form.rotation.strategy === "least_points" ? !!form.rotation.only_children : false,
         },
         requires_confirmation: !!form.requires_confirmation,
-        kind: form.kind === "checklist" || form.kind === "mandatory" ? form.kind : "standard",
+        kind: form.kind === "mandatory" ? "mandatory" : "standard",
+        // v0.39: a checklist is now an optional add-on on any task kind (see
+        // TASK_KIND_CHECKLIST in const.py) rather than a kind of its own -
+        // always sent, empty or not (an empty list just means "no
+        // checklist, plain Erledigt-Aktion").
+        subtasks: form.subtasks
+          .map((s) => ({ id: s.id, name: s.name.trim() }))
+          .filter((s) => s.name),
         // v0.32: see CONF_TASK_VACATION_BEHAVIOR in const.py.
         vacation_behavior: form.vacation_paused ? "pause" : "show",
       };
-      if (form.kind === "checklist") {
-        payload.subtasks = form.subtasks
-          .map((s) => ({ id: s.id, name: s.name.trim() }))
-          .filter((s) => s.name);
-      }
       if (form.icon) payload.icon = form.icon.trim();
       if (form.due_time) payload.due_time = form.due_time;
+      // v0.39: "Überfällig ab" - see emptyTaskForm's overdue_time comment.
+      // Left unset (rather than forcing a value) when the admin doesn't set
+      // one - the coordinator then falls back to the legacy
+      // overdue_after_minutes grace period below, same as a task saved
+      // before this version.
+      if (form.overdue_time) payload.overdue_time = form.overdue_time;
       if (form.overdue_after_minutes !== "") {
         payload.overdue_after_minutes = Math.max(0, Number(form.overdue_after_minutes) || 0);
       }
@@ -1651,19 +1675,11 @@
       // Restricted create path for a "child" member adding a task for
       // themselves: no admin rights needed, but no points and no choice of
       // assignee either - the backend forces both (see ws_create_own_task /
-      // family_tasks/task/create_own in storage.py). A checklist kind is
-      // allowed too (v0.8), same "at least one named sub-item" rule as the
-      // admin task form.
+      // family_tasks/task/create_own in storage.py). A checklist is
+      // optional here too (v0.8; no longer its own "kind" since v0.39 - see
+      // TASK_KIND_CHECKLIST in const.py), same as the admin task form.
       const form = this._ownTaskForm;
       if (!form.name.trim()) return;
-
-      if (form.kind === "checklist") {
-        const names = form.subtasks.map((s) => s.name.trim()).filter(Boolean);
-        if (!names.length) {
-          alert("Bitte mindestens eine Unteraufgabe für die Checkliste angeben.");
-          return;
-        }
-      }
 
       const recurrence = { type: form.recurrence.type };
       if (form.recurrence.type === "weekly") {
@@ -1679,15 +1695,13 @@
         name: form.name.trim(),
         recurrence,
         requires_confirmation: !!form.requires_confirmation,
-        kind: form.kind === "checklist" ? "checklist" : "standard",
-      };
-      if (form.kind === "checklist") {
-        payload.subtasks = form.subtasks
+        subtasks: form.subtasks
           .map((s) => ({ id: s.id, name: s.name.trim() }))
-          .filter((s) => s.name);
-      }
+          .filter((s) => s.name),
+      };
       if (form.icon) payload.icon = form.icon.trim();
       if (form.due_time) payload.due_time = form.due_time;
+      if (form.overdue_time) payload.overdue_time = form.overdue_time;
       if (form.overdue_after_minutes !== "") {
         payload.overdue_after_minutes = Math.max(0, Number(form.overdue_after_minutes) || 0);
       }
@@ -1996,23 +2010,15 @@
     async _saveFavorite() {
       const f = this._favoriteForm;
       if (!f.name.trim()) return;
-      if (f.kind === "checklist") {
-        const names = f.subtasks.map((s) => s.name.trim()).filter(Boolean);
-        if (!names.length) {
-          alert("Bitte mindestens eine Unteraufgabe für die Checkliste angeben.");
-          return;
-        }
-      }
       const payload = {
         name: f.name.trim(),
         points: Math.max(0, Number(f.points) || 0),
-        kind: f.kind === "checklist" || f.kind === "mandatory" ? f.kind : "standard",
+        kind: f.kind === "mandatory" ? "mandatory" : "standard",
         member_ids: [...f.member_ids],
+        // v0.39: see the matching comment in _saveTask above.
+        subtasks: f.subtasks.map((s) => ({ id: s.id, name: s.name.trim() })).filter((s) => s.name),
       };
       if (f.icon) payload.icon = f.icon.trim();
-      if (f.kind === "checklist") {
-        payload.subtasks = f.subtasks.map((s) => ({ id: s.id, name: s.name.trim() })).filter((s) => s.name);
-      }
       if (this._editingFavoriteId) {
         await this._callWS({
           type: "family_tasks/favorite/update",
@@ -2255,6 +2261,30 @@
       root.querySelectorAll("ha-icon-picker").forEach((el) => {
         if (customElements.get("ha-icon-picker")) {
           el.hass = this._hass;
+          // v0.39: fixes "picking an icon shows it in the dropdown but it's
+          // never actually saved". This card only ever renders
+          // ha-icon-picker's initial value via a plain HTML `value="..."`
+          // string (this framework-free card has no way to bind it as a
+          // live property), and - same caveat already noted for
+          // ha-date-input/ha-time-input's `.locale` just below - a Lit
+          // component's property isn't guaranteed to be populated just
+          // because the matching HTML attribute is present, especially for
+          // a component (a combo-box wrapper, not a plain text input) whose
+          // "value" may deliberately not be attribute-backed. Every field
+          // change replaces the *entire* form via outerHTML (see the
+          // "change" listener below), so a freshly (re)created picker could
+          // silently keep an empty/undefined internal value despite the
+          // correct icon sitting right there in its own `value` attribute
+          // (and in the form's underlying draft state, which is what
+          // actually gets saved) - and if the component's own first render
+          // then "corrects" its display by firing its own "value-changed"
+          // with that empty value, the value-changed listener below would
+          // take it at face value and blow away the icon the user just
+          // picked. Setting `.value` explicitly here removes the ambiguity
+          // entirely, exactly like `.locale` is set explicitly for
+          // ha-date-input/ha-time-input.
+          const attrValue = el.getAttribute("value") || "";
+          if (el.value !== attrValue) el.value = attrValue;
           return;
         }
         const fieldAttr = el.getAttribute("data-field");
@@ -2608,7 +2638,10 @@
           const label = STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
           const isBattery = task.recurrence?.type === "battery";
-          const isChecklist = task.kind === "checklist";
+          // v0.39: "Checkliste" is no longer a task "kind" of its own (see
+          // TASK_KIND_CHECKLIST in const.py) - any task, standard or
+          // mandatory, counts as a checklist here purely by having subtasks.
+          const isChecklist = !!(task.subtasks && task.subtasks.length);
           // v0.14: called out to the child as mandatory - see
           // TASK_KIND_MANDATORY in const.py. While overdue, tick-based
           // screen-time granting pauses for whoever it's assigned to (see
@@ -2650,11 +2683,11 @@
               ? " · jetzt auch für dich (überfällig)"
               : "";
           // v0.27: the task's Karenzzeit, shown as the clock time it's
-          // actually due by (deadline_at = due_at + overdue_after_minutes,
-          // see coordinator.py) instead of just the internal minutes value
-          // used to compute the "Überfällig" status - only while there's
-          // still something to do (pending/overdue; a done/confirmation
-          // occurrence has nothing left to be "due" by).
+          // actually due by (deadline_at - see _deadline_at in
+          // coordinator.py) instead of just the internal "Überfällig ab"
+          // setting used to compute the "Überfällig" status - only while
+          // there's still something to do (pending/overdue; a done/
+          // confirmation occurrence has nothing left to be "due" by).
           const deadlineAt = statusState?.attributes?.deadline_at;
           const deadlineSuffix =
             !isConfirmation && deadlineAt && (status === "pending" || status === "overdue")
@@ -2949,7 +2982,7 @@
               const memberNames = (f.member_ids ?? []).map((mid) => this._memberName(mid)).join(", ");
               const detailParts = [pointsLabel(f.points ?? 0)];
               if (memberNames) detailParts.push(memberNames);
-              if (f.kind === "checklist") detailParts.push("Checkliste");
+              if (f.subtasks && f.subtasks.length) detailParts.push("Checkliste");
               if (f.kind === "mandatory") detailParts.push("Pflichtaufgabe");
               return `
                 <div class="row">
@@ -3495,12 +3528,11 @@
           <div class="chips">${memberCheckboxes}</div>
           <label>Aufgabentyp
             <select data-field="kind">
-              <option value="standard" ${f.kind !== "checklist" && f.kind !== "mandatory" ? "selected" : ""}>Standard</option>
-              <option value="checklist" ${f.kind === "checklist" ? "selected" : ""}>Checkliste</option>
+              <option value="standard" ${f.kind !== "mandatory" ? "selected" : ""}>Standard</option>
               <option value="mandatory" ${f.kind === "mandatory" ? "selected" : ""}>Pflichtaufgabe</option>
             </select>
           </label>
-          ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
+          ${this._renderSubtaskEditor(f.subtasks)}
           <p class="muted">Jede daraus erstellte Aufgabe ist immer einmalig (keine Wiederholung) und offen, nicht bereits erledigt.</p>
           <div class="form-actions">
             <button type="submit" data-action="save-favorite">Speichern</button>
@@ -3618,13 +3650,12 @@
 
           <label>Aufgabentyp
             <select data-field="kind">
-              <option value="standard" ${f.kind !== "checklist" && f.kind !== "mandatory" ? "selected" : ""}>Standard</option>
-              <option value="checklist" ${f.kind === "checklist" ? "selected" : ""}>Checkliste</option>
+              <option value="standard" ${f.kind !== "mandatory" ? "selected" : ""}>Standard</option>
               <option value="mandatory" ${f.kind === "mandatory" ? "selected" : ""}>Pflichtaufgabe</option>
             </select>
           </label>
           ${f.kind === "mandatory" ? `<p class="muted">Pflichtaufgaben werden dem Kind besonders gekennzeichnet. Wird eine Pflichtaufgabe überfällig, pausiert die tick-basierte Handyzeitgewährung (siehe Entity "Handyzeitgewährung aktiv") für genau die Nutzer, denen sie zugewiesen ist, bis sie erledigt ist.</p>` : ""}
-          ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
+          ${this._renderSubtaskEditor(f.subtasks)}
 
           <label>Wiederholung
             <select data-field="recurrence.type">
@@ -3647,9 +3678,9 @@
           ${f.recurrence.type !== "trigger" ? `
           <div class="grid2">
             <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" data-fallback-hour="${esc(f._dueTimeHour ?? "")}" data-fallback-minute="${esc(f._dueTimeMinute ?? "")}" value="${esc(f.due_time)}"></ha-time-input></label>
-            <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
+            <label>Überfällig ab (optional)<ha-time-input clearable data-field="overdue_time" data-fallback-hour="${esc(f._overdueTimeHour ?? "")}" data-fallback-minute="${esc(f._overdueTimeMinute ?? "")}" value="${esc(f.overdue_time)}"></ha-time-input></label>
           </div>` : `
-          <label>Karenz bis überfällig, nachdem der Sensor ausgelöst hat (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>`}
+          <label>Überfällig ab (optional, Uhrzeit am Tag des Sensor-Auslösens)<ha-time-input clearable data-field="overdue_time" data-fallback-hour="${esc(f._overdueTimeHour ?? "")}" data-fallback-minute="${esc(f._overdueTimeMinute ?? "")}" value="${esc(f.overdue_time)}"></ha-time-input></label>`}
 
           <label>Rotation
             <select data-field="rotation.strategy">
@@ -3687,13 +3718,7 @@
           <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
           <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></ha-icon-picker></label>
 
-          <label>Aufgabentyp
-            <select data-field="kind">
-              <option value="standard" ${f.kind !== "checklist" ? "selected" : ""}>Standard</option>
-              <option value="checklist" ${f.kind === "checklist" ? "selected" : ""}>Checkliste</option>
-            </select>
-          </label>
-          ${f.kind === "checklist" ? this._renderSubtaskEditor(f.subtasks) : ""}
+          ${this._renderSubtaskEditor(f.subtasks)}
 
           <label>Wiederholung
             <select data-field="recurrence.type">
@@ -3711,7 +3736,7 @@
 
           <div class="grid2">
             <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" data-fallback-hour="${esc(f._dueTimeHour ?? "")}" data-fallback-minute="${esc(f._dueTimeMinute ?? "")}" value="${esc(f.due_time)}"></ha-time-input></label>
-            <label>Karenz bis überfällig (Min.)<input type="number" min="0" data-field="overdue_after_minutes" value="${esc(f.overdue_after_minutes)}"></label>
+            <label>Überfällig ab (optional)<ha-time-input clearable data-field="overdue_time" data-fallback-hour="${esc(f._overdueTimeHour ?? "")}" data-fallback-minute="${esc(f._overdueTimeMinute ?? "")}" value="${esc(f.overdue_time)}"></ha-time-input></label>
           </div>
 
           <label class="inline"><input type="checkbox" data-field="requires_confirmation" ${f.requires_confirmation ? "checked" : ""}> Bestätigung durch Eltern anfordern</label>
@@ -3742,6 +3767,8 @@
         .join("");
       return `
         <div class="subtask-editor">
+          <label>Checkliste (optional)</label>
+          <p class="muted">Statt einer einzelnen "Erledigt"-Aktion kann die Aufgabe mehrere Unterpunkte haben, die einzeln abgehakt werden - sie gilt erst als erledigt, sobald alle abgehakt sind. Ohne Unteraufgaben bleibt es bei der normalen "Erledigt"-Aktion.</p>
           ${rows || `<p class="muted">Noch keine Unteraufgaben.</p>`}
           <button type="button" class="add" data-action="add-subtask">+ Unteraufgabe hinzufügen</button>
         </div>`;
@@ -4435,7 +4462,14 @@
       // with the seconds field itself hidden). Strip that back down to
       // "HH:MM" so storage keeps getting the format storage.py documents
       // ("HH:MM") and existing due_time values/tests aren't affected.
-      if (leaf === "due_time") {
+      if (leaf === "due_time" || leaf === "overdue_time") {
+        // v0.39: overdue_time (the task's "Überfällig ab" absolute time,
+        // replacing the old Karenz-minutes number field) is set up exactly
+        // like due_time - same ha-time-input widget, same fallback-select
+        // pattern, just its own pair of _overdueTimeHour/_overdueTimeMinute
+        // stash fields instead of due_time's _dueTimeHour/_dueTimeMinute.
+        const hourKey = leaf === "due_time" ? "_dueTimeHour" : "_overdueTimeHour";
+        const minuteKey = leaf === "due_time" ? "_dueTimeMinute" : "_overdueTimeMinute";
         // v0.29: the hour/minute <select> fallback (see
         // _renderFallbackTimeInput) has no single .value of its own - `el`
         // here is the wrapping <span data-fallback-time>, read its two child
@@ -4450,12 +4484,12 @@
           // sites) so an hour-only or minute-only selection survives the
           // form re-render below instead of snapping back to "--" - see the
           // long comment on _renderFallbackTimeInput for the full story.
-          target._dueTimeHour = hour;
-          target._dueTimeMinute = minute;
-          target.due_time = hour && minute ? `${hour}:${minute}` : "";
+          target[hourKey] = hour;
+          target[minuteKey] = minute;
+          target[leaf] = hour && minute ? `${hour}:${minute}` : "";
           return;
         }
-        target.due_time = el.value ? el.value.slice(0, 5) : el.value;
+        target[leaf] = el.value ? el.value.slice(0, 5) : el.value;
         return;
       }
 

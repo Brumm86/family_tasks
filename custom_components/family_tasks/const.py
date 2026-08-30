@@ -13,6 +13,12 @@ PLATFORMS: Final = [Platform.SENSOR, Platform.BUTTON, Platform.BINARY_SENSOR, Pl
 
 # --- Config / options keys -------------------------------------------------
 
+# Household-wide fallback grace period, still used only by any task saved
+# before v0.39 whose own "overdue_after_minutes" hasn't been superseded by an
+# absolute "overdue_time" yet (see the "Task kinds / checklists" section
+# below and _deadline_at in coordinator.py) - a new task's own "Überfällig
+# ab" is always an explicit time-of-day set on the task itself now, no longer
+# derived from this option.
 CONF_OVERDUE_AFTER_MINUTES: Final = "overdue_after_minutes"
 CONF_DEFAULT_ROTATION_STRATEGY: Final = "default_rotation_strategy"
 # Household-wide default battery warning level (percent). A "battery"
@@ -418,36 +424,55 @@ WS_API_FAVORITE_INSTANTIATE: Final = f"{WS_API_PREFIX_FAVORITES}/instantiate"
 
 # --- Task kinds / checklists --------------------------------------------------
 #
-# Every task defaults to TASK_KIND_STANDARD (single "erledigt" action). A
-# TASK_KIND_CHECKLIST task instead carries an open-ended list of named
-# sub-items (task "subtasks": [{"id", "name"}, ...]) that get checked off
-# individually - checked items render struck-through - and the task itself
-# only becomes "done" once every sub-item is checked for the current period
-# (see FamilyTasksCoordinator.async_toggle_subtask). Which sub-items are
-# currently checked is per-occurrence runtime state, tracked the same way
-# open trigger occurrences are (see storage.ChecklistStateStore), and resets
-# whenever a new period starts, same as any other recurring task.
+# Every task defaults to TASK_KIND_STANDARD (single "erledigt" action).
+# TASK_KIND_MANDATORY additionally gates screen time while overdue (see
+# below). Either kind may *also* optionally carry a checklist (task
+# "subtasks": [{"id", "name"}, ...], see SUBTASK_SCHEMA in storage.py) -
+# sub-items get checked off individually (checked items render struck-
+# through), and the task itself only becomes "done" once every sub-item is
+# checked for the current period (see
+# FamilyTasksCoordinator.async_toggle_subtask). Which sub-items are currently
+# checked is per-occurrence runtime state, tracked the same way open trigger
+# occurrences are (see storage.ChecklistStateStore), and resets whenever a
+# new period starts, same as any other recurring task.
+#
+# v0.39: "checklist" used to be its own third TASK_KIND, mutually exclusive
+# with "mandatory" - a task was either a checklist or a Pflichtaufgabe, never
+# both, which meant a mandatory task could never also have a checklist.
+# TASK_KIND_CHECKLIST is kept only so a task saved before this version (its
+# stored "kind" is still literally "checklist") keeps loading/validating
+# without a migration step; nothing in this codebase treats it specially any
+# more - whether a task has a checklist is now determined purely by whether
+# it has any "subtasks" at all (see e.g. FamilyTasksCoordinator's checklist
+# handling), independent of "kind". The card normalizes an old checklist
+# task's kind to "standard" (its subtasks carry over unchanged) the next time
+# it's opened for editing - see taskToForm in family-tasks-card.js.
 TASK_KIND_STANDARD: Final = "standard"
 TASK_KIND_CHECKLIST: Final = "checklist"
 # v0.14: a "Pflichtaufgabe" (mandatory task) - behaves exactly like
 # TASK_KIND_STANDARD as far as completion itself goes (a single "Erledigt"
-# action), but is called out to the child as mandatory in the card, and while
-# an occurrence of it is TASK_STATUS_OVERDUE, tick-based screen-time granting
+# action, or - since v0.39 - a checklist, exactly like a standard task), but
+# is called out to the child as mandatory in the card, and while an
+# occurrence of it is TASK_STATUS_OVERDUE, tick-based screen-time granting
 # for exactly the member(s) it is assigned to is paused - see
 # FamilyTasksCoordinator._async_update_data's screen_time_grant_active
 # computation and binary_sensor.py. Resumes automatically the moment the
 # occurrence is no longer overdue (completed, or - for a "child" assignee
 # needing parental sign-off - once a parent confirms it); missed ticks are
 # never made up, this only ever gates whether the *next* tick may grant
-# anything. Not combinable with TASK_KIND_CHECKLIST - a task is one or the
-# other, chosen via "Aufgabentyp" like any other kind.
+# anything.
 TASK_KIND_MANDATORY: Final = "mandatory"
-TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST, TASK_KIND_MANDATORY]
+# Kinds selectable via "Aufgabentyp" going forward - TASK_KIND_CHECKLIST is
+# deliberately excluded (see above); vol.In(TASK_KINDS) still accepts it on
+# an update payload that doesn't touch "kind" at all, since voluptuous only
+# validates keys actually present, but the card never sends it again.
+TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_MANDATORY, TASK_KIND_CHECKLIST]
 # Kinds a "child" member may pick when creating a task for themselves (see
 # WS_API_TASK_CREATE_OWN below) - "mandatory" is a parent-only concept (it
 # exists to let a parent gate a child's screen time), so it's deliberately
-# left out here.
-OWN_TASK_KINDS: Final = [TASK_KIND_STANDARD, TASK_KIND_CHECKLIST]
+# left out here. Just TASK_KIND_STANDARD since v0.39 - a checklist is now an
+# optional add-on (subtasks), not a separate kind to choose.
+OWN_TASK_KINDS: Final = [TASK_KIND_STANDARD]
 
 # --- Task claiming / reservation (v0.27) --------------------------------------
 #
@@ -679,6 +704,15 @@ EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
 # in coordinator.py); a household's own automation can react to this event
 # however else it likes.
 EVENT_TASK_REJECTED: Final = f"{DOMAIN}_task_rejected"
+
+# v0.39: fired whenever a new "Aufgabenpool" task (no fixed/rotating
+# assignee, see is_pool_task in coordinator.py) is added - every active
+# member is notified (see _async_notify_new_task_assignments in __init__.py),
+# since any of them could be the one to claim it, unlike EVENT_TASK_ASSIGNED
+# above which only ever reaches the task's actual assignee(s). Same
+# extension-point pattern as EVENT_TASK_ASSIGNED/EVENT_TASK_REJECTED
+# (member_id/member_name/task_id/task_name).
+EVENT_TASK_POOL_ADDED: Final = f"{DOMAIN}_task_pool_added"
 
 # --- Manual point awards (v0.24) ------------------------------------------------
 #

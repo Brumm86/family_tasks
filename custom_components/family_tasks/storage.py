@@ -81,7 +81,6 @@ from .const import (
     STORAGE_VERSION,
     STORAGE_VERSION_MINOR,
     STREAK_BONUS_TASK_ID,
-    TASK_KIND_CHECKLIST,
     TASK_KIND_STANDARD,
     TASK_KINDS,
     TASK_TRIGGER_KINDS,
@@ -237,6 +236,14 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional("points", default=0): vol.All(int, vol.Range(min=0)),
     vol.Optional("enabled", default=True): bool,
     vol.Optional("due_time"): str,  # "HH:MM"
+    # v0.39: absolute time-of-day a task becomes overdue, same "HH:MM" shape
+    # as due_time (see _due_at/_deadline_at in coordinator.py) - replaces
+    # "overdue_after_minutes" (a grace-period *duration*) as what the card's
+    # task form actually sets going forward. "overdue_after_minutes" is kept
+    # below purely so a task saved before this version keeps behaving exactly
+    # as it did (see _deadline_at) until it's next edited and picks up an
+    # explicit overdue_time instead.
+    vol.Optional("overdue_time"): str,
     vol.Optional("overdue_after_minutes"): vol.All(int, vol.Range(min=0)),
     vol.Required("recurrence"): RECURRENCE_SCHEMA,
     vol.Required("rotation"): ROTATION_SCHEMA,
@@ -269,6 +276,11 @@ TASK_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("points"): vol.All(int, vol.Range(min=0)),
     vol.Optional("enabled"): bool,
     vol.Optional("due_time"): str,
+    # See TASK_CREATE_SCHEMA above. Explicit null clears a previously set
+    # overdue_time (e.g. reverting to "no separate Karenzzeit, overdue right
+    # at due_time"), same "clear via null" pattern used elsewhere in this
+    # schema.
+    vol.Optional("overdue_time"): vol.Any(None, str),
     vol.Optional("overdue_after_minutes"): vol.All(int, vol.Range(min=0)),
     vol.Optional("recurrence"): RECURRENCE_SCHEMA,
     vol.Optional("rotation"): ROTATION_SCHEMA,
@@ -351,10 +363,16 @@ class TaskStorageCollection(collection.DictStorageCollection):
                 "A 'trigger' recurrence needs a 'trigger' definition (state or "
                 "numeric_state)."
             )
-        if validated.get("kind") == TASK_KIND_CHECKLIST and not validated.get("subtasks"):
-            raise vol.Invalid(
-                "A 'checklist' task needs at least one subtask - see TASK_KIND_CHECKLIST."
-            )
+        # v0.39: stamps when this task definition was actually created -
+        # never settable by the caller (not part of TASK_CREATE_SCHEMA at
+        # all, so any "created_at" the caller sent is simply ignored here).
+        # Lets FamilyTasksCoordinator._current_period_date/_pool_period_date
+        # tell "a matching weekday that already passed before this task ever
+        # existed" apart from "a matching weekday that's genuinely this
+        # task's overdue last occurrence" - see the v0.39 CHANGELOG entry for
+        # the "created Sunday for a Monday-only schedule, immediately shows
+        # overdue" bug this fixes.
+        validated["created_at"] = dt_util.now().isoformat()
         return validated
 
     @callback
@@ -409,10 +427,10 @@ class TaskStorageCollection(collection.DictStorageCollection):
             # Explicit clear, rather than persisting a literal None - mirrors
             # BatteryOverrideStorageCollection's "threshold" clearing below.
             updated.pop(CONF_COMPLETION_BUTTON_ENTITY_ID, None)
-        if updated.get("kind") == TASK_KIND_CHECKLIST and not updated.get("subtasks"):
-            raise vol.Invalid(
-                "A 'checklist' task needs at least one subtask - see TASK_KIND_CHECKLIST."
-            )
+        if "overdue_time" in validated and validated["overdue_time"] is None:
+            # Explicit clear (see TASK_UPDATE_SCHEMA above) - same pattern as
+            # CONF_COMPLETION_BUTTON_ENTITY_ID just above.
+            updated.pop("overdue_time", None)
         return updated
 
 
@@ -535,10 +553,6 @@ class FavoriteStorageCollection(collection.DictStorageCollection):
 
     async def _process_create_data(self, data: dict) -> dict:
         validated: dict = self.CREATE_SCHEMA(data)
-        if validated.get("kind") == TASK_KIND_CHECKLIST and not validated.get("subtasks"):
-            raise vol.Invalid(
-                "Eine Checklisten-Favoriten-Vorlage braucht mindestens eine Unteraufgabe."
-            )
         return validated
 
     @callback
@@ -553,10 +567,6 @@ class FavoriteStorageCollection(collection.DictStorageCollection):
         # clears all fixed assignees, same as unchecking every member in the
         # card's favorite form.
         updated = {**item, **validated}
-        if updated.get("kind") == TASK_KIND_CHECKLIST and not updated.get("subtasks"):
-            raise vol.Invalid(
-                "Eine Checklisten-Favoriten-Vorlage braucht mindestens eine Unteraufgabe."
-            )
         return updated
 
 
@@ -1004,20 +1014,21 @@ CREATE_OWN_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
         vol.Required("name"): str,
         vol.Optional("icon"): str,
         vol.Optional("due_time"): str,
+        # See TASK_CREATE_SCHEMA's "overdue_time"/"overdue_after_minutes"
+        # comment above.
+        vol.Optional("overdue_time"): str,
         vol.Optional("overdue_after_minutes"): vol.All(int, vol.Range(min=0)),
         vol.Required("recurrence"): RECURRENCE_SCHEMA,
         # Chosen by the child creating the task: whether a parent has to sign
         # off before it counts as done. Defaults to True (the safer default).
         vol.Optional(CONF_TASK_REQUIRES_CONFIRMATION, default=True): bool,
-        # A child may also create a checklist task for themselves (see
-        # TASK_KIND_CHECKLIST in const.py) - same "kind"/"subtasks" fields as
-        # the admin task schema; TaskStorageCollection._process_create_data
-        # (invoked below via tasks.async_create_item) already enforces at
-        # least one subtask for a checklist, no extra check needed here.
-        # "mandatory" (TASK_KIND_MANDATORY) is deliberately excluded here -
-        # see OWN_TASK_KINDS in const.py: it exists to let a parent gate a
-        # child's screen time, not something a child should be able to set up
-        # for themselves.
+        # A child may also give their own task a checklist (v0.8; no longer a
+        # separate "kind" since v0.39 - see TASK_KIND_CHECKLIST in const.py)
+        # - same "subtasks" field as the admin task schema, freely combinable
+        # with any of OWN_TASK_KINDS. "mandatory" (TASK_KIND_MANDATORY) is
+        # deliberately excluded from OWN_TASK_KINDS - it exists to let a
+        # parent gate a child's screen time, not something a child should be
+        # able to set up for themselves.
         vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(OWN_TASK_KINDS),
         vol.Optional("subtasks", default=list): vol.All(
             [SUBTASK_SCHEMA], _require_unique_subtask_ids
@@ -1611,10 +1622,12 @@ def async_setup_websocket_api(
         }
         if favorite.get("icon"):
             task_data["icon"] = favorite["icon"]
-        if favorite.get("kind") == TASK_KIND_CHECKLIST:
+        if favorite.get("subtasks"):
             # Fresh copy, not a shared reference - each instantiated task owns
             # its own subtask list from here on, editable independently of the
-            # favorite it was created from.
+            # favorite it was created from. v0.39: keyed off whether the
+            # favorite actually has any subtasks, not its (now legacy-only)
+            # "kind" - see TASK_KIND_CHECKLIST in const.py.
             task_data["subtasks"] = [dict(s) for s in favorite.get("subtasks", [])]
 
         try:
