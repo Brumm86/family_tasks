@@ -43,6 +43,7 @@ from custom_components.family_tasks.const import (
     TASK_STATUS_DONE,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_PENDING,
+    TASK_STATUS_UPCOMING,
 )
 
 
@@ -347,8 +348,18 @@ async def test_pool_task_previews_this_weeks_occurrence_before_its_weekday(
 ) -> None:
     """A weekly Aufgabenpool task due Friday must already show *this*
     Friday's occurrence on Monday, not last Friday's - see _pool_period_date.
-    A normally-assigned (non-pool) weekly task keeps the old backward-only
-    behavior for comparison."""
+
+    v0.40: a normally-assigned (non-pool) weekly task now previews this same
+    week's occurrence too (see _current_period_date) - "Es sollen immer alle
+    bereits vorhersehbaren Aufgaben der jeweils laufenden Woche angezeigt
+    werden" - but as TASK_STATUS_UPCOMING rather than TASK_STATUS_PENDING:
+    visible and claimable-free (nobody needs to "Annehmen" their own fixed
+    assignment), but not completable until Friday actually arrives - see
+    test_upcoming_weekly_task_not_completable_until_its_weekday below for
+    that half. Before v0.40 this assigned task stayed pinned to *last*
+    week's (already-resolved) Friday the whole time instead - see the
+    v0.39.0 git tag if that old behavior is ever needed for reference.
+    """
     runtime = init_integration.runtime_data
     anna = await runtime.members.async_create_item({"name": "Anna", "role": "child"})
     ben = await runtime.members.async_create_item({"name": "Ben", "role": "child"})
@@ -373,11 +384,12 @@ async def test_pool_task_previews_this_weeks_occurrence_before_its_weekday(
     assert set(pool_status.eligible_member_ids) == {anna["id"], ben["id"]}
     assert pool_status.claimable is True
 
-    # The assigned task still resolves to last week's Friday (the old,
-    # backward-only behavior) - unaffected by the pool-only change.
+    # v0.40: the assigned task now resolves to *this* week's Friday too,
+    # just as TASK_STATUS_UPCOMING instead of TASK_STATUS_PENDING/claimable.
     assigned_status = runtime.coordinator.data.tasks[assigned_task["id"]]
-    last_friday = (monday - timedelta(days=3)).date().isoformat()
-    assert assigned_status.period_key == last_friday
+    assert assigned_status.period_key == expected_friday
+    assert assigned_status.status == TASK_STATUS_UPCOMING
+    assert assigned_status.claimable is False
 
 
 async def test_pool_task_not_eligible_once_done(hass, init_integration) -> None:

@@ -81,6 +81,7 @@ from .const import (
     TASK_STATUS_IDLE,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_PENDING,
+    TASK_STATUS_UPCOMING,
     VACATION_BEHAVIOR_PAUSE,
     VACATION_BEHAVIOR_SHOW,
 )
@@ -391,7 +392,9 @@ class FamilyTasksData:
     pool_tasks_open: int = 0
 
 
-def _current_period_date(recurrence: dict, today: date, created_at: date | None = None) -> date:
+def _current_period_date(
+    recurrence: dict, today: date, created_at: date | None = None
+) -> date | None:
     """Return the date identifying the current occurrence's period.
 
     ``created_at`` (v0.39): the date the task itself was created, if known -
@@ -401,6 +404,10 @@ def _current_period_date(recurrence: dict, today: date, created_at: date | None 
     matching weekday) - a date before the task ever existed - and show up
     immediately as overdue, even though it has never actually had a chance
     to be completed. See the v0.39 CHANGELOG entry.
+
+    v0.40: the "weekly" branch is now the only one that can return ``None`` -
+    see its own comment below for when and why. Every other recurrence type
+    always resolves to a concrete date, exactly as before.
     """
     rtype = recurrence["type"]
 
@@ -411,26 +418,52 @@ def _current_period_date(recurrence: dict, today: date, created_at: date | None 
         return today
 
     if rtype == "weekly":
+        # v0.40: bounded to the *current* calendar week (Monday-Sunday) -
+        # same window _pool_period_date already uses, but, unlike that one,
+        # this never reaches beyond it. Previously (v0.39) a task too new to
+        # have had a chance at any of its configured weekdays yet searched
+        # forward *unbounded*, which could land on a date days away while
+        # still being reported as TASK_STATUS_PENDING ("offen") - there was
+        # no separate "not due yet" status for a weekly task, so the card
+        # showed it as already open. _async_update_data now treats a future
+        # date returned from here as TASK_STATUS_UPCOMING instead (visible
+        # with its weekday, not completable yet - "Es sollen immer alle
+        # bereits vorhersehbaren Aufgaben der jeweils laufenden Woche
+        # angezeigt werden"), and ``None`` (nothing left to show *this*
+        # week) as idle, same as an untriggered sensor task - it starts
+        # appearing again once its weekday actually falls within a week it
+        # existed for.
         weekdays = recurrence.get("weekdays") or [0]
-        for offset in range(7):
-            candidate = today - timedelta(days=offset)
+        week_start = today - timedelta(days=today.weekday())
+
+        # Prefer the most recent matching weekday within this week
+        # (Monday..today) - once its day has arrived this stays "the"
+        # occurrence for the rest of the week (pending, then overdue) even
+        # after a *later* matching weekday in the same week would otherwise
+        # take over, exactly like the old unbounded backward search did
+        # within the current week.
+        latest_so_far: date | None = None
+        for offset in range(today.weekday() + 1):
+            candidate = week_start + timedelta(days=offset)
+            if candidate.weekday() in weekdays and (
+                created_at is None or candidate >= created_at
+            ):
+                latest_so_far = candidate
+        if latest_so_far is not None:
+            return latest_so_far
+
+        # Nothing this week has happened yet (or every match so far predates
+        # created_at) - look forward to the earliest still-upcoming matching
+        # weekday, but only through the *end of this same week*. Beyond that
+        # there is nothing "already foreseeable" about it yet - it simply
+        # isn't shown at all until the week it falls in actually starts.
+        for offset in range(today.weekday() + 1, 7):
+            candidate = week_start + timedelta(days=offset)
             if candidate.weekday() in weekdays and (
                 created_at is None or candidate >= created_at
             ):
                 return candidate
-        # Every matching weekday found by the backward search predates the
-        # task's own creation (or "today" itself is before created_at,
-        # e.g. clock skew) - this task's first-ever occurrence hasn't
-        # happened yet. Look *forward* instead of falling back to "today"
-        # (which might not even be a matching weekday), starting from
-        # whichever of today/created_at is later, so the first period a
-        # brand-new task resolves to is its *next* matching weekday.
-        search_from = max(today, created_at) if created_at else today
-        for offset in range(1, 8):
-            candidate = search_from + timedelta(days=offset)
-            if candidate.weekday() in weekdays:
-                return candidate
-        return today
+        return None
 
     if rtype == "interval_days":
         anchor = date.fromisoformat(recurrence["anchor_date"])
@@ -452,33 +485,35 @@ def _current_period_date(recurrence: dict, today: date, created_at: date | None 
 def _pool_period_date(recurrence: dict, today: date, created_at: date | None = None) -> date:
     """Like _current_period_date, but for an "Aufgabenpool" task (see below).
 
-    Only differs for recurrence type "weekly": _current_period_date always
-    searches *backward* from today for the most recent matching weekday, so
-    e.g. a Friday-only task viewed on Monday still resolves to *last*
-    Friday's (already-resolved) occurrence - there is no way to see or act on
-    "this Friday's" occurrence before Friday actually arrives. That is fine
-    for a normally assigned/rotated task (whoever it's assigned to gets
-    notified when it's created, not by browsing ahead), but defeats the
-    purpose of an Aufgabenpool task - see the "Aufgabenpool" section in
-    _async_update_data: nobody is assigned and there is no rotation, so the
-    *only* way anyone finds out about it at all is by seeing it in that
-    section, and a child should be able to reserve one as soon as the week
-    starts, not only once its weekday is already here.
+    v0.40: _current_period_date's own "weekly" backward search is now
+    bounded to the current calendar week too (see its docstring) - both
+    functions agree on which matching weekday within *this* week is "the"
+    current occurrence. They still differ once nothing has happened yet
+    this week: _current_period_date only looks forward through the
+    *remaining* days of this same week and returns ``None`` if that finds
+    nothing (surfaced by _async_update_data as TASK_STATUS_UPCOMING while
+    still within the week, or as idle/not-shown otherwise - "a normally
+    assigned/rotated task only needs to be seen once its own week starts",
+    not weeks ahead), while this function keeps reaching into the following
+    week(s) as needed and never returns ``None`` - an Aufgabenpool
+    occurrence (see the "Aufgabenpool" section in _async_update_data: nobody
+    is assigned and there is no rotation) has no other way of ever being
+    noticed at all except by showing up here, so it must always resolve to
+    *some* upcoming date for a child to see and reserve, however far out
+    that ends up being for a brand-new task.
 
     Normally bounded to the *current* calendar week (Monday-Sunday, the same
     boundary start_of_week uses): prefers the most recent matching weekday
     within this week if one has already occurred (today included), and
     otherwise looks *forward* to the earliest still-upcoming matching
-    weekday - never reaching back into a previous week the way
-    _current_period_date's unbounded backward search would. ``created_at``
-    (v0.39, see _current_period_date) excludes any candidate before the
-    task's own creation date from that backward search - a task created on,
-    say, a Sunday for a Monday-only schedule then has no matching weekday
-    left *this* week at all (Monday already happened before it existed, and
-    there are no more matching days before Sunday, the last day of the
-    week), so the forward search below is no longer bounded to the rest of
-    the current week either in that case, and instead looks into the
-    following week(s) as needed.
+    weekday. ``created_at`` (v0.39, see _current_period_date) excludes any
+    candidate before the task's own creation date from that backward search
+    - a task created on, say, a Sunday for a Monday-only schedule then has
+    no matching weekday left *this* week at all (Monday already happened
+    before it existed, and there are no more matching days before Sunday,
+    the last day of the week), so the forward search below is no longer
+    bounded to the rest of the current week either in that case, and instead
+    looks into the following week(s) as needed.
     """
     if recurrence["type"] != "weekly":
         return _current_period_date(recurrence, today, created_at)
@@ -715,17 +750,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 continue
 
             recurrence = task["recurrence"]
-            # v0.39: the date this task definition was created, if known (see
-            # TaskStorageCollection._process_create_data in storage.py) - a
-            # task saved before this field existed has none, and every
-            # period-date/overdue computation below treats that exactly like
-            # before (see _current_period_date/_pool_period_date).
-            created_at_raw = task.get("created_at")
-            created_date: date | None = None
-            if created_at_raw:
-                parsed_created_at = dt_util.parse_datetime(created_at_raw)
-                if parsed_created_at is not None:
-                    created_date = dt_util.as_local(parsed_created_at).date()
+            # v0.39: the date this task definition was created, if known -
+            # every period-date/overdue computation below treats a task
+            # saved before this field existed exactly like before (see
+            # _current_period_date/_pool_period_date).
+            created_date = self._task_created_date(task)
 
             rotation = task["rotation"]
             member_ids = rotation.get("member_ids") or []
@@ -821,6 +850,30 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     if is_pool_task
                     else _current_period_date(recurrence, today, created_date)
                 )
+                # v0.40: only reachable for a non-pool "weekly" task whose
+                # configured weekday(s) don't fall within the current week
+                # at all for it yet (see _current_period_date) - e.g. a
+                # brand-new task created after its only weekday already
+                # passed this week. Nothing to show, act on, or claim this
+                # week; treated exactly like an untriggered sensor task
+                # until its weekday actually falls within a week it existed
+                # for.
+                if period_start is None:
+                    task_statuses[task_id] = TaskStatusData(
+                        task_id=task_id,
+                        name=task["name"],
+                        icon=task.get("icon"),
+                        points=task.get("points", 0),
+                        status=TASK_STATUS_IDLE,
+                        period_key="",
+                        due_at=None,
+                        assigned_member_id=assigned_member_id,
+                        assigned_member_ids=assigned_member_ids,
+                        eligible_member_ids=assigned_member_ids,
+                        kind=task.get("kind", TASK_KIND_STANDARD),
+                        created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
+                    )
+                    continue
                 period_key = period_start.isoformat()
                 due_at = _due_at(period_start, task.get("due_time"))
 
@@ -831,6 +884,30 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 status = TASK_STATUS_DONE
             elif (task_id, period_key) in pending_confirmations:
                 status = TASK_STATUS_AWAITING_CONFIRMATION
+            elif (
+                not is_pool_task
+                and recurrence["type"] == "weekly"
+                and period_start > today
+            ):
+                # v0.40: this week's occurrence is already known (see
+                # _current_period_date) but its day hasn't arrived yet -
+                # "Es sollen immer alle bereits vorhersehbaren Aufgaben der
+                # jeweils laufenden Woche angezeigt werden. Die Aufgaben
+                # sollen bis zur Fälligkeit mit einem grünen Label
+                # dargestellt werden." Never reached for an Aufgabenpool
+                # task (is_pool_task) - _pool_period_date already returns
+                # future dates *by design* so a pool occurrence can be
+                # reserved from the start of the week, and it stays
+                # TASK_STATUS_PENDING/claimable for that entire window, not
+                # TASK_STATUS_UPCOMING. Deliberately scoped to "weekly" only
+                # - a future-dated "once"/"interval_days" occurrence (e.g. a
+                # one-time task someone scheduled for next month) keeps its
+                # pre-v0.40 behavior (immediately PENDING/completable) rather
+                # than silently gaining a green "weekday" label that
+                # wouldn't even mean much for a non-recurring date, and a
+                # "daily"/"battery" period_start is never in the future to
+                # begin with (see _current_period_date).
+                status = TASK_STATUS_UPCOMING
             elif now > deadline_at:
                 status = TASK_STATUS_OVERDUE
             else:
@@ -992,7 +1069,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     for s in task.get("subtasks", [])
                 ]
 
-            if status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE):
+            # v0.40: TASK_STATUS_UPCOMING is deliberately excluded here too -
+            # FamilyTasksMemberOpenTasksSensor documents itself as "currently
+            # open (pending/overdue)", and a task that isn't due yet (just
+            # previewed with its weekday, not completable) isn't that.
+            if status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE, TASK_STATUS_UPCOMING):
                 for member_id in assigned_member_ids:
                     open_tasks_by_member[member_id] = open_tasks_by_member.get(member_id, 0) + 1
 
@@ -1189,7 +1270,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         For trigger-based (and confirmation) tasks this is ``None`` while
         idle (no sensor event / confirmation request has opened an occurrence
-        yet); for calendar-based tasks there is always a current period.
+        yet). For calendar-based tasks there is *usually* a current period,
+        except - v0.40 - a non-pool "weekly" task with nothing foreseeable
+        yet this week (see _current_period_date): ``None`` there too, same
+        as an untriggered sensor task, since TASK_STATUS_UPCOMING/idle both
+        mean "nothing to claim/complete/skip/toggle right now" either way.
 
         v0.30: an Aufgabenpool task (no fixed assignee(s), no rotation - see
         is_pool_task in _async_update_data) uses _pool_period_date instead of
@@ -1199,13 +1284,36 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         "the current occurrence" through this method. Using the wrong one
         here would let a claim/completion be recorded against a different
         period_key than the one the last refresh actually showed the card.
+        v0.40: now also passes the task's own created_at (_task_created_date)
+        through to that computation for the same reason - before this, a
+        brand-new task's "current occurrence" here could silently disagree
+        with what _async_update_data had just displayed for it.
         """
         if task["recurrence"]["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
             open_occurrence = self.trigger_state.get(task_id)
             return open_occurrence["period_key"] if open_occurrence else None
         is_pool_task = not (task["rotation"].get("member_ids") or [])
         period_date_fn = _pool_period_date if is_pool_task else _current_period_date
-        return period_date_fn(task["recurrence"], dt_util.now().date()).isoformat()
+        period_start = period_date_fn(
+            task["recurrence"], dt_util.now().date(), self._task_created_date(task)
+        )
+        return period_start.isoformat() if period_start is not None else None
+
+    def _task_created_date(self, task: dict) -> date | None:
+        """The local date a task definition was created, if known.
+
+        v0.39: set by TaskStorageCollection._process_create_data in
+        storage.py - a task saved before this field existed has none, and
+        every period-date/overdue computation treats that exactly like
+        before (see _current_period_date/_pool_period_date).
+        """
+        created_at_raw = task.get("created_at")
+        if not created_at_raw:
+            return None
+        parsed_created_at = dt_util.parse_datetime(created_at_raw)
+        if parsed_created_at is None:
+            return None
+        return dt_util.as_local(parsed_created_at).date()
 
     async def async_complete_task(
         self, task_id: str, member_id: str | None = None, *, skip_confirmation: bool = False
@@ -1263,6 +1371,24 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         period_key = self._current_period_key(task_id, task)
         if period_key is None:
             _LOGGER.debug("Task %s has no open occurrence to complete", task_id)
+            return
+
+        # v0.40: server-side half of "Diese Aufgaben sollen erst am Tag
+        # ihrer Fälligkeit erledigt werden können" - the card already hides/
+        # disables the "Erledigt" button for TASK_STATUS_UPCOMING (see
+        # disableComplete in family-tasks-card.js), this is the same rule
+        # enforced here too, same "silent no-op" pattern as every other
+        # guard clause in this method. Read off the last refresh's own
+        # status for this task rather than recomputing it - self.data always
+        # reflects at most COORDINATOR_UPDATE_INTERVAL-old state, same
+        # staleness async_claim_task's eligible_member_ids read above has.
+        current_status = self.data.tasks.get(task_id) if self.data else None
+        if current_status is not None and current_status.status == TASK_STATUS_UPCOMING:
+            _LOGGER.debug(
+                "Task %s is not due until %s yet - ignoring early completion",
+                task_id,
+                current_status.due_at,
+            )
             return
 
         if self.completions.get_last_entry(task_id, period_key) is not None:

@@ -418,9 +418,29 @@
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+  // v0.40: full weekday names for the TASK_STATUS_UPCOMING badge (see
+  // _renderTaskRow) - "Dort soll der Wochentag stehen, an welchem die
+  // Aufgabe fällig werden wird", spelled out rather than abbreviated since
+  // it's the badge's entire content, not a compact multi-select chip label
+  // like WEEKDAY_LABELS above is used for.
+  const WEEKDAY_LABELS_FULL = [
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+  ];
   const STATUS_LABELS = {
     idle: "Wartet auf Sensor",
     pending: "Offen",
+    // v0.40: TASK_STATUS_UPCOMING - this week's occurrence is already known
+    // but not due yet (see _current_period_date in coordinator.py). Only a
+    // generic fallback: _renderTaskRow always replaces this with the actual
+    // weekday it becomes due, this text is only ever seen if due_at were
+    // somehow missing.
+    upcoming: "Anstehend",
     overdue: "Überfällig",
     awaiting_confirmation: "Wartet auf Bestätigung",
     done: "Erledigt",
@@ -428,13 +448,20 @@
   const STATUS_COLORS = {
     idle: "var(--disabled-text-color, #9e9e9e)",
     pending: "var(--warning-color, #ff9800)",
+    // v0.40: a distinct green from "done"'s (--success-color) so the two
+    // are never confused at a glance in the same list.
+    upcoming: "#7cb342",
     overdue: "var(--error-color, #db4437)",
     awaiting_confirmation: "var(--info-color, #039be5)",
     done: "var(--success-color, #43a047)",
   };
   // Statuses considered "currently due" by the hide-not-due toggle: an
-  // occurrence that needs someone to act on it right now.
-  const DUE_STATUSES = ["pending", "overdue", "awaiting_confirmation"];
+  // occurrence that needs someone to act on it right now. v0.40: "upcoming"
+  // is included too even though it isn't actionable *yet* - "Es sollen immer
+  // alle bereits vorhersehbaren Aufgaben der jeweils laufenden Woche
+  // angezeigt werden" means it must survive hideNotDue same as a due one,
+  // it just can't be completed until its own day (see disableComplete).
+  const DUE_STATUSES = ["pending", "upcoming", "overdue", "awaiting_confirmation"];
   const STRATEGY_LABELS = {
     round_robin: "Reihum",
     random: "Zufällig",
@@ -2557,7 +2584,7 @@
       }
 
       if (this._hideNotDue) {
-        return `<div class="list">${ids
+        return `<div class="list">${this._sortByDueAt(ids)
           .map((id) => this._renderTaskRow(id, isAdmin, isParentUser, currentMemberId))
           .join("")}</div>`;
       }
@@ -2568,9 +2595,14 @@
       // itself is off (every not-due occurrence was already dropped above
       // otherwise, leaving nothing left to group). Due occurrences
       // (DUE_STATUSES) stay exactly as before: a flat list, always
-      // expanded, at the top.
-      const dueIds = ids.filter((id) =>
-        DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending")
+      // expanded, at the top - v0.40: now sorted chronologically by due_at
+      // (see _sortByDueAt) instead of the tasks' storage/creation order, so
+      // e.g. an overdue task from three days ago, one due later today, and
+      // a "upcoming" one due this Friday all line up in the order they'll
+      // actually need attention - "Aufgaben sollen in chronologischer
+      // Reihenfolge nach ihrer Fälligkeit dargestellt werden."
+      const dueIds = this._sortByDueAt(
+        ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"))
       );
       const notDueIds = ids.filter((id) => !dueIds.includes(id));
       const dueList = dueIds.length
@@ -2579,6 +2611,25 @@
             .join("")}</div>`
         : "";
       return `${dueList}${this._renderNotDueGroups(notDueIds, isAdmin, isParentUser, currentMemberId)}`;
+    }
+
+    // v0.40: ascending chronological order by due_at (TaskStatusData.due_at
+    // in coordinator.py - an ISO datetime string, or null for a not-yet-
+    // triggered sensor/confirmation task) - see the "Reihenfolge nach ihrer
+    // Fälligkeit" comment above. A missing due_at sorts after every dated
+    // one instead of throwing it to the top as "earliest" (Date.parse(null)
+    // is NaN, which a naive numeric subtraction would otherwise coerce to
+    // 0 - the start of the Unix epoch); a stable order between two ids that
+    // both lack one (or share the exact same instant) falls back to their
+    // existing relative order, same as Array.prototype.sort guarantees for
+    // any other tie.
+    _sortByDueAt(ids) {
+      const dueAtMillis = (id) => {
+        const raw = this._statusStateForTask(id)?.attributes?.due_at;
+        const parsed = raw ? new Date(raw).getTime() : NaN;
+        return Number.isNaN(parsed) ? Infinity : parsed;
+      };
+      return [...ids].sort((a, b) => dueAtMillis(a) - dueAtMillis(b));
     }
 
     // v0.36: groups the not-due (idle/done) part of the task list by
@@ -2635,7 +2686,21 @@
           const statusState = this._statusStateForTask(id);
           const status = statusState?.state ?? "pending";
           const assignedIds = statusState?.attributes?.assigned_member_ids ?? [];
-          const label = STATUS_LABELS[status] ?? status;
+          // v0.40: TASK_STATUS_UPCOMING's badge shows the actual weekday
+          // this occurrence becomes due (due_at, same attribute the
+          // deadline/claim labels below already read) instead of a generic
+          // status word - "Dort soll der Wochentag stehen, an welchem die
+          // Aufgabe fällig werden wird". due_at is a plain ISO datetime
+          // string (see TaskStatusData.due_at in coordinator.py) parsed
+          // with the same `new Date(...)` pattern formatDeadline uses
+          // elsewhere in this file; getDay() (0=Sunday..6=Saturday) is
+          // remapped to WEEKDAY_LABELS_FULL's Monday-first order.
+          const dueAtRaw = statusState?.attributes?.due_at;
+          const upcomingWeekday =
+            status === "upcoming" && dueAtRaw
+              ? WEEKDAY_LABELS_FULL[(new Date(dueAtRaw).getDay() + 6) % 7]
+              : null;
+          const label = upcomingWeekday ?? STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
           const isBattery = task.recurrence?.type === "battery";
           // v0.39: "Checkliste" is no longer a task "kind" of its own (see
@@ -2716,7 +2781,15 @@
                     .join(", ")
                 : "Keine Batterie niedrig"
               : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${overdueSiblingHint}`) + deadlineSuffix;
-          const resolved = status === "done" || status === "idle" || status === "awaiting_confirmation";
+          // v0.40: TASK_STATUS_UPCOMING counts as "resolved" here too -
+          // not because it's finished, but because "Diese Aufgaben sollen
+          // erst am Tag ihrer Fälligkeit erledigt werden können" - the same
+          // rule async_complete_task now enforces server-side.
+          const resolved =
+            status === "done" ||
+            status === "idle" ||
+            status === "awaiting_confirmation" ||
+            status === "upcoming";
           // v0.22: the plain "Überspringen" button (skip to the next
           // occurrence of a recurring task) is removed entirely. The
           // parent-confirmation flow's "Ablehnen" (reject the child's claim)
@@ -2804,7 +2877,7 @@
                 .map(
                   (st) => `
                   <label class="subtask-item ${st.checked ? "checked" : ""}">
-                    <input type="checkbox" data-subtask-toggle data-task-id="${id}" data-subtask-id="${esc(st.id)}" ${st.checked ? "checked" : ""} ${status === "done" ? "disabled" : ""}>
+                    <input type="checkbox" data-subtask-toggle data-task-id="${id}" data-subtask-id="${esc(st.id)}" ${st.checked ? "checked" : ""} ${status === "done" || status === "upcoming" ? "disabled" : ""}>
                     <span class="subtask-name">${esc(st.name)}</span>
                   </label>`
                 )
@@ -4408,11 +4481,40 @@
       // "value-changed" with composed:true, so it crosses these elements'
       // internal shadow boundaries and reaches this listener on
       // this.shadowRoot without further wiring.
+      //
+      // v0.40: fixes "Icon-Auswahl funktioniert nicht, wenn man über die
+      // Eingabe des Icon-Namens filtert". <ha-icon-picker> is a searchable
+      // combo-box (allows a custom typed value, not just picking from its
+      // list) - unlike <ha-date-input>/<ha-time-input>, whose "value-changed"
+      // only ever fires once on an actual, final selection, it fires one on
+      // *every keystroke* while the user types into it to filter its
+      // suggestions, long before they've picked anything. Replaying every
+      // one of those as a "change" used to run the exact same branch as any
+      // other field edit above, which replaces the *entire* form via
+      // outerHTML - destroying and recreating this very <ha-icon-picker>
+      // (along with its open dropdown, its own filter text, and the input's
+      // focus) after every single typed character, so a second keystroke
+      // had nothing left to land in. Nothing else on the form ever depends
+      // on which icon is picked (unlike e.g. recurrence.type revealing/
+      // hiding other fields), so there is nothing that actually needs a
+      // redraw for it - update the draft value directly for an icon picker
+      // instead and leave its own DOM/focus alone; every other picker keeps
+      // going through the full "change" replay exactly as before.
       this.shadowRoot.addEventListener("value-changed", (ev) => {
         const el = ev.target;
         if (ev.detail?.value === undefined) return;
         if (!el.matches?.("[data-field], [data-reward-field]")) return;
         el.value = ev.detail.value;
+        if (el.matches("ha-icon-picker")) {
+          if (el.matches("[data-reward-field]")) {
+            this._rewardForm[el.dataset.rewardField] = el.value;
+            return;
+          }
+          const form = el.closest("[data-form]");
+          const spec = form && this._formSpec(form.dataset.form);
+          if (spec) this._applyFieldChange(spec.target, el);
+          return;
+        }
         el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       });
     }

@@ -299,9 +299,18 @@ TASK_STATUS_PENDING: Final = "pending"
 TASK_STATUS_OVERDUE: Final = "overdue"
 TASK_STATUS_AWAITING_CONFIRMATION: Final = "awaiting_confirmation"
 TASK_STATUS_DONE: Final = "done"
+# v0.40: a calendar-based task (in practice: "weekly") whose current-week
+# occurrence is already known (see _current_period_date in coordinator.py)
+# but not due yet - visible with its weekday so it isn't a surprise once the
+# day arrives, but not completable until then (see async_complete_task).
+# Never used for an "Aufgabenpool" task (is_pool_task in coordinator.py),
+# which stays TASK_STATUS_PENDING for the same early-preview window -
+# claiming/completing one ahead of its day is the whole point of the pool.
+TASK_STATUS_UPCOMING: Final = "upcoming"
 TASK_STATUSES: Final = [
     TASK_STATUS_IDLE,
     TASK_STATUS_PENDING,
+    TASK_STATUS_UPCOMING,
     TASK_STATUS_OVERDUE,
     TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_DONE,
