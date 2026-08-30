@@ -340,6 +340,41 @@ class FamilyTasksMemberOpenTasksSensor(
         return {"member_id": self._member_id}
 
 
+class FamilyTasksPoolTasksSensor(
+    CoordinatorEntity[FamilyTasksCoordinator], SensorEntity
+):
+    """Number of currently unclaimed, actionable "Aufgabenpool" occurrences.
+
+    v0.38: household-wide, unlike FamilyTasksMemberOpenTasksSensor above -
+    an Aufgabenpool occurrence (see is_pool_task in coordinator.py) has no
+    assignee at all until someone claims it, so it can't be attributed to
+    any one member's counter. native_value mirrors
+    FamilyTasksData.pool_tasks_open, which is computed to match exactly
+    what the card's own "Aufgabenpool" section (_renderTaskPoolSection in
+    family-tasks-card.js) currently shows - see that field's docstring in
+    coordinator.py for the precise inclusion rules.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:tray-full"
+
+    def __init__(
+        self, coordinator: FamilyTasksCoordinator, entry: FamilyTasksConfigEntry
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_pool_tasks"
+        self._attr_device_info = _device_info(entry)
+        self._attr_translation_key = "pool_tasks"
+
+    @property
+    def name(self) -> str:
+        return "Aufgabenpool"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.data.pool_tasks_open
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: FamilyTasksConfigEntry,
@@ -347,6 +382,13 @@ async def async_setup_entry(
 ) -> None:
     """Set up Family Tasks sensors, dynamically tracking tasks/members."""
     coordinator = entry.runtime_data.coordinator
+
+    # v0.38: household-wide, so - unlike every per-task/per-member sensor
+    # below - it never needs the known_tasks/known_members "is this new?"
+    # dance: exactly one always exists for the lifetime of the config entry,
+    # added once, right here, rather than from inside
+    # _async_add_new_entities.
+    async_add_entities([FamilyTasksPoolTasksSensor(coordinator, entry)])
 
     known_tasks: set[str] = set()
     known_members: set[str] = set()
@@ -411,7 +453,8 @@ async def async_setup_entry(
             | {
                 f"{entry.entry_id}_member_{mid}_open_tasks"
                 for mid in coordinator.data.members
-            },
+            }
+            | {f"{entry.entry_id}_pool_tasks"},
         )
         known_tasks.intersection_update(coordinator.tasks.data)
         known_members.intersection_update(coordinator.data.members)

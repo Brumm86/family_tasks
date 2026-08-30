@@ -380,6 +380,14 @@ class FamilyTasksData:
     # having to separately track the switch entity's state too. See
     # VacationModeStateStore in storage.py.
     vacation_mode_active: bool = False
+    # v0.38: how many "Aufgabenpool" occurrences are currently unclaimed and
+    # actionable - see pool_tasks_open in _async_update_data for exactly
+    # which occurrences count (matches the card's own
+    # _renderTaskPoolSection). Unlike the options-derived fields above this
+    # is a primary, at-a-glance household figure, so it gets its own
+    # dedicated entity (FamilyTasksPoolTasksSensor in sensor.py) rather than
+    # riding along as a plain attribute somewhere.
+    pool_tasks_open: int = 0
 
 
 def _current_period_date(recurrence: dict, today: date) -> date:
@@ -599,6 +607,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         task_statuses: dict[str, TaskStatusData] = {}
         open_tasks_by_member: dict[str, int] = {}
+        # v0.38: how many "Aufgabenpool" occurrences (is_pool_task below) are
+        # currently unclaimed and actionable - backs
+        # FamilyTasksData.pool_tasks_open / the dedicated
+        # FamilyTasksPoolTasksSensor (sensor.py). Mirrors exactly which ids
+        # the card's own _renderTaskPoolSection (family-tasks-card.js) would
+        # show: incremented below for a pool task that is neither claimed
+        # (claimed_by_member_id) nor TASK_STATUS_DONE nor - the one
+        # recurrence-specific case, see _isPoolTask/_renderTaskPoolSection -
+        # a "trigger" pool task still TASK_STATUS_IDLE (nothing open yet).
+        pool_tasks_open = 0
         # Every member with at least one TASK_KIND_MANDATORY task currently
         # TASK_STATUS_OVERDUE and assigned to them - see
         # MemberSummaryData.screen_time_grant_active below.
@@ -870,6 +888,24 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 assigned_member_id = claimed_by_member_id
                 assigned_member_ids = [claimed_by_member_id]
 
+            # v0.38: count this occurrence towards pool_tasks_open (see its
+            # declaration above) under exactly the same conditions the
+            # card's own _renderTaskPoolSection uses to decide whether to
+            # show it in the "Aufgabenpool" section: an unclaimed pool task,
+            # not already done, and - the one recurrence-specific exception,
+            # see _isPoolTask/_renderTaskPoolSection in
+            # family-tasks-card.js - not a still-"idle" "trigger" task (its
+            # sensor hasn't opened an occurrence yet, so there is nothing to
+            # "Annehmen"). Every other pool task has no "due" concept of its
+            # own and counts here for the entire week, matching the card.
+            if (
+                is_pool_task
+                and not claimed_by_member_id
+                and status != TASK_STATUS_DONE
+                and not (recurrence["type"] == RECURRENCE_TRIGGER and status == TASK_STATUS_IDLE)
+            ):
+                pool_tasks_open += 1
+
             subtasks_status: list[dict] = []
             if task.get("kind") == TASK_KIND_CHECKLIST:
                 checked_ids = self.checklist_state.checked_ids(task_id, period_key)
@@ -1067,6 +1103,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             streak_200_bonus_coins=streak_200_bonus_coins,
             streak_bonus_required_weeks=streak_bonus_required_weeks,
             vacation_mode_active=vacation_mode_active,
+            pool_tasks_open=pool_tasks_open,
         )
 
     def _current_period_key(self, task_id: str, task: dict) -> str | None:

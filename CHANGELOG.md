@@ -2,6 +2,15 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.38.0] - 2026-08-30
+
+### Added
+- **Neuer Sensor für die Anzahl der Aufgabenpool-Aufgaben**: `sensor.<haushalt>_aufgabenpool` (`FamilyTasksPoolTasksSensor` in `sensor.py`) zeigt, wie viele "Aufgabenpool"-Vorkommen (unzugewiesene Aufgaben ohne feste Rotation, siehe `is_pool_task` in `coordinator.py`) gerade unbeansprucht und aktionsfähig sind - exakt die Menge, die die Karte selbst im "Aufgabenpool"-Abschnitt anzeigt (`FamilyTasksData.pool_tasks_open`, berechnet nach denselben Regeln wie `_renderTaskPoolSection`). Household-weit, da eine Aufgabenpool-Aufgabe bis zur Übernahme keinem Mitglied zugeordnet ist und sich daher keinem bestehenden Punkte-/Aufgaben-Sensor anhängen lässt.
+
+### Fixed
+- **Sensorbasierte Aufgaben zeigten nur den Sensorwert statt der Punktzahl**: die Detailzeile einer Aufgabe mit Wiederholung "Sensor-Ereignis" (`recurrence.type: "trigger"`) zeigte bisher ausschließlich den aktuellen Wert des gebundenen Sensors (z. B. "Sensor: 18.4 °C") anstelle von Zuständigem und Punktzahl, wie es jede andere Aufgabe tut. `_renderTaskRow` in `family-tasks-card.js` zeigt jetzt für Sensor-Ereignis-Aufgaben dasselbe "Zuständiger · X Pkt."-Format wie für Standardaufgaben; der Live-Sensorwert bleibt weiterhin über die `trigger_sensor_value`/`trigger_sensor_unit`-Attribute des Status-Sensors abrufbar (z. B. für eigene Automatisierungen), erscheint aber nicht mehr in dieser Zeile.
+- **Aufgabenpool-Aufgabe konnte vollständig aus der Karte verschwinden**: eine unbeanspruchte "Aufgabenpool"-Aufgabe (kein fester Zuständiger, keine Rotation) wurde bisher in der normalen Aufgabenliste immer ausgeblendet, in der Annahme, sie tauche stattdessen im "Aufgabenpool"-Abschnitt auf. Dieser Abschnitt blendet eine solche Aufgabe aber selbst aus, sobald sie erledigt ist oder - bei einer Sensor-Ereignis-Aufgabe - ihr Sensor noch gar nicht ausgelöst hat (Status "idle"). In genau diesen beiden Fällen war eine unbeanspruchte Aufgabenpool-Aufgabe dadurch in *keiner* Ansicht mehr zu sehen, bis sich ihr Status wieder änderte - sie "verschwand komplett". Neue Hilfsfunktion `_isPoolTaskOpen` in `family-tasks-card.js` kapselt die Sichtbarkeitsregel des Aufgabenpool-Abschnitts an einer Stelle; `_renderTaskList` lässt eine Aufgabenpool-Aufgabe jetzt genau dann in die normale Liste durch, wenn `_isPoolTaskOpen` sie ausschließt (dort erscheint sie wie jede andere Aufgabe - z. B. unter "Nicht fällige Aufgaben", solange ihr Sensor noch nicht ausgelöst hat, oder normal "erledigt").
+
 ## [0.37.0] - 2026-08-27
 
 ### Added

@@ -57,6 +57,9 @@
       },
       "member_open_tasks": {
         "name": "Offene Aufgaben"
+      },
+      "pool_tasks": {
+        "name": "Aufgabenpool"
       }
     },
     "button": {

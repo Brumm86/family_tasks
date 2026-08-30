@@ -59,8 +59,14 @@
       "member_points": {
         "name": "Points"
       },
+      "member_coins": {
+        "name": "Coins"
+      },
       "member_open_tasks": {
         "name": "Open tasks"
+      },
+      "pool_tasks": {
+        "name": "Pool tasks"
       }
     },
     "button": {

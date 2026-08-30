@@ -2469,11 +2469,22 @@
       // their own dedicated section below (_renderTaskPoolSection),
       // unaffected by hideNotDue/hideCompleted/the member-filter chips - so
       // they're excluded here to avoid showing up twice. v0.32: a pool
-      // occurrence someone has actively claimed is the one exception - see
+      // occurrence someone has actively claimed is one exception - see
       // _isClaimedPoolTask - it belongs in this normal list (subject to the
       // same filters as everything else) instead, since it's no longer
       // "unclaimed pool work", it's firmly the claimant's task now.
-      ids = ids.filter((id) => !this._isPoolTask(id) || this._isClaimedPoolTask(id));
+      //
+      // v0.38: an unclaimed pool occurrence _renderTaskPoolSection itself
+      // wouldn't show right now is the other exception - see
+      // _isPoolTaskOpen (done, or a still-idle "Sensor-Ereignis" task whose
+      // sensor hasn't fired yet). Excluding every unclaimed pool task here
+      // unconditionally used to mean such an occurrence was excluded from
+      // *both* sections at once and simply vanished from the card entirely
+      // until its status changed again - "Aufgabe fehlt komplett, überall".
+      // It now falls through into this normal list instead, where it's
+      // treated like any other task (grouped into "nicht fällige Aufgaben"
+      // while idle, hidden by "Erledigte ausblenden" once done, etc.).
+      ids = ids.filter((id) => !this._isPoolTask(id) || !this._isPoolTaskOpen(id));
       const totalCount = ids.length;
       // v0.28: independent of hideNotDue above (which is admin-only and
       // bundles "done" together with "idle"/waiting-for-sensor) - this
@@ -2596,7 +2607,6 @@
           const assignedIds = statusState?.attributes?.assigned_member_ids ?? [];
           const label = STATUS_LABELS[status] ?? status;
           const color = STATUS_COLORS[status] ?? "var(--secondary-text-color)";
-          const isTrigger = task.recurrence?.type === "trigger";
           const isBattery = task.recurrence?.type === "battery";
           const isChecklist = task.kind === "checklist";
           // v0.14: called out to the child as mandatory - see
@@ -2610,15 +2620,6 @@
           const isConfirmation = !!task.confirms;
           const batteryEntities = statusState?.attributes?.battery_entities ?? [];
           const subtasks = statusState?.attributes?.subtasks ?? [];
-          const triggerValue = statusState?.attributes?.trigger_sensor_value;
-          const triggerUnit = statusState?.attributes?.trigger_sensor_unit;
-          // Only the sensor's current value is shown here, not which entity
-          // it is - that's a configuration detail visible in the edit form,
-          // not on the task card itself (v0.9).
-          const triggerValueLabel =
-            triggerValue !== undefined && triggerValue !== null && triggerValue !== ""
-              ? `${esc(triggerValue)}${triggerUnit ? ` ${esc(triggerUnit)}` : ""}`
-              : "–";
           const assigneeLabel = assignedIds.length
             ? assignedIds.map((mid) => esc(this._memberName(mid))).join(", ")
             : "–";
@@ -2659,13 +2660,22 @@
             !isConfirmation && deadlineAt && (status === "pending" || status === "overdue")
               ? ` · Zu erledigen bis ${esc(formatDeadline(deadlineAt))}`
               : "";
+          // v0.38: a "trigger" (sensor-based) task used to show only the
+          // bound sensor's live value here ("Sensor: 18.4 °C") instead of
+          // the point value every other task's detail line ends with -
+          // "Sensorbasierte Aufgaben zeigen nur den Wert des Sensors, nicht
+          // aber den Punktwert an. Es soll nur der Punktwert angezeigt
+          // werden." A trigger task now falls through to the same
+          // assignee/points format as every other task instead of a special
+          // case; the bound sensor's live value (still exposed as the
+          // trigger_sensor_value/trigger_sensor_unit status-sensor
+          // attributes, e.g. for an automation) is no longer shown on the
+          // row itself.
           const detail =
             (isConfirmation
               ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
               : isChecklist
               ? `${subtasks.filter((s) => s.checked).length}/${subtasks.length} erledigt`
-              : isTrigger
-              ? `Sensor: ${triggerValueLabel}`
               : isBattery
               ? batteryEntities.length
                 ? batteryEntities
@@ -2795,7 +2805,7 @@
     // v0.30: "Aufgabenpool" - a task with no fixed assignee(s) *and* no
     // rotation at all (rotation.member_ids empty - see is_pool_task in
     // coordinator.py). Read straight off the raw task definition (like
-    // isTrigger/isChecklist in _renderTaskRow above), not off the sensor
+    // isChecklist in _renderTaskRow above), not off the sensor
     // attributes, since it never changes between refreshes.
     _isPoolTask(id) {
       const memberIds = this._tasks[id]?.rotation?.member_ids ?? [];
@@ -2817,6 +2827,31 @@
       return !!this._statusStateForTask(id)?.attributes?.claimed_by_member_id;
     }
 
+    // v0.38: whether a pool task is currently unclaimed *and* actionable -
+    // exactly the condition _renderTaskPoolSection uses (on top of its own
+    // _isPoolTask/vacation-pause checks) to decide whether to show the
+    // occurrence there. Meaningless for a non-pool task (falls through to
+    // "not claimed, not done, not an idle trigger" = true), so both call
+    // sites below only ever call this once they already know _isPoolTask(id)
+    // is true. _renderTaskList uses the same condition the other way
+    // around: whenever this is false for a pool task,
+    // _renderTaskPoolSection won't show it either, so the occurrence must
+    // fall through into the normal list instead of being dropped from the
+    // card entirely - see the fix note at that filter.
+    _isPoolTaskOpen(id) {
+      if (this._isClaimedPoolTask(id)) return false;
+      const status = this._statusStateForTask(id)?.state ?? "pending";
+      if (status === "done") return false;
+      // v0.36: a sensor-triggered ("trigger" recurrence) pool task has
+      // nothing to claim/act on until its bound sensor actually opens an
+      // occurrence (status "idle" - no open_occurrence yet, see
+      // TriggerStateStore/_current_period_key in coordinator.py). Every
+      // other pool task has no "due" concept of its own and is open for
+      // the entire period.
+      if (this._tasks[id]?.recurrence?.type === "trigger" && status === "idle") return false;
+      return true;
+    }
+
     // v0.30: dedicated section for Aufgabenpool tasks, always shown
     // regardless of hideNotDue/hideCompleted/the member-filter chips (see
     // "Unter offenen Aufgaben sollen ungeachtet der Filtereinstellungen auch
@@ -2832,25 +2867,18 @@
       const isParentUser = isAdmin && !this._isChildUser();
       const ids = Object.keys(this._tasks).filter((id) => {
         if (!this._isPoolTask(id)) return false;
-        // v0.32: already claimed - shows in the normal task list instead
-        // (see _isClaimedPoolTask / the _renderTaskList filter above).
-        if (this._isClaimedPoolTask(id)) return false;
         // v0.33: hidden for the duration of Urlaubsmodus - see
         // _isVacationPaused / the matching filter in _renderTaskList.
         if (this._isVacationPaused(id)) return false;
-        const status = this._statusStateForTask(id)?.state ?? "pending";
-        if (status === "done") return false;
-        // v0.36: a sensor-triggered ("trigger" recurrence) pool task should
-        // only show up here once its bound sensor has actually opened an
-        // occurrence - before that its status is "idle" (no open_occurrence
-        // yet, see TriggerStateStore/_current_period_key in
-        // coordinator.py), and showing it here all week regardless would
-        // offer "Annehmen" on something nobody can actually act on yet.
-        // Every other (non-"trigger") pool task has no "due" concept of its
-        // own and keeps the previous always-visible-for-the-whole-week
-        // behavior unchanged.
-        if (this._tasks[id]?.recurrence?.type === "trigger" && status === "idle") return false;
-        return true;
+        // v0.32/v0.36, extracted into _isPoolTaskOpen in v0.38: already
+        // claimed (shows in the normal task list instead - see
+        // _isClaimedPoolTask), already done, or - a sensor-triggered
+        // "trigger" recurrence task specifically - still idle because its
+        // bound sensor hasn't opened an occurrence yet (offering "Annehmen"
+        // on something nobody can actually act on yet would make no
+        // sense). Every other (non-"trigger") pool task has no "due"
+        // concept of its own and stays visible here for the entire period.
+        return this._isPoolTaskOpen(id);
       });
       if (!ids.length) return "";
 
