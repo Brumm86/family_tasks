@@ -2,6 +2,15 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.41.0] - 2026-09-02
+
+### Added
+- **Fällig-/Überfällig-Erinnerung je zugewiesener Aufgabe**: jedes Mitglied mit einer fest zugewiesenen oder rotierenden Aufgabe bekommt jetzt zusätzlich zur bestehenden "neu angelegt"-Benachrichtigung (v0.14) zwei weitere, unabhängige Benachrichtigungen während des Lebenszyklus einer Periode - einmal, sobald sie "fällig" wird (`TASK_STATUS_PENDING`, neues Event `family_tasks_task_due`, Text "Fällig: ...") und einmal, sobald sie "überfällig" wird (`TASK_STATUS_OVERDUE`, neues Event `family_tasks_task_overdue`, Text "Überfällig: ..."). Derselbe Zwei-Kanal-Mechanismus wie bisher (`notify.*`-Dienst des Mitglieds, sonst `persistent_notification`). Ein zum Prüfzeitpunkt inaktives oder pausiertes Mitglied wird übersprungen, aber nicht als benachrichtigt markiert, sodass es die (dann verspätete) Erinnerung nachträglich bekommt, sobald es innerhalb derselben Periode wieder aktiv wird.
+- **Aufgabenpool benachrichtigt bei jeder neuen Periode, nicht nur einmalig bei Anlage**: die bestehende Aufgabenpool-Benachrichtigung (v0.39, `family_tasks_task_pool_added`) feuerte bisher ausschließlich beim erstmaligen Anlegen einer Aufgabenpool-Aufgabe - eine wiederkehrende Aufgabenpool-Aufgabe (z. B. "Rasen mähen", wöchentlich) benachrichtigte für jede weitere Periode danach niemanden mehr. Sie läuft jetzt über denselben Mechanismus wie die neuen Fällig-/Überfällig-Erinnerungen und feuert dadurch bei jeder Periode erneut, sobald diese aktionsfähig wird (`TASK_STATUS_PENDING`).
+
+### Changed
+- **Notification-Idempotenz zentral im Coordinator statt beim Anlegen**: neue `FamilyTasksCoordinator._async_notify_task_status`/`_async_notify_deadline` (`coordinator.py`), aufgerufen einmal pro Aufgabe am Ende der Status-Berechnung in `_async_update_data`. Neuer `DeadlineNotificationStateStore` (`storage.py`, gleiches Runtime-Bookkeeping-Muster wie `TriggerStateStore`/`ClaimStateStore`) sorgt dafür, dass jede Benachrichtigung genau einmal pro (Aufgabe, Periode, Stufe[, Mitglied]) feuert statt bei jedem Coordinator-Refresh erneut. Die bisherige Aufgabenpool-Benachrichtigung in `__init__._async_notify_new_task_assignments` ist entsprechend vereinfacht - sie kümmert sich seither nur noch um fest/rotierend zugewiesene Aufgaben, der Aufgabenpool-Zweig ist komplett in den Coordinator gewandert.
+
 ## [0.40.0] - 2026-08-30
 
 ### Fixed

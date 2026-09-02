@@ -68,6 +68,7 @@ from .const import (
     STORAGE_KEY_COIN_LEDGER,
     STORAGE_KEY_COIN_SYSTEM_STATE,
     STORAGE_KEY_COMPLETIONS,
+    STORAGE_KEY_DEADLINE_NOTIFICATION_STATE,
     STORAGE_KEY_FAVORITES,
     STORAGE_KEY_MEMBERS,
     STORAGE_KEY_REWARD_REDEMPTIONS,
@@ -2174,6 +2175,104 @@ class ClaimStateStore:
 async def async_create_claim_state_store(hass: HomeAssistant) -> ClaimStateStore:
     """Create and load the task-claim state store."""
     store = ClaimStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class DeadlineNotificationStateStore:
+    """Tracks which due/overdue/Aufgabenpool-appearance notifications already fired.
+
+    See FamilyTasksCoordinator._async_notify_task_status in coordinator.py:
+    that runs on every coordinator refresh (every COORDINATOR_UPDATE_INTERVAL,
+    or on-demand after any task/member change - see _async_update_data), so
+    without this a "fällig"/"überfällig" reminder or the Aufgabenpool
+    "appeared" broadcast would re-fire on every single refresh for as long as
+    an occurrence stays TASK_STATUS_PENDING/TASK_STATUS_OVERDUE, instead of
+    exactly once per (task, occurrence, stage[, member]).
+
+    Not a StorageCollection: runtime bookkeeping only, never edited by the
+    user - same pattern as TriggerStateStore/ChecklistStateStore/
+    ClaimStateStore. Keyed by task_id; a stored entry whose period_key no
+    longer matches the task's current period is stale (the occurrence rolled
+    over to a new one) and is treated as "nothing notified yet" for the new
+    period, same reasoning as ChecklistStateStore.checked_ids/
+    ClaimStateStore.get - so a recurring task's next occurrence always gets
+    its own fresh due/overdue/appeared notifications.
+
+    "stage" is one of "due", "overdue" (per assigned member - see
+    has_notified/async_mark_notified) or "pool_appeared" (whole-household,
+    tracked under the synthetic _BROADCAST_MEMBER_ID marker - see
+    has_pool_appeared/async_mark_pool_appeared) - a pool task has no
+    individual assignee to key "due"/"overdue" off of, and conversely a
+    task with a fixed/rotating assignee never uses "pool_appeared" (see
+    is_pool_task in coordinator.py, which the two are always mutually
+    exclusive with).
+    """
+
+    _BROADCAST_MEMBER_ID = "__all__"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, dict[str, Any]]] = Store(
+            hass,
+            STORAGE_VERSION,
+            STORAGE_KEY_DEADLINE_NOTIFICATION_STATE,
+            minor_version=STORAGE_VERSION_MINOR,
+        )
+        # task_id -> {"period_key": str, "due": [member_id...],
+        #             "overdue": [member_id...], "pool_appeared": [...]}
+        self._state: dict[str, dict[str, Any]] = {}
+
+    async def async_load(self) -> None:
+        """Load already-fired notification markers from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def _entry_for_period(self, task_id: str, period_key: str) -> dict[str, Any]:
+        """Return the stored entry for a task's *current* period.
+
+        A stored entry for a different (stale) period_key is discarded here
+        rather than mutated - the caller only ever sees "not notified yet"
+        for a period it hasn't stored anything for.
+        """
+        entry = self._state.get(task_id)
+        if not entry or entry.get("period_key") != period_key:
+            return {"period_key": period_key, "due": [], "overdue": [], "pool_appeared": []}
+        return entry
+
+    def has_notified(self, task_id: str, period_key: str, stage: str, member_id: str) -> bool:
+        """Whether ``member_id`` was already notified for this stage/period."""
+        return member_id in self._entry_for_period(task_id, period_key).get(stage, [])
+
+    def has_pool_appeared(self, task_id: str, period_key: str) -> bool:
+        """Whether the Aufgabenpool "appeared" broadcast already fired for this period."""
+        return self.has_notified(task_id, period_key, "pool_appeared", self._BROADCAST_MEMBER_ID)
+
+    async def async_mark_notified(
+        self, task_id: str, period_key: str, stage: str, member_id: str
+    ) -> None:
+        """Record that ``member_id`` was just notified for this stage/period."""
+        entry = self._entry_for_period(task_id, period_key)
+        if member_id not in entry[stage]:
+            entry[stage].append(member_id)
+        self._state[task_id] = entry
+        await self._store.async_save(self._state)
+
+    async def async_mark_pool_appeared(self, task_id: str, period_key: str) -> None:
+        """Record that the Aufgabenpool "appeared" broadcast just fired for this period."""
+        await self.async_mark_notified(
+            task_id, period_key, "pool_appeared", self._BROADCAST_MEMBER_ID
+        )
+
+    async def async_clear(self, task_id: str) -> None:
+        """Drop all stored notification markers for a task, e.g. once it's deleted."""
+        if self._state.pop(task_id, None) is not None:
+            await self._store.async_save(self._state)
+
+
+async def async_create_deadline_notification_state_store(
+    hass: HomeAssistant,
+) -> DeadlineNotificationStateStore:
+    """Create and load the due/overdue/Aufgabenpool-appearance notification state store."""
+    store = DeadlineNotificationStateStore(hass)
     await store.async_load()
     return store
 

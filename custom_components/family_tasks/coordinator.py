@@ -60,6 +60,9 @@ from .const import (
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
+    EVENT_TASK_DUE,
+    EVENT_TASK_OVERDUE,
+    EVENT_TASK_POOL_ADDED,
     EVENT_TASK_REJECTED,
     MANUAL_POINTS_TASK_ID,
     MEMBER_ROLE_CHILD,
@@ -92,6 +95,7 @@ from .storage import (
     CoinLedgerStore,
     CoinSystemStateStore,
     CompletionLogStore,
+    DeadlineNotificationStateStore,
     MemberStorageCollection,
     MilestoneBonusStateStore,
     RewardRedemptionStorageCollection,
@@ -617,6 +621,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         coin_ledger: CoinLedgerStore,
         coin_system_state: CoinSystemStateStore,
         weekly_coin_conversion_state: WeeklyCoinConversionStateStore,
+        deadline_notification_state: DeadlineNotificationStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -641,6 +646,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.coin_system_state = coin_system_state
         # v0.37: see WeeklyCoinConversionStateStore in storage.py.
         self.weekly_coin_conversion_state = weekly_coin_conversion_state
+        # v0.41: see DeadlineNotificationStateStore in storage.py -
+        # idempotency for the "fällig"/"überfällig"/Aufgabenpool-"appeared"
+        # notifications raised from _async_notify_task_status below.
+        self.deadline_notification_state = deadline_notification_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -921,6 +930,15 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     # "due", it's idle until a monitored battery drops to or
                     # below its warning threshold.
                     status = TASK_STATUS_IDLE
+
+            # v0.41: "fällig"/"überfällig" reminders (assigned tasks) and
+            # the Aufgabenpool "appeared" broadcast (pool tasks) - see
+            # _async_notify_task_status's own docstring. status has its
+            # final value for this refresh at this point (including the
+            # battery-idle override just above).
+            await self._async_notify_task_status(
+                task_id, task["name"], period_key, status, is_pool_task, assigned_member_ids
+            )
 
             # v0.25: once this occurrence is overdue and at least one current
             # assignee is a child, every other active child in the household
@@ -1562,6 +1580,142 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
             await self.trigger_state.async_clear(task_id)
         await self.async_request_refresh()
+
+    async def _async_notify_task_status(
+        self,
+        task_id: str,
+        task_name: str,
+        period_key: str,
+        status: str,
+        is_pool_task: bool,
+        assigned_member_ids: list[str],
+    ) -> None:
+        """Fire the Aufgabenpool/"fällig"/"überfällig" reminders, once each.
+
+        Called once per task from the main loop in _async_update_data, right
+        after ``status`` has its final value for this refresh (including the
+        battery-idle override just above that call site). This method itself
+        runs on *every* coordinator refresh (every COORDINATOR_UPDATE_INTERVAL,
+        or on-demand after any task/member/battery-override change - see
+        _async_collection_changed in __init__.py), so every branch below is
+        guarded by DeadlineNotificationStateStore to fire at most once per
+        (task, occurrence, stage[, member]) - without that, the same reminder
+        would go out again on every single refresh for as long as the
+        occurrence stays pending or overdue.
+
+        - An Aufgabenpool occurrence (``is_pool_task`` - no fixed/rotating
+          assignee, see is_pool_task in _async_update_data) broadcasts once to
+          every active, non-paused member the moment it becomes actionable
+          (TASK_STATUS_PENDING) - covers a brand-new pool task as well as a
+          recurring one's next occurrence appearing each period, superseding
+          the old creation-only notification that used to live in
+          __init__._async_notify_new_task_assignments (v0.39). Not re-raised
+          once merely TASK_STATUS_OVERDUE - "auftauchen" (a task appearing in
+          the pool) only happens once per occurrence.
+        - A task with a fixed/rotating assignee (``assigned_member_ids``)
+          notifies each currently assigned, active, non-paused member once
+          when the occurrence turns TASK_STATUS_PENDING ("fällig") and again,
+          independently, once it turns TASK_STATUS_OVERDUE ("überfällig").
+          A member who is inactive/paused at the moment this fires is skipped
+          *without* being marked notified, so they still get the (by-then-
+          late) reminder once they're active again within the same occurrence,
+          rather than missing it outright.
+
+        Neither branch ever applies to an auto-generated parent-confirmation
+        task with no assignee (``is_pool_task`` already excludes it, same as
+        the pool-eligibility logic elsewhere in this method's caller).
+        """
+        if is_pool_task:
+            if status != TASK_STATUS_PENDING:
+                return
+            if self.deadline_notification_state.has_pool_appeared(task_id, period_key):
+                return
+            await self.deadline_notification_state.async_mark_pool_appeared(task_id, period_key)
+            message = f"Neue Aufgabe im Aufgabenpool: {task_name}"
+            for member_id, member in self.members.data.items():
+                if not member.get("active", True) or self._member_paused(member_id):
+                    continue
+                await self._async_notify_deadline(
+                    member_id, member, task_id, task_name, message, EVENT_TASK_POOL_ADDED
+                )
+            return
+
+        if not assigned_member_ids or status not in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE):
+            return
+        stage = "due" if status == TASK_STATUS_PENDING else "overdue"
+        message = f"Fällig: {task_name}" if stage == "due" else f"Überfällig: {task_name}"
+        event_type = EVENT_TASK_DUE if stage == "due" else EVENT_TASK_OVERDUE
+        for member_id in assigned_member_ids:
+            if self.deadline_notification_state.has_notified(task_id, period_key, stage, member_id):
+                continue
+            member = self.members.data.get(member_id)
+            if not member or not member.get("active", True) or self._member_paused(member_id):
+                continue
+            await self.deadline_notification_state.async_mark_notified(
+                task_id, period_key, stage, member_id
+            )
+            await self._async_notify_deadline(
+                member_id, member, task_id, task_name, message, event_type
+            )
+
+    async def _async_notify_deadline(
+        self,
+        member_id: str,
+        member: dict,
+        task_id: str,
+        task_name: str,
+        message: str,
+        event_type: str,
+    ) -> None:
+        """Best-effort notify one member - due/overdue reminder or pool broadcast.
+
+        Mirrors __init__._async_notify_member's / _async_notify_rejection's
+        two-channel pattern (the member's own configured notify.* service,
+        else a persistent_notification fallback) - duplicated here rather
+        than imported, same reasoning as _async_notify_rejection (avoids a
+        circular import with __init__.py, which already imports from this
+        module). notification_id is keyed by event_type as well as task_id/
+        member_id so a "fällig" reminder and a later "überfällig" one for
+        the same task/member don't overwrite each other's still-unread
+        persistent_notification.
+        """
+        title = "Family Tasks"
+
+        notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
+        if notify_service:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    notify_service,
+                    {"title": title, "message": message},
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "Failed to call notify.%s for %s: %s", notify_service, member_id, err
+                )
+        else:
+            try:
+                persistent_notification.async_create(
+                    self.hass,
+                    message,
+                    title=title,
+                    notification_id=f"{DOMAIN}_{event_type}_{task_id}_{member_id}",
+                )
+            except Exception as err:  # noqa: BLE001 - best-effort, must never block the refresh
+                _LOGGER.warning(
+                    "Failed to raise persistent notification for %s: %s", member_id, err
+                )
+
+        self.hass.bus.async_fire(
+            event_type,
+            {
+                "member_id": member_id,
+                "member_name": member.get("name"),
+                "task_id": task_id,
+                "task_name": task_name,
+            },
+        )
 
     async def _async_notify_rejection(
         self, member_id: str, task_name: str, note: str | None

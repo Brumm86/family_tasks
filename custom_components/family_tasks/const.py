@@ -575,6 +575,14 @@ STORAGE_KEY_VACATION_MODE: Final = f"{DOMAIN}.vacation_mode"
 # CoinLedgerStore - see WeeklyCoinConversionStateStore in storage.py and
 # COIN_REASON_WEEKLY_CONVERSION above.
 STORAGE_KEY_WEEKLY_COIN_CONVERSION_STATE: Final = f"{DOMAIN}.weekly_coin_conversion_state"
+# v0.41: tracks which "fällig"/"überfällig" reminders (per assigned
+# member) and which Aufgabenpool "appeared" broadcasts have already fired
+# for a task's *current* occurrence - see DeadlineNotificationStateStore in
+# storage.py and FamilyTasksCoordinator._async_notify_task_status in
+# coordinator.py. Without this, the same reminder would re-fire on every
+# single coordinator refresh for as long as the occurrence stays pending or
+# overdue.
+STORAGE_KEY_DEADLINE_NOTIFICATION_STATE: Final = f"{DOMAIN}.deadline_notification_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
@@ -714,14 +722,33 @@ EVENT_TASK_ASSIGNED: Final = f"{DOMAIN}_task_assigned"
 # however else it likes.
 EVENT_TASK_REJECTED: Final = f"{DOMAIN}_task_rejected"
 
-# v0.39: fired whenever a new "Aufgabenpool" task (no fixed/rotating
-# assignee, see is_pool_task in coordinator.py) is added - every active
-# member is notified (see _async_notify_new_task_assignments in __init__.py),
-# since any of them could be the one to claim it, unlike EVENT_TASK_ASSIGNED
-# above which only ever reaches the task's actual assignee(s). Same
-# extension-point pattern as EVENT_TASK_ASSIGNED/EVENT_TASK_REJECTED
-# (member_id/member_name/task_id/task_name).
+# v0.39: fired whenever a new "Aufgabenpool" occurrence (no fixed/rotating
+# assignee, see is_pool_task in coordinator.py) becomes actionable - every
+# active, non-paused member is notified, since any of them could be the one
+# to claim it, unlike EVENT_TASK_ASSIGNED above which only ever reaches the
+# task's actual assignee(s). Same extension-point pattern as
+# EVENT_TASK_ASSIGNED/EVENT_TASK_REJECTED (member_id/member_name/task_id/
+# task_name). v0.41: raised from FamilyTasksCoordinator._async_notify_task_status
+# in coordinator.py (once per task per occurrence, via
+# DeadlineNotificationStateStore) rather than only once from
+# __init__._async_notify_new_task_assignments on task *creation* - a
+# recurring Aufgabenpool task's next occurrence appearing now notifies again
+# too, not just its very first one.
 EVENT_TASK_POOL_ADDED: Final = f"{DOMAIN}_task_pool_added"
+
+# v0.41: fired once per assigned member the moment their task's current
+# occurrence becomes due (TASK_STATUS_PENDING) - see
+# FamilyTasksCoordinator._async_notify_task_status/DeadlineNotificationStateStore
+# in coordinator.py/storage.py. Same extension-point pattern as
+# EVENT_TASK_ASSIGNED (member_id/member_name/task_id/task_name); a pool task
+# (no fixed/rotating assignee) never fires this, see EVENT_TASK_POOL_ADDED
+# above instead.
+EVENT_TASK_DUE: Final = f"{DOMAIN}_task_due"
+
+# v0.41: fired once per assigned member the moment their task's current
+# occurrence turns overdue (TASK_STATUS_OVERDUE) - same mechanism/exclusions
+# as EVENT_TASK_DUE above.
+EVENT_TASK_OVERDUE: Final = f"{DOMAIN}_task_overdue"
 
 # --- Manual point awards (v0.24) ------------------------------------------------
 #

@@ -27,12 +27,10 @@ from .const import (
     CARD_FILENAME,
     CARD_URL_PATH,
     CONF_MEMBER_NOTIFY_SERVICE,
-    CONF_MEMBER_PAUSED,
     CONF_VACATION_MODE_DEFAULT,
     DEFAULT_VACATION_MODE,
     DOMAIN,
     EVENT_TASK_ASSIGNED,
-    EVENT_TASK_POOL_ADDED,
     PLATFORMS,
     SERVICE_CLAIM_TASK,
     SERVICE_COMPLETE_TASK,
@@ -50,6 +48,7 @@ from .storage import (
     CoinLedgerStore,
     CoinSystemStateStore,
     CompletionLogStore,
+    DeadlineNotificationStateStore,
     FavoriteStorageCollection,
     MemberStorageCollection,
     MilestoneBonusStateStore,
@@ -65,6 +64,7 @@ from .storage import (
     async_create_claim_state_store,
     async_create_coin_ledger_store,
     async_create_coin_system_state_store,
+    async_create_deadline_notification_state_store,
     async_create_favorites_collection,
     async_create_members_collection,
     async_create_milestone_bonus_state_store,
@@ -139,6 +139,7 @@ class FamilyTasksRuntimeData:
     coin_ledger: CoinLedgerStore
     coin_system_state: CoinSystemStateStore
     weekly_coin_conversion_state: WeeklyCoinConversionStateStore
+    deadline_notification_state: DeadlineNotificationStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -200,6 +201,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     vacation_mode_state = await async_create_vacation_mode_state_store(
         hass, vacation_mode_default
     )
+    # v0.41: see DeadlineNotificationStateStore in storage.py.
+    deadline_notification_state = await async_create_deadline_notification_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
         hass,
@@ -218,6 +221,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         coin_ledger,
         coin_system_state,
         weekly_coin_conversion_state,
+        deadline_notification_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -238,6 +242,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         coin_ledger=coin_ledger,
         coin_system_state=coin_system_state,
         weekly_coin_conversion_state=weekly_coin_conversion_state,
+        deadline_notification_state=deadline_notification_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence
@@ -332,11 +337,16 @@ async def _async_notify_member(
     on top either way, for a household that wants to react some other way
     entirely (same extension-point pattern as EVENT_REWARD_REDEEMED).
 
-    ``message``/``event_type`` (v0.39): let a caller other than "you were
-    assigned a task" (see EVENT_TASK_POOL_ADDED below) reuse the exact same
-    two-channel delivery instead of duplicating it - default to the original
-    "Neue Aufgabe: ..." wording and EVENT_TASK_ASSIGNED so every existing
-    call site is unaffected.
+    ``message``/``event_type`` (v0.39) let a caller other than "you were
+    assigned a task" reuse the exact same two-channel delivery instead of
+    duplicating it - default to the original "Neue Aufgabe: ..." wording and
+    EVENT_TASK_ASSIGNED so the one remaining call site in this module is
+    unaffected. The Aufgabenpool broadcast that used to be the other caller
+    of this with a custom message/event_type moved to
+    FamilyTasksCoordinator._async_notify_deadline in coordinator.py (v0.41,
+    see _async_notify_new_task_assignments above) - it duplicates this same
+    two-channel pattern rather than importing it, since coordinator.py can't
+    import back from this module (circular import).
     """
     title = "Family Tasks"
     message = message or f"Neue Aufgabe: {task_name}"
@@ -379,16 +389,17 @@ def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStora
     Only "added" changes are notified - an edit that merely changes who a
     task is assigned to isn't treated as "a new task" here.
 
-    A task with fixed/rotating assignee(s) notifies exactly those members, as
-    before. v0.39: a task with *no* assignee at all - an "Aufgabenpool" task,
-    see is_pool_task in coordinator.py - used to notify nobody, so the only
-    way to learn about one was to happen to open the card's "Aufgabenpool"
-    section. Every active, non-paused member is now notified instead, since
-    any of them could be the one to claim it (see eligible_member_ids for a
-    pool task in FamilyTasksCoordinator._async_update_data) - excluding an
-    auto-generated parent-confirmation task (item.get("confirms") set),
-    which also has no member_ids but is never something a member "claims",
-    the same way is_pool_task excludes it.
+    Only notifies a task with fixed/rotating assignee(s) (EVENT_TASK_ASSIGNED,
+    "Neue Aufgabe: ..."). v0.39 used to also broadcast an "Aufgabenpool" task
+    (no assignee at all - see is_pool_task in coordinator.py) to every active
+    member here, on creation only; v0.41 moved that to
+    FamilyTasksCoordinator._async_notify_task_status instead, which fires it
+    from the regular per-refresh status computation via
+    DeadlineNotificationStateStore - covering a recurring pool task's *next*
+    occurrence appearing too, not just its very first one, so this listener
+    no longer needs to handle member_ids being empty at all (whether an
+    Aufgabenpool task or an auto-generated parent-confirmation task, which
+    also has no member_ids - see item.get("confirms")).
     """
 
     async def _listener(change_sets) -> None:
@@ -397,23 +408,9 @@ def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStora
                 continue
             item = change.item
             member_ids = (item.get("rotation") or {}).get("member_ids") or []
-            task_name = item.get("name", "Aufgabe")
             if not member_ids:
-                if item.get("confirms"):
-                    continue
-                for member_id, member in members.data.items():
-                    if not member.get("active", True) or member.get(CONF_MEMBER_PAUSED, False):
-                        continue
-                    await _async_notify_member(
-                        hass,
-                        member_id,
-                        member,
-                        item.get("id", ""),
-                        task_name,
-                        message=f"Neue Aufgabe im Aufgabenpool: {task_name}",
-                        event_type=EVENT_TASK_POOL_ADDED,
-                    )
                 continue
+            task_name = item.get("name", "Aufgabe")
             for member_id in member_ids:
                 member = members.data.get(member_id)
                 if not member or not member.get("active", True):
