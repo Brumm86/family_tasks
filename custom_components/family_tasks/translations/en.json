@@ -23,6 +23,8 @@
           "battery_warning_threshold": "Default battery warning level (%)",
           "battery_alert_auto_complete_on_recovery": "Auto-complete battery alert tasks once the battery recovers",
           "screen_time_minutes_per_point": "Screen time minutes per invested point",
+          "screen_time_tick_minutes": "Screen time per automatic tick (minutes, matches the Handyzeit blueprint)",
+          "screen_time_ticks_per_day": "Automatic ticks per day (matches the Handyzeit blueprint)",
           "weekly_progress_goal_points": "Weekly point goal (progress bar)",
           "milestone_bonus_enabled": "Award a Meilensteinbonus (milestone bonus)",
           "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",

@@ -41,6 +41,8 @@ from .const import (
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_MILESTONE_150_BONUS_COINS,
     CONF_MILESTONE_200_BONUS_COINS,
+    CONF_SCREEN_TIME_TICK_MINUTES,
+    CONF_SCREEN_TIME_TICKS_PER_DAY,
     CONF_STREAK_150_BONUS_COINS,
     CONF_STREAK_200_BONUS_COINS,
     CONF_STREAK_BONUS_REQUIRED_WEEKS,
@@ -56,6 +58,8 @@ from .const import (
     DEFAULT_MILESTONE_200_BONUS_COINS,
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
+    DEFAULT_SCREEN_TIME_TICK_MINUTES,
+    DEFAULT_SCREEN_TIME_TICKS_PER_DAY,
     DEFAULT_STREAK_150_BONUS_COINS,
     DEFAULT_STREAK_200_BONUS_COINS,
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
@@ -294,6 +298,22 @@ class MemberSummaryData:
     # screen_time_tick_adjustment_source_entity input to read via
     # state_attr(...) and apply only to its "plus_tick" trigger path.
     screen_time_tick_adjustment_minutes: int = 0
+    # v0.45: this member's own estimated total Handyzeit for today, in
+    # minutes - screen_time_ticks_per_day * max(screen_time_tick_minutes +
+    # screen_time_tick_adjustment_minutes above, 0), the same per-tick malus
+    # math the household's Handyzeit-Verwaltung blueprint itself already
+    # applies (see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py and
+    # FamilyTasksCoordinator._screen_time_tick_adjustment_minutes). Computed
+    # once here (not in the card) so the card never has to redo the
+    # multiplication itself - same "single source of truth" reasoning as
+    # milestone_150_threshold_points below. Always 0 whenever a household
+    # hasn't entered CONF_SCREEN_TIME_TICK_MINUTES/
+    # CONF_SCREEN_TIME_TICKS_PER_DAY yet (both default to 0) - the card then
+    # hides the estimate entirely rather than showing a guessed number. A
+    # live snapshot, not a running total already granted today - it reflects
+    # this member's *current* weekly-progress band, which can itself still
+    # change later in the week as more points are earned.
+    screen_time_daily_minutes: int = 0
     # v0.32: current consecutive-week bonus streak length, one counter per
     # fixed coin-bonus tier (v0.36: was a single counter tied to the
     # then-configurable CONF_STREAK_BONUS_THRESHOLD_POINTS; now there are two
@@ -394,6 +414,15 @@ class FamilyTasksData:
     # dedicated entity (FamilyTasksPoolTasksSensor in sensor.py) rather than
     # riding along as a plain attribute somewhere.
     pool_tasks_open: int = 0
+    # v0.45: household-wide Handyzeit-Verwaltung blueprint mirror values (see
+    # CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY in
+    # const.py) - rides along here for the same "no dedicated entity for a
+    # plain options value" reason default_rotation_strategy/
+    # weekly_progress_goal_points above do. Identical for every member; the
+    # per-member estimate itself is
+    # MemberSummaryData.screen_time_daily_minutes.
+    screen_time_tick_minutes: int = DEFAULT_SCREEN_TIME_TICK_MINUTES
+    screen_time_ticks_per_day: int = DEFAULT_SCREEN_TIME_TICKS_PER_DAY
 
 
 def _current_period_date(
@@ -702,6 +731,21 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if self.config_entry:
             weekly_progress_goal_points = self.config_entry.options.get(
                 CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+            )
+
+        # v0.45: household-wide Handyzeit-Verwaltung blueprint mirror values -
+        # see CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY in
+        # const.py. Read once per refresh, same pattern as
+        # weekly_progress_goal_points just above; used in the member-summaries
+        # loop below to compute each member's screen_time_daily_minutes.
+        screen_time_tick_minutes = DEFAULT_SCREEN_TIME_TICK_MINUTES
+        screen_time_ticks_per_day = DEFAULT_SCREEN_TIME_TICKS_PER_DAY
+        if self.config_entry:
+            screen_time_tick_minutes = self.config_entry.options.get(
+                CONF_SCREEN_TIME_TICK_MINUTES, DEFAULT_SCREEN_TIME_TICK_MINUTES
+            )
+            screen_time_ticks_per_day = self.config_entry.options.get(
+                CONF_SCREEN_TIME_TICKS_PER_DAY, DEFAULT_SCREEN_TIME_TICKS_PER_DAY
             )
 
         # Computed once per refresh and shared by every recurrence-"battery"
@@ -1229,6 +1273,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             # to do with coins - see COIN_REASON_WEEKLY_CONVERSION in
             # const.py for what this replaces).
             coins_available = self.coin_ledger.balance(member_id)
+            # v0.45: computed once here (not in the card) so it can never
+            # disagree with the malus the household's own Handyzeit-Verwaltung
+            # blueprint applies - see
+            # MemberSummaryData.screen_time_daily_minutes's docstring.
+            screen_time_tick_adjustment = self._screen_time_tick_adjustment_minutes(
+                points_week, weekly_progress_goal_points
+            )
+            screen_time_daily_minutes = screen_time_ticks_per_day * max(
+                screen_time_tick_minutes + screen_time_tick_adjustment, 0
+            )
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
                 name=member["name"],
@@ -1240,9 +1294,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 coins_available=coins_available,
                 open_tasks=open_tasks_by_member.get(member_id, 0),
                 screen_time_grant_active=member_id not in screen_time_paused_members,
-                screen_time_tick_adjustment_minutes=self._screen_time_tick_adjustment_minutes(
-                    points_week, weekly_progress_goal_points
-                ),
+                screen_time_tick_adjustment_minutes=screen_time_tick_adjustment,
+                screen_time_daily_minutes=screen_time_daily_minutes,
                 streak_weeks_150=(self.streak_bonus_state.get(member_id, "150") or {}).get(
                     "streak_count", 0
                 ),
@@ -1318,6 +1371,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             streak_bonus_required_weeks=streak_bonus_required_weeks,
             vacation_mode_active=vacation_mode_active,
             pool_tasks_open=pool_tasks_open,
+            screen_time_tick_minutes=screen_time_tick_minutes,
+            screen_time_ticks_per_day=screen_time_ticks_per_day,
         )
 
     def _current_period_key(self, task_id: str, task: dict) -> str | None:

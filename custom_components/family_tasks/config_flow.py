@@ -31,6 +31,8 @@ from .const import (
     CONF_MILESTONE_200_BONUS_COINS,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
+    CONF_SCREEN_TIME_TICK_MINUTES,
+    CONF_SCREEN_TIME_TICKS_PER_DAY,
     CONF_STREAK_150_BONUS_COINS,
     CONF_STREAK_200_BONUS_COINS,
     CONF_STREAK_BONUS_REQUIRED_WEEKS,
@@ -43,6 +45,8 @@ from .const import (
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+    DEFAULT_SCREEN_TIME_TICK_MINUTES,
+    DEFAULT_SCREEN_TIME_TICKS_PER_DAY,
     DEFAULT_STREAK_150_BONUS_COINS,
     DEFAULT_STREAK_200_BONUS_COINS,
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
@@ -172,6 +176,34 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     NumberSelectorConfig(
                         min=1, max=120, mode=NumberSelectorMode.BOX, unit_of_measurement="min"
                     )
+                ),
+                # v0.45: purely informational mirror of two values that live
+                # in the household's own Handyzeit-Verwaltung blueprint
+                # automation (blueprints/handyzeit_verwaltung.yaml) - "Erhöhung
+                # pro Tick" (increment_minutes) and how many entries
+                # "Automatische Plus-Uhrzeiten" (plus_times) has. Lets the card
+                # estimate/explain each child's expected Handyzeit for today -
+                # see CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY
+                # in const.py. Leaving either at 0 (the default) disables the
+                # estimate entirely rather than showing a guessed number that
+                # doesn't match the blueprint's actual configured values.
+                vol.Optional(
+                    CONF_SCREEN_TIME_TICK_MINUTES,
+                    default=current.get(
+                        CONF_SCREEN_TIME_TICK_MINUTES, DEFAULT_SCREEN_TIME_TICK_MINUTES
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=60, mode=NumberSelectorMode.BOX, unit_of_measurement="min"
+                    )
+                ),
+                vol.Optional(
+                    CONF_SCREEN_TIME_TICKS_PER_DAY,
+                    default=current.get(
+                        CONF_SCREEN_TIME_TICKS_PER_DAY, DEFAULT_SCREEN_TIME_TICKS_PER_DAY
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=100, mode=NumberSelectorMode.BOX)
                 ),
                 # v0.29: weekly point goal backing each child's
                 # "Wochenfortschritt" progress bar - points earned beyond

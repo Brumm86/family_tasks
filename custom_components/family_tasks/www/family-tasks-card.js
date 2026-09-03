@@ -415,6 +415,19 @@
  *   _isClaimedPoolTask, and claimed_by_member_id/assigned_member_id(s) in
  *   coordinator.py, which now firmly attributes a claimed pool occurrence to
  *   its claimant.
+ * - Each "Wochenfortschritt" row shows a "📱 X Min. Handyzeit heute" badge
+ *   (v0.45) once a household has entered CONF_SCREEN_TIME_TICK_MINUTES/
+ *   CONF_SCREEN_TIME_TICKS_PER_DAY in Options - the same per-tick minutes
+ *   and daily malus math the household's own Handyzeit-Verwaltung blueprint
+ *   already applies (see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES/
+ *   screen_time_tick_adjustment_minutes above), now surfaced for the child
+ *   to see instead of living only inside the blueprint automation. A parent
+ *   sees every child's row (same _progressMembers visibility as the rest of
+ *   the section), not just their own. The badge is independently clickable
+ *   within its row (own data-action, wins over the row's own "open-member-
+ *   completions" click target via closest()) and opens a small dialog
+ *   explaining the calculation - see _screenTimeInfoFor/_openScreenTimeInfo/
+ *   _renderScreenTimeInfo.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -1067,6 +1080,14 @@
       this._pendingAwardPointsMemberId = null;
       this._pendingAwardPoints = 1;
       this._pendingAwardNote = "";
+      // v0.45: "Handyzeit heute - Berechnung" info dialog, opened by clicking
+      // a member's Handyzeit badge within a "Wochenfortschritt" row (see
+      // _openScreenTimeInfo/_renderProgressSection) - purely local, no
+      // websocket round-trip, since everything it shows already rides along
+      // on that member's points sensor. Not persisted, same as the other
+      // dialog flags: always starts closed on load.
+      this._screenTimeInfoDialogOpen = false;
+      this._screenTimeInfoMemberId = null;
     }
 
     setConfig(config) {
@@ -1576,6 +1597,32 @@
       return Number(sensor?.attributes?.weekly_progress_goal_points ?? 0);
     }
 
+    // v0.45: this member's estimated Handyzeit for today, plus the pieces
+    // that make it up - all read straight off attributes already carried by
+    // this member's points sensor (see FamilyTasksMemberPointsSensor in
+    // sensor.py / MemberSummaryData.screen_time_daily_minutes and
+    // FamilyTasksData.screen_time_tick_minutes/screen_time_ticks_per_day in
+    // coordinator.py), never recomputed here. Returns null when the
+    // household hasn't entered CONF_SCREEN_TIME_TICK_MINUTES/
+    // CONF_SCREEN_TIME_TICKS_PER_DAY yet (ticksPerDay <= 0, the default) -
+    // callers use that to hide the estimate entirely instead of showing a
+    // guessed number.
+    _screenTimeInfoFor(memberId) {
+      const sensor = this._pointsSensorForMember(memberId);
+      const ticksPerDay = Number(sensor?.attributes?.screen_time_ticks_per_day ?? 0);
+      if (!sensor || ticksPerDay <= 0) return null;
+      const tickMinutes = Number(sensor.attributes.screen_time_tick_minutes ?? 0);
+      const adjustment = Number(sensor.attributes.screen_time_tick_adjustment_minutes ?? 0);
+      const effectiveTickMinutes = Math.max(tickMinutes + adjustment, 0);
+      return {
+        ticksPerDay,
+        tickMinutes,
+        adjustment,
+        effectiveTickMinutes,
+        dailyMinutes: Number(sensor.attributes.screen_time_daily_minutes ?? 0),
+      };
+    }
+
     // v0.29: members shown in the "Wochenfortschritt" section - replaces the
     // old _rankedMembers() leaderboard list. A "child" user only ever sees
     // their own bar; anyone else (parent/admin, or an unlinked account) sees
@@ -2074,6 +2121,22 @@
       this._render();
     }
 
+    // v0.45: opened by clicking a member's Handyzeit badge within a
+    // "Wochenfortschritt" row - see _screenTimeInfoFor/_renderProgressSection.
+    // Purely local (everything it shows is already on the points sensor), so
+    // unlike _openMemberCompletions this needs no websocket round-trip.
+    _openScreenTimeInfo(memberId) {
+      this._screenTimeInfoMemberId = memberId;
+      this._screenTimeInfoDialogOpen = true;
+      this._render();
+    }
+
+    _closeScreenTimeInfo() {
+      this._screenTimeInfoDialogOpen = false;
+      this._screenTimeInfoMemberId = null;
+      this._render();
+    }
+
     // --- Favoriten actions (v0.17) ---------------------------------------
 
     _openFavoriteForm(favoriteId) {
@@ -2283,6 +2346,14 @@
               <button type="button" class="link" data-action="close-member-completions">Schließen</button>
             </div>
             ${this._renderMemberCompletionsList()}
+          </dialog>` : ""}
+          ${this._screenTimeInfoDialogOpen ? `
+          <dialog class="dialog" data-dialog="screen-time-info">
+            <div class="section-header">
+              <h3>${esc(this._memberName(this._screenTimeInfoMemberId))}: Handyzeit heute</h3>
+              <button type="button" class="link" data-action="close-screen-time-info">Schließen</button>
+            </div>
+            ${this._renderScreenTimeInfo()}
           </dialog>` : ""}
         </ha-card>
       `;
@@ -2503,6 +2574,7 @@
         ["favorite", () => this._favoriteFormOpen, () => this._closeFavoriteForm()],
         ["favorites-list", () => this._favoritesDialogOpen, () => this._closeFavoritesDialog()],
         ["member-completions", () => this._memberCompletionsDialogOpen, () => this._closeMemberCompletions()],
+        ["screen-time-info", () => this._screenTimeInfoDialogOpen, () => this._closeScreenTimeInfo()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -3404,6 +3476,21 @@
                 ? `noch ${esc(goal - weekPoints)} Pkt. bis zum Wochenziel`
                 : "";
               const balanceLine = [goalNote, streakParts.join(" · ")].filter(Boolean).join(" · ");
+              // v0.45: "📱 X Min. heute" - the child's (or, for a parent,
+              // each child's) estimated Handyzeit for today, per
+              // _screenTimeInfoFor. Its own data-action/role="button" makes
+              // it independently clickable/keyboard-activatable *within* the
+              // row (the click handler resolves ev.target.closest("[data-
+              // action]") to whichever element is nearest, so this always
+              // wins over the row's own "open-member-completions" action) -
+              // opens the small calculation dialog instead of the "diese
+              // Woche erledigt" one. null (household hasn't configured
+              // CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY
+              // yet) hides it entirely rather than showing a guessed number.
+              const screenTimeInfo = this._screenTimeInfoFor(id);
+              const screenTimeBadge = screenTimeInfo
+                ? `<div class="screen-time-badge" data-action="open-screen-time-info" data-member-id="${id}" role="button" tabindex="0" title="Berechnung anzeigen">📱 ${esc(screenTimeInfo.dailyMinutes)} Min. Handyzeit heute</div>`
+                : "";
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
@@ -3417,6 +3504,7 @@
                       ${milestoneMarkersHtml}
                     </div>
                     ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
+                    ${screenTimeBadge}
                   </div>
                   <span class="disclosure-icon">${svgIcon("chevron-right", 20)}</span>
                 </div>`;
@@ -3499,6 +3587,32 @@
             </div>`;
         })
         .join("")}</div>`;
+    }
+
+    // v0.45: Inhalt des "Handyzeit heute"-Infofensters, geöffnet per Klick
+    // auf das Handyzeit-Abzeichen einer Fortschritts-Zeile - siehe
+    // _openScreenTimeInfo/_screenTimeInfoFor. Erklärt die Rechnung hinter dem
+    // in der Zeile gezeigten Minutenwert, inklusive eines eventuellen
+    // Malus wegen Unterschreitens des Wochenziels.
+    _renderScreenTimeInfo() {
+      const memberId = this._screenTimeInfoMemberId;
+      const info = memberId ? this._screenTimeInfoFor(memberId) : null;
+      if (!info) return `<p class="muted">Keine Handyzeit-Automation hinterlegt.</p>`;
+      const { ticksPerDay, tickMinutes, adjustment, effectiveTickMinutes, dailyMinutes } = info;
+      const malusLine =
+        adjustment < 0
+          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil das Wochenziel diese Woche noch nicht ${adjustment <= -2 ? "" : "zur Hälfte "}erreicht ist.</p>`
+          : `<p>Aktuell kein Malus - das Wochenziel ist diese Woche mindestens zur Hälfte erreicht.</p>`;
+      return `
+        <p>${esc(ticksPerDay)} Ticks/Tag × ${esc(tickMinutes)} Min. (in der Handyzeit-Automation hinterlegter Wert)${
+          adjustment !== 0
+            ? ` ${adjustment > 0 ? "+" : "-"} ${esc(Math.abs(adjustment))} Min. Malus = ${esc(effectiveTickMinutes)} Min. je Tick`
+            : ""
+        }</p>
+        <p class="points"><strong>${esc(dailyMinutes)} Minuten Handyzeit heute</strong></p>
+        ${malusLine}
+        <p class="muted">Schätzung auf Basis des aktuellen Wochenfortschritts - ändert sich der Wochenfortschritt im Laufe der Woche, ändert sich auch dieser Wert für die folgenden Tage. Die tatsächliche Gewährung übernimmt weiterhin die Handyzeit-Automation.</p>
+      `;
     }
 
     // v0.21: "Belohnungen" ausblendbar - für alle sichtbarer Umschalter,
@@ -4198,6 +4312,16 @@
         .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
         .points { font-size: 0.85em; color: var(--secondary-text-color); flex-shrink: 0; }
         .balance { font-size: 0.8em; color: var(--secondary-text-color); }
+        /* v0.45: Handyzeit-Abzeichen innerhalb einer Fortschritts-Zeile -
+           eigenständig anklickbar (siehe _renderProgressSection,
+           screenTimeBadge), öffnet die Berechnung statt der "diese Woche
+           erledigt"-Übersicht der ganzen Zeile. width: fit-content, damit die
+           Klickfläche nicht die ganze Zeilenbreite einnimmt. */
+        .screen-time-badge { font-size: 0.8em; color: var(--secondary-text-color);
+                              width: fit-content; cursor: pointer; text-decoration: underline;
+                              text-decoration-style: dotted; text-underline-offset: 2px; }
+        .screen-time-badge:hover { color: var(--primary-text-color); }
+        .screen-time-badge:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         .bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
         .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
         /* v0.29: Wochenziel erreicht (siehe _renderProgressSection,
@@ -4445,6 +4569,10 @@
           this._openMemberCompletions(el.dataset.memberId)?.catch(() => {});
         } else if (action === "close-member-completions") {
           this._closeMemberCompletions();
+        } else if (action === "open-screen-time-info") {
+          this._openScreenTimeInfo(el.dataset.memberId);
+        } else if (action === "close-screen-time-info") {
+          this._closeScreenTimeInfo();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.

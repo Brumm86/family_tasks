@@ -132,6 +132,12 @@ blueprint:
 
     plus_times:
       name: Automatische Plus-Uhrzeiten
+      description: >-
+        Seit v0.45 lässt sich die Anzahl der hier eingetragenen Uhrzeiten
+        zusätzlich in den family_tasks-Integrationsoptionen unter
+        "Automatische Ticks pro Tag" hinterlegen - rein informativ, siehe
+        "Erhöhung pro Tick" oben. Auch hier: manuell synchron halten, wenn
+        sich die Liste hier ändert.
       default:
         - "07:20:00"
         - "08:00:00"
@@ -160,6 +166,14 @@ blueprint:
         tatsächlichen Wert abweichen kann). Wirkt sich NICHT auf
         Belohnungs-Einlösungen aus - dort zählt direkt der
         screen_time_minutes-Wert aus dem Event.
+
+        Seit v0.45 lässt sich derselbe Wert zusätzlich in den
+        family_tasks-Integrationsoptionen unter "Handyzeit pro
+        automatischem Tick (Minuten)" hinterlegen - rein informativ, damit
+        die Karte die voraussichtliche tägliche Handyzeit anzeigen und
+        erklären kann. Diese Automatisierung liest ihn NICHT von dort,
+        beide Werte müssen also manuell synchron gehalten werden, wenn
+        dieser Wert hier geändert wird.
       default: 7
       selector:
         number:

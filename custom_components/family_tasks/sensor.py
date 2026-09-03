@@ -199,6 +199,22 @@ class FamilyTasksMemberPointsSensor(
             # screen_time_tick_adjustment_source_entity input via
             # state_attr(...), not by the card.
             "screen_time_tick_adjustment_minutes": member.screen_time_tick_adjustment_minutes,
+            # v0.45: purely informational mirror of the household's own
+            # Handyzeit-Verwaltung blueprint config (see
+            # CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY in
+            # const.py), identical on every member's points sensor - same
+            # "rides along, no dedicated entity" reasoning as the other
+            # options-derived attributes here. screen_time_daily_minutes is
+            # this member's own estimated total Handyzeit for today (see
+            # MemberSummaryData.screen_time_daily_minutes in coordinator.py),
+            # computed server-side so the card's "Wochenfortschritt" section
+            # and its explanatory dialog never have to redo the tick math
+            # themselves. 0/0 for the first two means a household hasn't
+            # entered these yet - the card hides the estimate entirely in
+            # that case.
+            "screen_time_tick_minutes": self.coordinator.data.screen_time_tick_minutes,
+            "screen_time_ticks_per_day": self.coordinator.data.screen_time_ticks_per_day,
+            "screen_time_daily_minutes": member.screen_time_daily_minutes,
             # v0.36: household-wide Meilensteinbonus coin amounts, identical
             # on every member's points sensor - see
             # FamilyTasksData.milestone_150_bonus_coins/... in coordinator.py

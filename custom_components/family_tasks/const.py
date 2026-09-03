@@ -55,6 +55,25 @@ CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY: Final = (
 # redemption without needing a restart.
 CONF_SCREEN_TIME_MINUTES_PER_POINT: Final = "screen_time_minutes_per_point"
 
+# v0.45: purely informational mirror of two values that actually live in the
+# household's own Handyzeit-Verwaltung blueprint automation (see
+# blueprints/handyzeit_verwaltung.yaml), not read from it directly - this
+# integration has no way to inspect another automation's configured blueprint
+# inputs. "Erhöhung pro Tick" (the blueprint's increment_minutes input) and
+# how many entries "Automatische Plus-Uhrzeiten" (plus_times) has, entered
+# here by a parent so the card can estimate and explain a child's expected
+# total Handyzeit for today: screen_time_ticks_per_day * max(
+# screen_time_tick_minutes + screen_time_tick_adjustment_minutes, 0) - the
+# same per-tick malus math the blueprint itself already applies (see
+# PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES/
+# FamilyTasksCoordinator._screen_time_tick_adjustment_minutes). Keeping
+# either at 0 (the default) disables the whole estimate (see
+# MemberSummaryData.screen_time_daily_minutes in coordinator.py) rather than
+# showing a guessed number that may not match a household's actual blueprint
+# configuration.
+CONF_SCREEN_TIME_TICK_MINUTES: Final = "screen_time_tick_minutes"
+CONF_SCREEN_TIME_TICKS_PER_DAY: Final = "screen_time_ticks_per_day"
+
 # v0.36: fixed weekly-progress-percent checkpoints (percentages of
 # CONF_WEEKLY_PROGRESS_GOAL_POINTS) the whole coin system is built around -
 # replaces the pre-v0.36 Meilensteinbonus/Streak-Bonus, which let a household
@@ -207,6 +226,10 @@ DEFAULT_ROTATION_STRATEGY: Final = "round_robin"
 DEFAULT_BATTERY_WARNING_THRESHOLD: Final = 20
 DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY: Final = False
 DEFAULT_SCREEN_TIME_MINUTES_PER_POINT: Final = 1
+# v0.45: 0/0 disables the daily-Handyzeit estimate entirely - see
+# CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY above.
+DEFAULT_SCREEN_TIME_TICK_MINUTES: Final = 0
+DEFAULT_SCREEN_TIME_TICKS_PER_DAY: Final = 0
 DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS: Final = 0
 DEFAULT_MILESTONE_150_BONUS_COINS: Final = 0
 DEFAULT_MILESTONE_200_BONUS_COINS: Final = 0

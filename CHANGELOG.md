@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.45.0] - 2026-09-03
+
+### Added
+- **Tägliche Handyzeit-Schätzung im Wochenfortschritt**: jede "Wochenfortschritt"-Zeile zeigt jetzt zusätzlich ein "📱 X Min. Handyzeit heute"-Abzeichen - die geschätzte gesamte Handyzeit, die das Kind laut der haushaltseigenen Handyzeit-Verwaltung-Blueprint-Automatisierung (`blueprints/handyzeit_verwaltung.yaml`) heute bekommt, inklusive eines eventuellen Malus wegen Unterschreitens der wöchentlichen Zielpunktzahl. Da diese Integration die Konfiguration einer fremden Automatisierung nicht direkt auslesen kann, tragen Eltern die beiden dort bereits hinterlegten Werte - "Erhöhung pro Tick" und die Anzahl der Einträge in "Automatische Plus-Uhrzeiten" - zusätzlich in den neuen Integrationsoptionen "Handyzeit pro automatischem Tick (Minuten)"/"Automatische Ticks pro Tag" ein (`CONF_SCREEN_TIME_TICK_MINUTES`/`CONF_SCREEN_TIME_TICKS_PER_DAY`, beide standardmäßig 0 = Schätzung deaktiviert). Die Karte berechnet daraus serverseitig (`MemberSummaryData.screen_time_daily_minutes`, `coordinator.py`) `Ticks/Tag × max(Minuten pro Tick + Malus, 0)` - denselben Malus, den die Blueprint-Automatisierung über `screen_time_tick_adjustment_minutes` bereits selbst anwendet (siehe Punkt 32/36). Ein Klick auf das Abzeichen öffnet ein kleines Fenster mit der ausführlichen Berechnung (Ticks × Minuten, aktueller Malus samt Begründung, Gesamtsumme). Eltern sehen wie gewohnt die Zeilen aller Kinder, nicht nur ihre eigene. Die beiden neuen Werte müssen manuell mit der Blueprint-Automatisierung synchron gehalten werden - diese Integration liest sie nicht aus der Automatisierung aus, sondern spiegelt sie nur zu Anzeigezwecken.
+
 ## [0.44.0] - 2026-09-03
 
 ### Changed
