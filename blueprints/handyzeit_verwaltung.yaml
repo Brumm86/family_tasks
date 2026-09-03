@@ -20,8 +20,10 @@ blueprint:
 
     Optional (neu, v0.36) lässt sich die Erhöhung pro automatischem Tick
     zusätzlich an den Wochenfortschritt koppeln: siehe "family_tasks:
-    Wochenfortschritt-Sensor für Tick-Anpassung" unten - solange ein Kind
-    diese Woche noch nicht mindestens 50% seines Wochenziels erreicht hat,
+    Wochenfortschritt-Sensor für Tick-Anpassung" unten - hat ein Kind in der
+    Vorwoche noch nicht mindestens 50% seines Wochenziels erreicht (v0.45.1:
+    beurteilt wird immer die bereits abgeschlossene Vorwoche, nie die noch
+    laufende - ein Rückstand wirkt sich also erst in der Folgewoche aus),
     fällt jeder Tick um 2 Minuten kleiner aus, ab 50% um 1 Minute, ab 100%
     unverändert.
   domain: automation
@@ -187,9 +189,12 @@ blueprint:
         Der Punkte-Sensor dieses Kindes in family_tasks (sensor.<name>_punkte)
         - trägt das Attribut "screen_time_tick_adjustment_minutes"
         (MemberSummaryData.screen_time_tick_adjustment_minutes in
-        coordinator.py): -2, solange dieses Kind diese Woche noch keine
-        50% seines Wochenziels erreicht hat, -1 ab 50%, 0 ab 100%. Wird nur
-        auf automatische Zeit-Ticks angewendet (Trigger "plus_tick"),
+        coordinator.py): -2, solange dieses Kind in der Vorwoche noch keine
+        50% seines Wochenziels erreicht hat, -1 ab 50%, 0 ab 100%
+        (v0.45.1: beurteilt wird immer die abgeschlossene Vorwoche, ein
+        Rückstand wirkt sich also erst in der Folgewoche aus; in der ersten
+        Woche, für die noch keine beurteilbare Vorwoche existiert, ist der
+        Wert 0). Wird nur auf automatische Zeit-Ticks angewendet (Trigger "plus_tick"),
         NICHT auf die manuellen Buttons und NICHT auf
         Belohnungs-Einlösungen - beide zählen weiterhin unverändert den
         vollen Wert. Die effektive Erhöhung pro Tick (Erhöhung pro Tick

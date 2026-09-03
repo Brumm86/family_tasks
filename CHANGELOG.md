@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.45.1] - 2026-09-03
+
+### Fixed
+- **Handyzeit-Tick-Malus wirkte sich schon in der laufenden statt erst in der Folgewoche aus**: der in v0.45 sichtbar gemachte Malus (`screen_time_tick_adjustment_minutes`) wurde bisher gegen den Fortschritt der noch laufenden Kalenderwoche gebändert - dadurch zeigte die Karte praktisch die ganze Woche über einen Malus, weil das Wochenziel erst zum Wochenende hin erreicht wird, selbst wenn die Vorwoche erfolgreich war. Der Malus soll sich immer erst in der *Folgewoche* auswirken. `FamilyTasksCoordinator._screen_time_tick_adjustment_minutes` bändert jetzt gegen die Punktzahl der bereits abgeschlossenen Vorwoche statt der laufenden. Eine neue `CompletionLogStore.earliest_completed_at` verhindert außerdem, dass eine gerade erst begonnene Nutzung rückwirkend bestraft wird - fehlt eine beurteilbare Vorwoche (neuer Haushalt oder neu hinzugefügtes Mitglied), bleibt der Malus in dieser Übergangswoche bei 0. Der Handyzeit-Schätzwert steht dadurch für eine laufende Woche jetzt fest, statt sich mit jedem neuen Punkt zu ändern.
+
 ## [0.45.0] - 2026-09-03
 
 ### Added

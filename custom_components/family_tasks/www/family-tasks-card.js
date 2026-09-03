@@ -427,7 +427,10 @@
  *   within its row (own data-action, wins over the row's own "open-member-
  *   completions" click target via closest()) and opens a small dialog
  *   explaining the calculation - see _screenTimeInfoFor/_openScreenTimeInfo/
- *   _renderScreenTimeInfo.
+ *   _renderScreenTimeInfo. v0.45.1: the malus itself is banded on *last*
+ *   week's progress (not the still-running current week - see
+ *   FamilyTasksCoordinator._screen_time_tick_adjustment_minutes in
+ *   coordinator.py), so this value is fixed for the whole current week.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -3594,6 +3597,14 @@
     // _openScreenTimeInfo/_screenTimeInfoFor. Erklärt die Rechnung hinter dem
     // in der Zeile gezeigten Minutenwert, inklusive eines eventuellen
     // Malus wegen Unterschreitens des Wochenziels.
+    //
+    // v0.45.1: der Malus wird jetzt anhand der VORWOCHE beurteilt (siehe
+    // FamilyTasksCoordinator._screen_time_tick_adjustment_minutes/
+    // MemberSummaryData.screen_time_tick_adjustment_minutes in
+    // coordinator.py) - Texte hier entsprechend angepasst, und der Hinweis
+    // auf eine Änderung "im Laufe der Woche" entfernt, da der Malus für eine
+    // laufende Woche jetzt feststeht (erst beim nächsten Wochenwechsel neu
+    // berechnet wird).
     _renderScreenTimeInfo() {
       const memberId = this._screenTimeInfoMemberId;
       const info = memberId ? this._screenTimeInfoFor(memberId) : null;
@@ -3601,8 +3612,8 @@
       const { ticksPerDay, tickMinutes, adjustment, effectiveTickMinutes, dailyMinutes } = info;
       const malusLine =
         adjustment < 0
-          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil das Wochenziel diese Woche noch nicht ${adjustment <= -2 ? "" : "zur Hälfte "}erreicht ist.</p>`
-          : `<p>Aktuell kein Malus - das Wochenziel ist diese Woche mindestens zur Hälfte erreicht.</p>`;
+          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil das Wochenziel in der Vorwoche noch nicht ${adjustment <= -2 ? "" : "zur Hälfte "}erreicht wurde.</p>`
+          : `<p>Aktuell kein Malus - das Wochenziel war in der Vorwoche mindestens zur Hälfte erreicht (oder es liegt noch keine beurteilbare Vorwoche vor).</p>`;
       return `
         <p>${esc(ticksPerDay)} Ticks/Tag × ${esc(tickMinutes)} Min. (in der Handyzeit-Automation hinterlegter Wert)${
           adjustment !== 0
@@ -3611,7 +3622,7 @@
         }</p>
         <p class="points"><strong>${esc(dailyMinutes)} Minuten Handyzeit heute</strong></p>
         ${malusLine}
-        <p class="muted">Schätzung auf Basis des aktuellen Wochenfortschritts - ändert sich der Wochenfortschritt im Laufe der Woche, ändert sich auch dieser Wert für die folgenden Tage. Die tatsächliche Gewährung übernimmt weiterhin die Handyzeit-Automation.</p>
+        <p class="muted">Schätzung auf Basis des Wochenfortschritts der Vorwoche - dieser Wert steht für die gesamte laufende Woche fest und ändert sich erst wieder mit dem nächsten Wochenwechsel. Die tatsächliche Gewährung übernimmt weiterhin die Handyzeit-Automation.</p>
       `;
     }
 

@@ -288,15 +288,24 @@ class MemberSummaryData:
     # own configured per-tick increment (a negative number reduces it, 0
     # leaves it unchanged) - see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in
     # const.py and FamilyTasksCoordinator._screen_time_tick_adjustment_minutes.
-    # Banded on this member's current-week progress percent against
+    # Banded on this member's progress percent against
     # CONF_WEEKLY_PROGRESS_GOAL_POINTS: -2 at the 0% band (no progress at all
-    # yet this week), -1 at the 50% band, 0 from the 100% band up. Exposed as
+    # that week), -1 at the 50% band, 0 from the 100% band up. Exposed as
     # a plain attribute on FamilyTasksMemberPointsSensor (see sensor.py, same
     # "no dedicated entity for a single number" reasoning as the other
     # options-derived attributes on FamilyTasksData below) rather than a new
     # entity, for the blueprint's optional
     # screen_time_tick_adjustment_source_entity input to read via
     # state_attr(...) and apply only to its "plus_tick" trigger path.
+    #
+    # v0.45.1: judged against *last* week's progress, not the still-running
+    # current week - a shortfall only ever bites the week after it happened,
+    # never mid-week against a goal that by definition can't be reached yet
+    # until the week is over. 0 whenever there's no fully-elapsed previous
+    # week to judge at all yet (a brand-new household, or a member who only
+    # started this week) - see FamilyTasksCoordinator._async_update_data's
+    # earliest_completed_at check and
+    # _screen_time_tick_adjustment_minutes's docstring.
     screen_time_tick_adjustment_minutes: int = 0
     # v0.45: this member's own estimated total Handyzeit for today, in
     # minutes - screen_time_ticks_per_day * max(screen_time_tick_minutes +
@@ -310,9 +319,11 @@ class MemberSummaryData:
     # hasn't entered CONF_SCREEN_TIME_TICK_MINUTES/
     # CONF_SCREEN_TIME_TICKS_PER_DAY yet (both default to 0) - the card then
     # hides the estimate entirely rather than showing a guessed number. A
-    # live snapshot, not a running total already granted today - it reflects
-    # this member's *current* weekly-progress band, which can itself still
-    # change later in the week as more points are earned.
+    # live snapshot, not a running total already granted today - but as of
+    # v0.45.1 the malus feeding it is fixed for the whole week (it's judged
+    # against last week's already-final points), so unlike before, this
+    # value no longer moves within a week as more points are earned; it only
+    # changes at the next calendar-week rollover.
     screen_time_daily_minutes: int = 0
     # v0.32: current consecutive-week bonus streak length, one counter per
     # fixed coin-bonus tier (v0.36: was a single counter tied to the
@@ -1277,9 +1288,30 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             # disagree with the malus the household's own Handyzeit-Verwaltung
             # blueprint applies - see
             # MemberSummaryData.screen_time_daily_minutes's docstring.
-            screen_time_tick_adjustment = self._screen_time_tick_adjustment_minutes(
-                points_week, weekly_progress_goal_points
-            )
+            #
+            # v0.45.1: banded on *last* week's progress, not this week's still-
+            # running one - see _screen_time_tick_adjustment_minutes's
+            # docstring for why. last_week_start..start_of_week is the most
+            # recently fully-elapsed calendar week; earliest_completed_at
+            # tells apart a previous week that actually happened under
+            # family_tasks's watch from one that only looks empty because
+            # this member (or the household as a whole) hadn't started using
+            # the system yet - only the former is ever judged. A brand-new
+            # household/member's very first week(s) therefore never carry a
+            # malus, same "don't judge history that doesn't exist" reasoning
+            # _async_process_member_streak_tier already applies to the
+            # streak-bonus cursor.
+            last_week_start = start_of_week - timedelta(days=7)
+            earliest_completed_at = self.completions.earliest_completed_at(member_id)
+            if earliest_completed_at is not None and earliest_completed_at < last_week_start:
+                last_week_points = self.completions.points_between(
+                    member_id, last_week_start, start_of_week
+                )
+                screen_time_tick_adjustment = self._screen_time_tick_adjustment_minutes(
+                    last_week_points, weekly_progress_goal_points
+                )
+            else:
+                screen_time_tick_adjustment = 0
             screen_time_daily_minutes = screen_time_ticks_per_day * max(
                 screen_time_tick_minutes + screen_time_tick_adjustment, 0
             )
@@ -2269,26 +2301,35 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
 
-    def _screen_time_tick_adjustment_minutes(self, points_week: int, goal_points: int) -> int:
+    def _screen_time_tick_adjustment_minutes(self, last_week_points: int, goal_points: int) -> int:
         """Per-tick minute adjustment for the household's Handyzeit blueprint.
 
         v0.36: see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES/PROGRESS_THRESHOLD_PERCENTS
         in const.py and MemberSummaryData.screen_time_tick_adjustment_minutes.
-        Banded on this week's progress percent (points_week as a percentage
-        of goal_points, the same basis every other weekly-progress figure
-        uses) against the fixed 0%/50%/100% bands: -2 while at the 0% band
-        (nothing earned this week yet), -1 once at least half the weekly
-        goal has been reached, 0 from the full goal onward -
+        Banded on a progress percent (``last_week_points`` as a percentage of
+        goal_points) against the fixed 0%/50%/100% bands: -2 while at the 0%
+        band (nothing earned that week), -1 once at least half the weekly
+        goal was reached, 0 from the full goal onward -
         PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES has no entry above 100 because
         nothing beyond "leave the blueprint's own increment unchanged" ever
         applies once the goal itself is met. Always 0 (no adjustment) when
         goal_points itself is 0 - there is no goal to measure a percentage
         against, so the tick-based grant just runs at the blueprint's own
         configured pace, same as this feature being effectively off.
+
+        v0.45.1: purely the banding math now, given whatever week's point
+        total the caller decides to judge - it no longer assumes that's the
+        still-running current week. The malus is only ever meant to bite in
+        the week *after* a shortfall (see the caller in _async_update_data,
+        which passes *last* week's points, and only once a last week that
+        actually happened under family_tasks's watch exists at all) -
+        banding on the current week's still-incomplete progress made every
+        week look like a shortfall until the very last day, which is the bug
+        this docstring used to describe as intended behavior.
         """
         if goal_points <= 0:
             return 0
-        percent = (points_week / goal_points) * 100
+        percent = (last_week_points / goal_points) * 100
         adjustment = 0
         for band_percent in sorted(PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES):
             if percent >= band_percent:

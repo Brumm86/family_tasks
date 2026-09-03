@@ -90,8 +90,8 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
 # "Bei 0% soll die im Blueprint eingestellte Handyzeit pro Tick um 2 Minuten
 # reduziert werden. Bei 50% soll die Zeit um 1 Minute pro Tick reduziert
 # werden. Im Übrigen soll sie nicht geändert werden." Keyed by the *band* a
-# member's current weekly-progress percent falls into: below 50% -> -2,
-# 50% up to (not including) 100% -> -1, 100% and above -> unchanged. See
+# member's weekly-progress percent falls into: below 50% -> -2, 50% up to
+# (not including) 100% -> -1, 100% and above -> unchanged. See
 # FamilyTasksCoordinator._screen_time_tick_adjustment_minutes, which computes
 # the per-member minutes value exposed as an attribute on
 # FamilyTasksMemberPointsSensor
@@ -100,6 +100,13 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
 # per-tick increment (clamped at 0, never negative) - see
 # blueprints/handyzeit_verwaltung.yaml. Not configurable - fixed household-
 # wide amounts, same as PROGRESS_THRESHOLD_PERCENTS itself.
+#
+# v0.45.1: the percent banded here is always *last* week's, already-final
+# progress, never the still-running current week's - a shortfall must only
+# ever bite in the following week (see _async_update_data in coordinator.py,
+# which now passes last week's points and gates on a real previous week
+# actually having elapsed under family_tasks's watch, via
+# CompletionLogStore.earliest_completed_at).
 PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -2, 50: -1, 100: 0}
 
 # v0.36: bonus *coins* (see the "Münzen"/coin-shop section below) awarded
