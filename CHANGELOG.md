@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.44.0] - 2026-09-03
+
+### Changed
+- **Münzen jetzt aufgabenbasiert statt an das Wochenziel gekoppelt**: bisher (v0.36-v0.43) bekam ein Mitglied nur dann überhaupt Münzen, wenn es die "Wöchentliche Zielpunktzahl" in der laufenden Kalenderwoche bereits erreicht hatte - erst darüber hinausgehende Punkte wurden 1:1 in Münzen umgewandelt. Wer das Wochenziel knapp verfehlte, bekam für diese Woche keine einzige Münze, egal wie viele Aufgaben tatsächlich erledigt wurden. Jede Aufgabe (und jeder Favorit) trägt jetzt einen eigenen, optionalen "Münzwert" (`coin_value`, Standard 0, unabhängig von "Punkte") und schreibt diesen bei Erledigung direkt dem Münzkonto gut (`FamilyTasksCoordinator._async_credit_task_coins`, sowohl bei direkter Erledigung als auch bei Eltern-Bestätigung einer Kind-Erledigung). Münzen hängen damit nicht mehr vom Wochenziel ab; Punkte bleiben reine Fortschritts-/Meilenstein-/Streak-Bonus-Währung. Meilenstein- und Streak-Bonus sind unverändert und zahlen weiterhin Münzen an den festen 150%-/200%-Marken. Bestehende Aufgaben/Favoriten bekommen beim Update automatisch `coin_value: 0` (keine rückwirkende Münzvergabe) - Eltern setzen den Münzwert bewusst über das neue Formularfeld "Münzwert (optional)". Der alte punktebasierte Umrechnungsmechanismus (`storage.coins_from_task_points`, `CoinSystemStateStore`, `WeeklyCoinConversionStateStore`) ist komplett entfernt; `coins_available` ist jetzt schlicht `CoinLedgerStore.balance()`.
+
 ## [0.43.0] - 2026-09-03
 
 ### Fixed

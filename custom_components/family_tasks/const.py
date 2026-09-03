@@ -123,17 +123,23 @@ COIN_REASON_STREAK_150: Final = "streak_150"
 COIN_REASON_STREAK_200: Final = "streak_200"
 # A shop redemption (negative amount) - see ws_redeem_reward in storage.py.
 COIN_REASON_REDEMPTION: Final = "redemption"
-# v0.37: a fully-elapsed calendar week's "points beyond the weekly goal"
-# surplus, finalized into the ledger - see
+# v0.44: a completed task's own "Münzwert" (task.get("coin_value", 0)),
+# credited straight to CoinLedgerStore the moment the completion is logged -
+# see FamilyTasksCoordinator.async_complete_task/_async_finalize_confirmation
+# and the "coin_value" field on TASK_CREATE_SCHEMA/TASK_UPDATE_SCHEMA in
+# storage.py. This is now the household's only *base* way to earn coins -
+# see COIN_REASON_WEEKLY_CONVERSION below for the mechanic it replaces.
+COIN_REASON_TASK_COMPLETION: Final = "task_completion"
+# v0.37-v0.43 (retired in v0.44): a fully-elapsed calendar week's "points
+# beyond the weekly goal" surplus, finalized into the ledger - see the old
 # FamilyTasksCoordinator._async_process_weekly_coin_conversion and
-# storage.WeeklyCoinConversionStateStore. Replaces recomputing that surplus
-# live from CompletionLogStore for *every* past week on every refresh (the
-# pre-v0.37 approach - see coins_from_task_points): once a week is over, its
-# converted coins live here permanently instead, so they can never silently
-# shrink just because old completion-log entries eventually age out past
-# MAX_COMPLETION_LOG_ENTRIES. Only the *current*, still-open week keeps being
-# computed live straight from the completion log (see the coins_available
-# calculation in _async_update_data) - there's nothing to finalize yet.
+# storage.WeeklyCoinConversionStateStore, both removed in v0.44. Coins are no
+# longer derived from points/the weekly goal at all - a task now earns coins
+# directly via its own "Münzwert" (COIN_REASON_TASK_COMPLETION above) - but
+# this sentinel stays defined (and unused by anything that credits coins
+# going forward) purely because a household upgrading from an older version
+# may still have real historical CoinLedgerStore entries carrying it, and
+# nothing should choke on reading those back.
 COIN_REASON_WEEKLY_CONVERSION: Final = "weekly_conversion"
 
 # v0.30-v0.35 sentinel task_ids, retired in v0.36 along with the points-based
@@ -155,22 +161,24 @@ STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 # completion history for the same reason as the retired sentinels above (it
 # isn't a completed task), while still counting normally toward the member's
 # points_total/points_week/points_month - a manually-awarded point is just as
-# "real" as a task-completion one, including toward the v0.36 coin
-# conversion (see storage.coins_from_task_points).
+# "real" as a task-completion one, including toward the Meilenstein-/
+# Streak-coin-bonus checkpoints (points_week vs. CONF_WEEKLY_PROGRESS_GOAL_POINTS).
+# Never itself credits coins directly - see COIN_REASON_TASK_COMPLETION
+# above for the only thing that does since v0.44.
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 
 # v0.29: household-wide weekly point goal backing each child's
 # "Wochenfortschritt" progress bar (replaces the flat Bestenliste ranking -
-# see family-tasks-card.js) and, since v0.36, the fixed
-# PROGRESS_THRESHOLD_PERCENTS checkpoints. Points a member earns within a
-# calendar week (Monday 00:00 local - Sunday 23:59, the same boundary
-# points_week already uses) up to this many points count toward reaching the
-# 100% checkpoint; points earned *beyond* it in that week convert 1:1 to
-# spendable "Münzen" instead (see storage.coins_from_task_points) - points
-# themselves are never directly spendable in the reward shop any more (v0.36;
-# before that, this same "beyond the goal" surplus was the spendable balance
-# itself, points_available). 0 (the default) disables the whole percent
-# mechanic - see FamilyTasksCoordinator._async_update_data.
+# see family-tasks-card.js) and the fixed PROGRESS_THRESHOLD_PERCENTS
+# checkpoints (150%/200%) the Meilenstein-/Streak-coin-bonus are judged
+# against. Points themselves are never directly spendable in the reward shop
+# (v0.36) - only ever drive this progress percent. v0.44: points earned
+# *beyond* this goal no longer convert to coins either (that was the v0.36-
+# v0.43 model, storage.coins_from_task_points, since removed) - coins now
+# come exclusively from a task's own "coin_value" (COIN_REASON_TASK_COMPLETION)
+# plus the Meilenstein-/Streak-Bonus, both entirely independent of this goal
+# being reached at all. 0 (the default) disables the whole percent mechanic -
+# see FamilyTasksCoordinator._async_update_data.
 CONF_WEEKLY_PROGRESS_GOAL_POINTS: Final = "weekly_progress_goal_points"
 
 # v0.32: household-wide "Urlaubsmodus" - see switch.py
@@ -546,17 +554,14 @@ STORAGE_KEY_REWARD_REDEMPTIONS: Final = f"{DOMAIN}.rewards"
 # whichever version actually changed it, same as any Store.async_load()
 # encountering keys it doesn't recognize.
 STORAGE_KEY_WEEKLY_BONUS_STATE: Final = f"{DOMAIN}.weekly_bonus_state"
-# v0.36: the coin-shop ledger - every credit (task-progress conversion is
-# *not* logged here, see COIN_REASON_* above and storage.coins_from_task_points;
-# only the Meilenstein/Streak coin bonuses are) and debit (a shop redemption)
-# a member's coin balance is made up of - see storage.CoinLedgerStore.
+# v0.36: the coin-shop ledger - every credit (v0.44: a completed task's own
+# "Münzwert", see COIN_REASON_TASK_COMPLETION above, plus the Meilenstein-/
+# Streak-coin bonuses) and debit (a shop redemption) a member's coin balance
+# is made up of - see storage.CoinLedgerStore. A member's coins_available is
+# simply this ledger's balance(); before v0.44 it also included a live
+# "points beyond the weekly goal" computation (coins_from_task_points),
+# removed along with COIN_REASON_WEEKLY_CONVERSION's crediting logic.
 STORAGE_KEY_COIN_LEDGER: Final = f"{DOMAIN}.coin_ledger"
-# v0.36: the single timestamp the coin system "started" counting from - see
-# storage.CoinSystemStateStore. Set once, the first time this integration
-# runs with v0.36 or later, so upgrading a household starts every member's
-# coin balance at 0 instead of retroactively crediting a lifetime of
-# already-earned, pre-v0.36 "spendable" point surplus as coins.
-STORAGE_KEY_COIN_SYSTEM_STATE: Final = f"{DOMAIN}.coin_system_state"
 # v0.17: the parent-maintained Favoriten template catalog - see
 # WS_API_PREFIX_FAVORITES above.
 STORAGE_KEY_FAVORITES: Final = f"{DOMAIN}.favorites"
@@ -570,11 +575,6 @@ STORAGE_KEY_STREAK_BONUS_STATE: Final = f"{DOMAIN}.streak_bonus_state"
 # v0.32: the household-wide Urlaubsmodus on/off state - see
 # VacationModeStateStore in storage.py and CONF_VACATION_MODE_DEFAULT above.
 STORAGE_KEY_VACATION_MODE: Final = f"{DOMAIN}.vacation_mode"
-# v0.37: per-member cursor tracking which fully-elapsed calendar weeks have
-# already had their "beyond the weekly goal" point surplus finalized into
-# CoinLedgerStore - see WeeklyCoinConversionStateStore in storage.py and
-# COIN_REASON_WEEKLY_CONVERSION above.
-STORAGE_KEY_WEEKLY_COIN_CONVERSION_STATE: Final = f"{DOMAIN}.weekly_coin_conversion_state"
 # v0.41: tracks which "fällig"/"überfällig" reminders (per assigned
 # member) and which Aufgabenpool "appeared" broadcasts have already fired
 # for a task's *current* occurrence - see DeadlineNotificationStateStore in
@@ -618,9 +618,13 @@ WS_API_MEMBER_WEEKLY_COMPLETIONS: Final = f"{WS_API_PREFIX_MEMBERS}/weekly_compl
 # Before v0.36 this was a *points*-shop - a reward's price was "points_cost"
 # and the balance was points_available (all-time points minus redemptions).
 # v0.36 splits the two currencies entirely: points now only ever drive the
-# "Wochenfortschritt" weekly-progress percent, never shop spending directly -
-# see CONF_WEEKLY_PROGRESS_GOAL_POINTS above and storage.coins_from_task_points
-# for how points convert into coins instead. Redeeming is not exposed through
+# "Wochenfortschritt" weekly-progress percent, never shop spending directly.
+# v0.36-v0.43 derived coins from that same weekly-progress surplus (see
+# CONF_WEEKLY_PROGRESS_GOAL_POINTS above); v0.44 replaces that with coins
+# earned directly per completed task (see "coin_value" on TASK_CREATE_SCHEMA
+# in storage.py and COIN_REASON_TASK_COMPLETION above), plus the Meilenstein-/
+# Streak-Bonus on top - see that constant's own comment for the full history.
+# Redeeming is not exposed through
 # the generic storage-collection "create" command for
 # WS_API_PREFIX_REWARD_REDEMPTIONS (see RewardRedemptionStorageCollectionWebsocket
 # in storage.py) because it needs the extra participation/balance checks -

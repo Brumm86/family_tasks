@@ -715,6 +715,10 @@
     return {
       name: "",
       points: 0,
+      // v0.44: see "coin_value" on TASK_CREATE_SCHEMA in storage.py -
+      // independent of "points", default 0 (no coins) until a parent
+      // deliberately sets one.
+      coin_value: 0,
       icon: "",
       enabled: true,
       due_time: "",
@@ -806,6 +810,7 @@
     return {
       name: task.name ?? "",
       points: task.points ?? 0,
+      coin_value: task.coin_value ?? 0,
       icon: task.icon ?? "",
       enabled: task.enabled !== false,
       due_time: task.due_time ?? "",
@@ -922,13 +927,23 @@
   }
 
   function emptyFavoriteForm() {
-    return { name: "", points: 0, icon: "", member_ids: [], kind: "standard", subtasks: [] };
+    return {
+      name: "",
+      points: 0,
+      // v0.44: see the matching comment in emptyTaskForm above.
+      coin_value: 0,
+      icon: "",
+      member_ids: [],
+      kind: "standard",
+      subtasks: [],
+    };
   }
 
   function favoriteToForm(favorite) {
     return {
       name: favorite?.name ?? "",
       points: favorite?.points ?? 0,
+      coin_value: favorite?.coin_value ?? 0,
       icon: favorite?.icon ?? "",
       member_ids: [...(favorite?.member_ids ?? [])],
       // v0.39: see the matching comment in taskToForm above.
@@ -1703,6 +1718,7 @@
       const payload = {
         name: form.name.trim(),
         points: Number(form.points) || 0,
+        coin_value: Math.max(0, Number(form.coin_value) || 0),
         enabled: form.enabled,
         recurrence,
         rotation: {
@@ -2093,6 +2109,7 @@
       const payload = {
         name: f.name.trim(),
         points: Math.max(0, Number(f.points) || 0),
+        coin_value: Math.max(0, Number(f.coin_value) || 0),
         kind: f.kind === "mandatory" ? "mandatory" : "standard",
         member_ids: [...f.member_ids],
         // v0.39: see the matching comment in _saveTask above.
@@ -2857,7 +2874,9 @@
                     .map((b) => esc(`${b.name}${b.level !== null && b.level !== undefined ? ` (${b.level}%)` : " (niedrig)"}`))
                     .join(", ")
                 : "Keine Batterie niedrig"
-              : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${overdueSiblingHint}`) + deadlineSuffix;
+              : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${
+                  task.coin_value ? ` · ${esc(coinsLabel(task.coin_value))}` : ""
+                }${overdueSiblingHint}`) + deadlineSuffix;
           // v0.40: TASK_STATUS_UPCOMING counts as "resolved" here too -
           // not because it's finished, but because "Diese Aufgaben sollen
           // erst am Tag ihrer Fälligkeit erledigt werden können" - the same
@@ -3134,6 +3153,7 @@
               const f = this._favorites[id];
               const memberNames = (f.member_ids ?? []).map((mid) => this._memberName(mid)).join(", ");
               const detailParts = [pointsLabel(f.points ?? 0)];
+              if (f.coin_value) detailParts.push(coinsLabel(f.coin_value));
               if (memberNames) detailParts.push(memberNames);
               if (f.subtasks && f.subtasks.length) detailParts.push("Checkliste");
               if (f.kind === "mandatory") detailParts.push("Pflichtaufgabe");
@@ -3675,6 +3695,7 @@
           <label>Name<input type="text" data-field="name" placeholder="z. B. Auto waschen" value="${esc(f.name)}" required></label>
           <div class="grid2">
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
+            <label>Münzwert (optional)<input type="number" min="0" data-field="coin_value" value="${esc(f.coin_value)}"></label>
             <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:car-wash" value="${esc(f.icon)}"></ha-icon-picker></label>
           </div>
           <label>Fest zugewiesen an (optional, mehrere möglich)</label>
@@ -3798,6 +3819,7 @@
           <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
           <div class="grid2">
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
+            <label>Münzwert (optional)<input type="number" min="0" data-field="coin_value" value="${esc(f.coin_value)}"></label>
             <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></ha-icon-picker></label>
           </div>
 
@@ -3893,7 +3915,7 @@
           </div>
 
           <label class="inline"><input type="checkbox" data-field="requires_confirmation" ${f.requires_confirmation ? "checked" : ""}> Bestätigung durch Eltern anfordern</label>
-          <p class="muted">Eigene Aufgaben werden ohne Punkte angelegt und nur dir zugewiesen.</p>
+          <p class="muted">Eigene Aufgaben werden ohne Punkte und ohne Münzwert angelegt und nur dir zugewiesen.</p>
 
           <div class="form-actions">
             <button type="submit" data-action="save-own-task">Speichern</button>

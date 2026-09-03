@@ -31,7 +31,7 @@ from .const import (
     COIN_REASON_MILESTONE_200,
     COIN_REASON_STREAK_150,
     COIN_REASON_STREAK_200,
-    COIN_REASON_WEEKLY_CONVERSION,
+    COIN_REASON_TASK_COMPLETION,
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
@@ -94,7 +94,6 @@ from .storage import (
     ChecklistStateStore,
     ClaimStateStore,
     CoinLedgerStore,
-    CoinSystemStateStore,
     CompletionLogStore,
     DeadlineNotificationStateStore,
     MemberStorageCollection,
@@ -104,8 +103,6 @@ from .storage import (
     TaskStorageCollection,
     TriggerStateStore,
     VacationModeStateStore,
-    WeeklyCoinConversionStateStore,
-    coins_from_task_points,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -247,19 +244,21 @@ class MemberSummaryData:
     points_month: int
     points_total: int
     open_tasks: int
-    # v0.36: current balance in the new reward-shop currency, "Münzen" -
-    # replaces the old points_available entirely (the point shop no longer
-    # exists; points now only ever drive the weekly-progress bar, see
-    # points_week below). Two components, summed: storage.coins_from_task_points
-    # (task points earned *beyond* CONF_WEEKLY_PROGRESS_GOAL_POINTS in a
-    # calendar week, for every week since CoinSystemStateStore.started_at -
-    # the v0.36 upgrade cutover, so nobody's historical points retroactively
-    # convert) plus FamilyTasksCoordinator.coin_ledger's own balance (manual
-    # milestone/streak coin bonuses credited, and past reward redemptions
-    # debited - see CoinLedgerStore in storage.py). Never a separately
-    # stored/mutated value itself, always computed fresh from history so it
-    # can never drift out of sync - same "recompute, don't store" pattern the
-    # old points_available used. Drives the reward-shop balance display and
+    # v0.36: current balance in the reward-shop currency, "Münzen" -
+    # replaces the old points_available entirely (points now only ever drive
+    # the weekly-progress bar, see points_week below - see
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS). v0.44: simply
+    # FamilyTasksCoordinator.coin_ledger's balance for this member - every
+    # completed task's own "coin_value" (async_complete_task/
+    # _async_finalize_confirmation, reason COIN_REASON_TASK_COMPLETION),
+    # every Meilenstein-/Streak-coin-bonus credited, and every past reward
+    # redemption debited (see CoinLedgerStore in storage.py). Before v0.44
+    # this also included a live "points earned beyond the weekly goal"
+    # component (storage.coins_from_task_points) - removed along with that
+    # mechanic; a task now earns coins only via its own coin_value,
+    # independent of the weekly goal entirely. Never a separately stored/
+    # mutated value itself, always computed fresh from the ledger so it can
+    # never drift out of sync. Drives the reward-shop balance display and
     # whether a given catalog reward is affordable (WS_API_REWARD_REDEEM in
     # const.py / ws_redeem_reward in storage.py re-derives the same thing
     # server-side before letting a redemption through).
@@ -650,8 +649,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         streak_bonus_state: StreakBonusStateStore,
         vacation_mode_state: VacationModeStateStore,
         coin_ledger: CoinLedgerStore,
-        coin_system_state: CoinSystemStateStore,
-        weekly_coin_conversion_state: WeeklyCoinConversionStateStore,
         deadline_notification_state: DeadlineNotificationStateStore,
     ) -> None:
         super().__init__(
@@ -672,11 +669,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         self.claim_state = claim_state
         self.streak_bonus_state = streak_bonus_state
         self.vacation_mode_state = vacation_mode_state
-        # v0.36: see CoinLedgerStore/CoinSystemStateStore in storage.py.
+        # v0.36: see CoinLedgerStore in storage.py. v0.44: this is now the
+        # household's only source of coin balance - see coins_available in
+        # _async_update_data below.
         self.coin_ledger = coin_ledger
-        self.coin_system_state = coin_system_state
-        # v0.37: see WeeklyCoinConversionStateStore in storage.py.
-        self.weekly_coin_conversion_state = weekly_coin_conversion_state
         # v0.41: see DeadlineNotificationStateStore in storage.py -
         # idempotency for the "fällig"/"überfällig"/Aufgabenpool-"appeared"
         # notifications raised from _async_notify_task_status below.
@@ -735,13 +731,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # is nothing left for it to correct.
         await self._async_process_milestone_coin_bonus(start_of_week, weekly_progress_goal_points)
         await self._async_process_streak_coin_bonus(start_of_week, weekly_progress_goal_points)
-        # v0.37: finalize every fully-elapsed week's "points beyond the
-        # weekly goal" surplus into a durable coin-ledger credit - see
-        # WeeklyCoinConversionStateStore and
-        # _async_process_weekly_coin_conversion below for why this replaces
-        # recomputing that surplus live from the (bounded) completion log for
-        # every past week on every refresh.
-        await self._async_process_weekly_coin_conversion(start_of_week, weekly_progress_goal_points)
 
         # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
         # storage.py. Read once per refresh, same pattern as
@@ -1226,28 +1215,20 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             points_week = self.completions.points_since(member_id, start_of_week)
             # v0.36: coins_available replaces the old spendable_points minus
             # redeemed_points computation entirely - self.coin_ledger.balance
-            # nets out every bonus credit *and* every past redemption debit
-            # on its own (see ws_redeem_reward in storage.py, which appends
-            # the debit at redemption time) - see
-            # MemberSummaryData.coins_available's docstring.
+            # nets out every credit *and* every past redemption debit on its
+            # own (see ws_redeem_reward in storage.py, which appends the
+            # debit at redemption time) - see MemberSummaryData.coins_available's
+            # docstring.
             #
-            # v0.37: coins_from_task_points here is now scoped to *only* the
-            # still-open current week (since=max(coin_system_state.started_at,
-            # start_of_week), rather than the full history since started_at)
-            # - every fully-elapsed week's surplus has already been finalized
-            # into self.coin_ledger by _async_process_weekly_coin_conversion
-            # above, so counting it again here would double it. The current
-            # week's own surplus isn't in the ledger yet (it can't be judged
-            # until the week is over - see that method), so it's still
-            # computed live from the completion log, same as before; unlike
-            # a past week, there's no risk of *this* week's completions
-            # having already aged out of that log by the time this runs.
-            coins_available = coins_from_task_points(
-                self.completions,
-                member_id,
-                weekly_progress_goal_points,
-                max(self.coin_system_state.started_at, start_of_week),
-            ) + self.coin_ledger.balance(member_id)
+            # v0.44: coins are credited straight to the ledger the moment a
+            # task with a "coin_value" is completed (see
+            # async_complete_task/_async_finalize_confirmation below), so
+            # coins_available is simply the ledger balance now - no more
+            # live "points beyond the weekly goal" computation on top (that
+            # mechanic, and the weekly goal itself, no longer have anything
+            # to do with coins - see COIN_REASON_WEEKLY_CONVERSION in
+            # const.py for what this replaces).
+            coins_available = self.coin_ledger.balance(member_id)
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
                 name=member["name"],
@@ -1546,6 +1527,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             points_awarded=task.get("points", 0),
             task_name=task.get("name"),
         )
+        await self._async_credit_task_coins(task, acting_member_id)
         # v0.27: done in time - drop the now-moot claim (if any) right away
         # instead of waiting for _async_update_data's DONE-status cleanup on
         # the next refresh, so a stale "reserved" state can't briefly show
@@ -2105,6 +2087,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 points_awarded=original_task.get("points", 0),
                 task_name=original_task.get("name"),
             )
+            await self._async_credit_task_coins(original_task, child_member_id)
             rotation = original_task["rotation"]
             member_ids = rotation.get("member_ids") or []
             index = (
@@ -2256,6 +2239,36 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             if percent >= band_percent:
                 adjustment = PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES[band_percent]
         return adjustment
+
+    async def _async_credit_task_coins(self, task: dict, member_id: str | None) -> None:
+        """Credit a completed task's own "Münzwert" (v0.44) to its acting member.
+
+        Called from both places a real task completion is actually logged -
+        async_complete_task's direct-completion path and
+        _async_finalize_confirmation's parent-confirms-a-child's-claim path
+        - right after the matching self.completions.async_add_entry call, so
+        a task's points and coins are always credited together, atomically
+        from the caller's point of view. Mirrors how points_awarded works
+        (task.get("points", 0)) but goes straight to CoinLedgerStore instead
+        of the completion log: unlike points, coins were never meant to feed
+        the weekly-progress bar or any percent-of-goal calculation, so there
+        is nothing here for them to double-count against (see
+        COIN_REASON_TASK_COMPLETION in const.py).
+
+        No-op when the task has no coin_value set (the default, 0 - most
+        tasks) or ``member_id`` couldn't be resolved (mirrors every other
+        award path in this file, which likewise only ever credits a known
+        member).
+        """
+        coin_value = task.get("coin_value", 0)
+        if coin_value <= 0 or member_id is None:
+            return
+        await self.coin_ledger.async_add_entry(
+            member_id=member_id,
+            amount=coin_value,
+            reason=COIN_REASON_TASK_COMPLETION,
+            note=task.get("name"),
+        )
 
     async def _async_process_milestone_coin_bonus(
         self, start_of_week: datetime, goal_points: int
@@ -2475,114 +2488,19 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if weeks_processed:
             await self.streak_bonus_state.async_set(member_id, tier, cursor, streak_count)
 
-    async def _async_process_weekly_coin_conversion(
-        self, start_of_week: datetime, goal_points: int
-    ) -> None:
-        """Finalize every member's fully-elapsed weeks into durable coin credits.
-
-        See WeeklyCoinConversionStateStore/COIN_REASON_WEEKLY_CONVERSION in
-        const.py for why this exists - in short, coins_from_task_points used
-        to be recomputed live from CompletionLogStore for every week since
-        the coin system started, which quietly lost old weeks' surplus once
-        their completions aged out of that (intentionally bounded) log. Once
-        a week is over, its surplus is credited here instead, exactly once,
-        and lives in CoinLedgerStore (never pruned) from then on - only the
-        still-open current week keeps being computed live (see
-        coins_available in _async_update_data above).
-
-        Unlike the Meilenstein-/Streak-coin bonuses, there is no
-        enabled/amount check to gate this on - the base points-to-coins
-        conversion always applies, the same as it unconditionally did before
-        this method existed.
-        """
-        since = self.coin_system_state.started_at
-        for member_id in self.members.data:
-            await self._async_process_member_weekly_coin_conversion(
-                member_id, start_of_week, goal_points, since
-            )
-
-    async def _async_process_member_weekly_coin_conversion(
-        self,
-        member_id: str,
-        start_of_week: datetime,
-        goal_points: int,
-        since: datetime,
-    ) -> None:
-        """Catch up one member's weekly-coin-conversion cursor through every elapsed week.
-
-        Weeks are walked Monday-to-Monday (local time), same boundary
-        coins_from_task_points itself buckets by and start_of_week already
-        uses - starting from whichever is later: the cursor's last processed
-        week, or the calendar week ``since`` (the coin system's cutover
-        instant) falls in. A week's own point total is clamped to not
-        include anything before ``since`` (points_between(max(week_start,
-        since), week_end)), same "a week straddling the cutover slightly
-        undercounts" one-time edge case coins_from_task_points' docstring
-        already accepts - everything *after* the cutover is unaffected.
-
-        Each week's surplus (points beyond ``goal_points``, or the week's
-        full total if no goal is configured - mirrors coins_from_task_points'
-        two branches) is floored at 0 individually before being credited, so
-        one week with more manual-deduction penalties than points earned can
-        never eat into coins a *different*, already-finalized week legitimately
-        earned - slightly more conservative than the pre-v0.37 lifetime-sum
-        behaviour for the no-goal-configured case, and intentionally so.
-
-        Capped at 104 weeks per refresh, same reasoning as
-        _async_process_member_streak_tier's cap: a household offline for a
-        very long time (or upgrading long after the coin system's cutover)
-        still ends up correct, just caught up over a few extra refreshes
-        instead of one long blocking loop.
-        """
-        local_since = dt_util.as_local(since)
-        since_week_start = dt_util.as_utc(
-            dt_util.start_of_local_day(local_since) - timedelta(days=local_since.weekday())
-        )
-        cursor = self.weekly_coin_conversion_state.processed_through(member_id)
-        if cursor is None or cursor < since_week_start:
-            cursor = since_week_start
-
-        weeks_processed = 0
-        while cursor < start_of_week and weeks_processed < 104:
-            week_end = cursor + timedelta(days=7)
-            week_points = self.completions.points_between(member_id, max(cursor, since), week_end)
-            surplus = max(0, week_points - goal_points) if goal_points > 0 else max(0, week_points)
-            if surplus > 0:
-                await self.coin_ledger.async_add_entry(
-                    member_id=member_id,
-                    amount=surplus,
-                    reason=COIN_REASON_WEEKLY_CONVERSION,
-                    note=(
-                        f"Wochenabschluss {dt_util.as_local(cursor).date().isoformat()}: "
-                        f"{surplus} Punkt(e) in Münzen umgewandelt"
-                    ),
-                )
-                _LOGGER.debug(
-                    "Converted %s point(s) beyond the weekly goal to coin(s) for %s, "
-                    "week of %s",
-                    surplus,
-                    member_id,
-                    dt_util.as_local(cursor).date().isoformat(),
-                )
-            cursor = week_end
-            weeks_processed += 1
-
-        if weeks_processed:
-            await self.weekly_coin_conversion_state.async_set(member_id, cursor)
-
     async def async_reset_points(self, member_id: str | None = None) -> None:
         """Reset stored *points* data - see SERVICE_RESET_POINTS in const.py.
 
         Clears the completion log (points_total/points_week/.../history),
-        reward redemptions, the coin ledger (v0.36 - milestone/streak coin
-        bonuses, weekly-conversion credits (v0.37), and past redemption
+        reward redemptions, the coin ledger (v0.36 - task-completion coins
+        (v0.44) plus milestone/streak coin bonuses and past redemption
         debits alike, so coins_available is no longer reduced by past
-        purchases either), and the Meilenstein-/Streak-Bonus/weekly-coin-
-        conversion (v0.37) tracking state. Task and member *definitions* and
-        the reward catalog itself are left completely untouched - this only
-        ever resets *earned/spent points and coins*, never the household's
-        setup. ``member_id`` left unset (None) resets every member at once;
-        given, only that member's data is cleared.
+        purchases either), and the Meilenstein-/Streak-Bonus tracking state.
+        Task and member *definitions* and the reward catalog itself are left
+        completely untouched - this only ever resets *earned/spent points
+        and coins*, never the household's setup. ``member_id`` left unset
+        (None) resets every member at once; given, only that member's data
+        is cleared.
         """
         await self.completions.async_reset(member_id)
         for redemption_id, redemption in list(self.reward_redemptions.data.items()):
@@ -2591,12 +2509,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self.coin_ledger.async_reset(member_id)
         await self.milestone_bonus_state.async_reset(member_id)
         await self.streak_bonus_state.async_reset(member_id)
-        # v0.37: without this, a member whose completion history was just
-        # wiped would keep a stale "already converted through <date>" cursor
-        # pointing at weeks that no longer have any completions behind them,
-        # instead of those weeks being (correctly, now that they're empty)
-        # re-judged as contributing 0 coins next refresh.
-        await self.weekly_coin_conversion_state.async_reset(member_id)
         _LOGGER.info("Reset points data for %s", member_id or "every member")
         await self.async_request_refresh()
 

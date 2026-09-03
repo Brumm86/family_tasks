@@ -46,7 +46,6 @@ from .storage import (
     ChecklistStateStore,
     ClaimStateStore,
     CoinLedgerStore,
-    CoinSystemStateStore,
     CompletionLogStore,
     DeadlineNotificationStateStore,
     FavoriteStorageCollection,
@@ -58,12 +57,10 @@ from .storage import (
     TaskStorageCollection,
     TriggerStateStore,
     VacationModeStateStore,
-    WeeklyCoinConversionStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
     async_create_claim_state_store,
     async_create_coin_ledger_store,
-    async_create_coin_system_state_store,
     async_create_deadline_notification_state_store,
     async_create_favorites_collection,
     async_create_members_collection,
@@ -74,7 +71,6 @@ from .storage import (
     async_create_tasks_collection,
     async_create_trigger_state_store,
     async_create_vacation_mode_state_store,
-    async_create_weekly_coin_conversion_state_store,
     async_member_id_for_context,
     async_setup_websocket_api,
 )
@@ -137,8 +133,6 @@ class FamilyTasksRuntimeData:
     streak_bonus_state: StreakBonusStateStore
     vacation_mode_state: VacationModeStateStore
     coin_ledger: CoinLedgerStore
-    coin_system_state: CoinSystemStateStore
-    weekly_coin_conversion_state: WeeklyCoinConversionStateStore
     deadline_notification_state: DeadlineNotificationStateStore
 
 
@@ -161,14 +155,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     await completions.async_load()
 
     # v0.36: created before the websocket API too, same reasoning as
-    # completions above - ws_redeem_reward needs both to work out a member's
-    # current coin balance. See CoinLedgerStore/CoinSystemStateStore in
-    # storage.py.
+    # completions above - ws_redeem_reward needs it to work out a member's
+    # current coin balance. See CoinLedgerStore in storage.py.
     coin_ledger = await async_create_coin_ledger_store(hass)
-    coin_system_state = await async_create_coin_system_state_store(hass)
-    # v0.37: see WeeklyCoinConversionStateStore in storage.py - not needed by
-    # the websocket API below, only by the coordinator's own refresh loop.
-    weekly_coin_conversion_state = await async_create_weekly_coin_conversion_state_store(hass)
 
     # The websocket CRUD API is a hass-global registration; only needed once,
     # but harmless/no-ops for a second entry since single_config_entry=True
@@ -184,7 +173,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         completions,
         favorites,
         coin_ledger,
-        coin_system_state,
     )
 
     trigger_state = await async_create_trigger_state_store(hass)
@@ -219,8 +207,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         streak_bonus_state,
         vacation_mode_state,
         coin_ledger,
-        coin_system_state,
-        weekly_coin_conversion_state,
         deadline_notification_state,
     )
     await coordinator.async_config_entry_first_refresh()
@@ -240,8 +226,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         streak_bonus_state=streak_bonus_state,
         vacation_mode_state=vacation_mode_state,
         coin_ledger=coin_ledger,
-        coin_system_state=coin_system_state,
-        weekly_coin_conversion_state=weekly_coin_conversion_state,
         deadline_notification_state=deadline_notification_state,
     )
 
