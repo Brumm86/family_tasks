@@ -25,6 +25,7 @@
           "screen_time_minutes_per_point": "Screen time minutes per invested point",
           "screen_time_tick_minutes": "Screen time per automatic tick (minutes, matches the Handyzeit blueprint)",
           "screen_time_ticks_per_day": "Automatic ticks per day (matches the Handyzeit blueprint)",
+          "screen_time_malus_start_date": "Handyzeit-Tick-Malus considered active from (date)",
           "weekly_progress_goal_points": "Weekly point goal (progress bar)",
           "milestone_bonus_enabled": "Award a Meilensteinbonus (milestone bonus)",
           "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",

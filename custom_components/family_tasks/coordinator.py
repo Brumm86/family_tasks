@@ -41,6 +41,7 @@ from .const import (
     CONF_MEMBER_REWARDS_OPT_IN,
     CONF_MILESTONE_150_BONUS_COINS,
     CONF_MILESTONE_200_BONUS_COINS,
+    CONF_SCREEN_TIME_MALUS_START_DATE,
     CONF_SCREEN_TIME_TICK_MINUTES,
     CONF_SCREEN_TIME_TICKS_PER_DAY,
     CONF_STREAK_150_BONUS_COINS,
@@ -301,11 +302,14 @@ class MemberSummaryData:
     # v0.45.1: judged against *last* week's progress, not the still-running
     # current week - a shortfall only ever bites the week after it happened,
     # never mid-week against a goal that by definition can't be reached yet
-    # until the week is over. 0 whenever there's no fully-elapsed previous
-    # week to judge at all yet (a brand-new household, or a member who only
-    # started this week) - see FamilyTasksCoordinator._async_update_data's
-    # earliest_completed_at check and
-    # _screen_time_tick_adjustment_minutes's docstring.
+    # until the week is over.
+    #
+    # v0.46: 0 whenever CONF_SCREEN_TIME_MALUS_START_DATE (const.py) is
+    # unset, or the previous week to judge starts before it - a household
+    # explicitly marks when it actually started using family_tasks rather
+    # than this being inferred per member (see
+    # FamilyTasksCoordinator._async_update_data and that constant's
+    # docstring for why the old per-member inference was replaced).
     screen_time_tick_adjustment_minutes: int = 0
     # v0.45: this member's own estimated total Handyzeit for today, in
     # minutes - screen_time_ticks_per_day * max(screen_time_tick_minutes +
@@ -758,6 +762,22 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             screen_time_ticks_per_day = self.config_entry.options.get(
                 CONF_SCREEN_TIME_TICKS_PER_DAY, DEFAULT_SCREEN_TIME_TICKS_PER_DAY
             )
+
+        # v0.46: household-wide "malus considered active from" date - see
+        # CONF_SCREEN_TIME_MALUS_START_DATE in const.py for the full
+        # reasoning (replaces v0.45.1's per-member earliest_completed_at
+        # heuristic, which could disagree between siblings). Stored as an
+        # ISO date string (JSON-serializable config-entry options); parsed
+        # once here, same pattern as the values above. None whenever unset
+        # (the default) or unparsable - the malus then never applies at all,
+        # same as before a household has ever set it.
+        screen_time_malus_start_date = None
+        if self.config_entry:
+            malus_start_date_str = self.config_entry.options.get(
+                CONF_SCREEN_TIME_MALUS_START_DATE
+            )
+            if malus_start_date_str:
+                screen_time_malus_start_date = dt_util.parse_date(malus_start_date_str)
 
         # Computed once per refresh and shared by every recurrence-"battery"
         # task below (see RECURRENCE_BATTERY in const.py) - which batteries
@@ -1292,18 +1312,22 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             # v0.45.1: banded on *last* week's progress, not this week's still-
             # running one - see _screen_time_tick_adjustment_minutes's
             # docstring for why. last_week_start..start_of_week is the most
-            # recently fully-elapsed calendar week; earliest_completed_at
-            # tells apart a previous week that actually happened under
-            # family_tasks's watch from one that only looks empty because
-            # this member (or the household as a whole) hadn't started using
-            # the system yet - only the former is ever judged. A brand-new
-            # household/member's very first week(s) therefore never carry a
-            # malus, same "don't judge history that doesn't exist" reasoning
-            # _async_process_member_streak_tier already applies to the
-            # streak-bonus cursor.
+            # recently fully-elapsed calendar week.
+            #
+            # v0.46: whether that previous week is judged at all no longer
+            # depends on this member's own completion history (v0.45.1's
+            # earliest_completed_at heuristic - it could disagree between
+            # siblings who onboarded on slightly different days/hours even
+            # though the household as a whole started at the same time) but
+            # on the single household-wide screen_time_malus_start_date
+            # above - the same for every member, so two children with the
+            # same lack of real history now always show the same (absent)
+            # malus. Unset entirely (None) means the malus never applies.
             last_week_start = start_of_week - timedelta(days=7)
-            earliest_completed_at = self.completions.earliest_completed_at(member_id)
-            if earliest_completed_at is not None and earliest_completed_at < last_week_start:
+            if (
+                screen_time_malus_start_date is not None
+                and dt_util.as_local(last_week_start).date() >= screen_time_malus_start_date
+            ):
                 last_week_points = self.completions.points_between(
                     member_id, last_week_start, start_of_week
                 )

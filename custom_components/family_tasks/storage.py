@@ -1931,29 +1931,6 @@ class CompletionLogStore:
                 total += entry["points_awarded"]
         return total
 
-    def earliest_completed_at(self, member_id: str) -> datetime | None:
-        """Return the earliest logged timestamp for a member, or None if they have none yet.
-
-        v0.45.1: used by FamilyTasksCoordinator._screen_time_tick_adjustment_minutes
-        to tell a genuinely-judged previous week apart from one that only
-        looks empty because the household (or this particular member) hadn't
-        started using family_tasks yet - the Handyzeit-Tick-Malus must only
-        ever react to a week that actually elapsed under the system's watch,
-        never to history that simply doesn't exist. Includes skipped entries
-        too (a rejected/skipped completion still proves the system was
-        already tracking this member at that point, which is all this is
-        used to establish) - unlike points_since/points_between above, this
-        never sums points, so skipped entries don't need excluding.
-        """
-        earliest: datetime | None = None
-        for entry in self._entries:
-            if entry["completed_by_member_id"] != member_id:
-                continue
-            completed_at = dt_util.parse_datetime(entry["completed_at"])
-            if completed_at is not None and (earliest is None or completed_at < earliest):
-                earliest = completed_at
-        return earliest
-
     async def async_reset(self, member_id: str | None = None) -> None:
         """Clear logged points history - see SERVICE_RESET_POINTS in const.py.
 

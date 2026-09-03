@@ -25,6 +25,7 @@
           "screen_time_minutes_per_point": "Handyzeit-Minuten pro investiertem Punkt",
           "screen_time_tick_minutes": "Handyzeit pro automatischem Tick (Minuten, wie im Handyzeit-Blueprint hinterlegt)",
           "screen_time_ticks_per_day": "Automatische Ticks pro Tag (wie im Handyzeit-Blueprint hinterlegt)",
+          "screen_time_malus_start_date": "Handyzeit-Tick-Malus berücksichtigt ab (Datum)",
           "weekly_progress_goal_points": "Wöchentliche Zielpunktzahl (Fortschrittsbalken)",
           "milestone_150_bonus_coins": "Meilensteinbonus-Münzen bei 150% der Zielpunktzahl",
           "milestone_200_bonus_coins": "Meilensteinbonus-Münzen bei 200% der Zielpunktzahl",

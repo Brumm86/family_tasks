@@ -74,6 +74,26 @@ CONF_SCREEN_TIME_MINUTES_PER_POINT: Final = "screen_time_minutes_per_point"
 CONF_SCREEN_TIME_TICK_MINUTES: Final = "screen_time_tick_minutes"
 CONF_SCREEN_TIME_TICKS_PER_DAY: Final = "screen_time_ticks_per_day"
 
+# v0.46: household-wide date (ISO "YYYY-MM-DD" string, config-entry options
+# are JSON-stored - see FamilyTasksOptionsFlow.async_step_init in
+# config_flow.py, which converts the DateSelector's raw datetime.date into
+# this string before saving) marking when a household actually started
+# using family_tasks for real - the earliest calendar week the
+# Handyzeit-Tick-Malus (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES) is allowed to
+# judge is the first one that starts on/after this date. Replaces v0.45.1's
+# automatic per-member CompletionLogStore.earliest_completed_at heuristic,
+# which inferred this from each member's own first logged completion and
+# could disagree between siblings who onboarded on slightly different days
+# (or hours) even though the *household* started using the system at the
+# same time - one child having, say, an early auto-completing sensor task
+# was enough to make only their malus "activate" a week before their
+# sibling's. Unset (None/empty, the default) means the malus never applies
+# at all - a household must explicitly set this once family_tasks is
+# actually in use, same "don't judge history that doesn't exist" reasoning
+# as before, just household-wide and explicit instead of inferred per
+# member. See FamilyTasksCoordinator._async_update_data.
+CONF_SCREEN_TIME_MALUS_START_DATE: Final = "screen_time_malus_start_date"
+
 # v0.36: fixed weekly-progress-percent checkpoints (percentages of
 # CONF_WEEKLY_PROGRESS_GOAL_POINTS) the whole coin system is built around -
 # replaces the pre-v0.36 Meilensteinbonus/Streak-Bonus, which let a household
@@ -104,9 +124,12 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
 # v0.45.1: the percent banded here is always *last* week's, already-final
 # progress, never the still-running current week's - a shortfall must only
 # ever bite in the following week (see _async_update_data in coordinator.py,
-# which now passes last week's points and gates on a real previous week
-# actually having elapsed under family_tasks's watch, via
-# CompletionLogStore.earliest_completed_at).
+# which now passes last week's points).
+#
+# v0.46: that previous week is only ever judged once it starts on/after the
+# household's own configured CONF_SCREEN_TIME_MALUS_START_DATE above - see
+# that constant's docstring for why this replaced the v0.45.1 per-member
+# heuristic.
 PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -2, 50: -1, 100: 0}
 
 # v0.36: bonus *coins* (see the "Münzen"/coin-shop section below) awarded

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import voluptuous as vol
@@ -16,6 +17,7 @@ from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    DateSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -30,6 +32,7 @@ from .const import (
     CONF_MILESTONE_150_BONUS_COINS,
     CONF_MILESTONE_200_BONUS_COINS,
     CONF_OVERDUE_AFTER_MINUTES,
+    CONF_SCREEN_TIME_MALUS_START_DATE,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_SCREEN_TIME_TICK_MINUTES,
     CONF_SCREEN_TIME_TICKS_PER_DAY,
@@ -112,7 +115,20 @@ class FamilyTasksOptionsFlow(OptionsFlow):
             # 200% weekly-progress bands (PROGRESS_THRESHOLD_PERCENTS in
             # const.py), so there is no ordering left for a household to get
             # wrong here.
-            return self.async_create_entry(data=user_input)
+            data = dict(user_input)
+            # v0.46: DateSelector (see CONF_SCREEN_TIME_MALUS_START_DATE
+            # below) validates to a raw datetime.date object, but
+            # config-entry options are persisted through HA's plain
+            # JSONEncoder (homeassistant.helpers.storage.Store), which has
+            # no support for datetime.date - only datetime.datetime. Store
+            # its ISO string instead (dt_util.parse_date on read, see
+            # _async_update_data in coordinator.py), same representation
+            # every other date in this integration already uses (e.g.
+            # TaskStorageCollection's created_at).
+            malus_start_date = data.get(CONF_SCREEN_TIME_MALUS_START_DATE)
+            if isinstance(malus_start_date, date):
+                data[CONF_SCREEN_TIME_MALUS_START_DATE] = malus_start_date.isoformat()
+            return self.async_create_entry(data=data)
 
         # On a validation error, re-show the form pre-filled with what the
         # user just submitted (not the previously saved options) so a typo'd
@@ -205,6 +221,18 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=100, mode=NumberSelectorMode.BOX)
                 ),
+                # v0.46: household-wide "malus considered active from" date -
+                # see CONF_SCREEN_TIME_MALUS_START_DATE in const.py. Left
+                # empty (no suggested_value/default forces a value, so the
+                # field submits nothing at all when cleared - see
+                # async_step_init above) the Handyzeit-Tick-Malus never
+                # applies, same as before this option existed.
+                vol.Optional(
+                    CONF_SCREEN_TIME_MALUS_START_DATE,
+                    description={
+                        "suggested_value": current.get(CONF_SCREEN_TIME_MALUS_START_DATE)
+                    },
+                ): DateSelector(),
                 # v0.29: weekly point goal backing each child's
                 # "Wochenfortschritt" progress bar - points earned beyond
                 # this within a calendar week become spendable, see

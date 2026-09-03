@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.46.0] - 2026-09-03
+
+### Changed
+- **Handyzeit-Tick-Malus-Beginn jetzt explizit konfigurierbar statt automatisch geschätzt**: v0.45.1 leitete die "gibt es überhaupt schon eine beurteilbare Vorwoche" - Entscheidung automatisch aus dem *ersten geloggten Eintrag jedes einzelnen Mitglieds* ab (`CompletionLogStore.earliest_completed_at`). Das konnte zwischen Geschwistern auseinanderlaufen, obwohl der Haushalt als Ganzes zur selben Zeit angefangen hat - reichte z. B. eine früh automatisch abgeschlossene Sensor-Aufgabe bei einem Kind, zeigte nur dieses schon einen Malus, während das andere (mit identisch fehlender echter Historie) korrekt keinen zeigte. Neue Integrationsoption "Handyzeit-Tick-Malus berücksichtigt ab (Datum)" (`CONF_SCREEN_TIME_MALUS_START_DATE`) ersetzt diese Schätzung durch ein einziges, für den ganzen Haushalt geltendes Datum: der Malus wertet nur eine Vorwoche, die vollständig auf oder nach diesem Datum liegt - für jedes Kind identisch. Leer gelassen (Standard) wirkt sich der Malus überhaupt nicht aus, genau wie vor v0.45.1.
+
 ## [0.45.1] - 2026-09-03
 
 ### Fixed
