@@ -196,11 +196,15 @@
  * (points + rotation); skipping it rejects the claim. These auto-generated
  * tasks are read-only (no edit/delete) since the coordinator manages them.
  *
- * A user linked to a "child" member also gets a restricted "+ Eigene Aufgabe
- * hinzufügen" form (no admin account needed) to create a task for
- * themselves: no points and no assignee choice - both are forced server-side
- * (family_tasks/task/create_own) - but they choose whether that task
- * requires parental confirmation.
+ * v0.47 removed the "+ Eigene Aufgabe hinzufügen" self-service form that
+ * previously let a user linked to a "child" member create a task for
+ * themselves (no admin account needed, points/assignee forced server-side
+ * via family_tasks/task/create_own) - parents had no visibility into, or
+ * way to remove, whatever a child created this way. The websocket command
+ * still exists but now always rejects (see ws_create_own_task in
+ * storage.py). Tasks a child created before the change keep their
+ * created_by_member_id tag and are now visible to, and editable/deletable
+ * by, parents/admins too - see the isParentUser branch in _renderTaskList.
  *
  * Battery monitoring: Home Assistant's battery-level entities
  * (sensor/binary_sensor with device_class "battery") are watched
@@ -381,15 +385,16 @@
  *   respectively (space-between), instead of just one after another on the
  *   left.
  * - A task a "child" member created for themselves (family_tasks/task/
- *   create_own, see CONF_TASK_CREATED_BY_MEMBER_ID in const.py) is now
+ *   create_own, see CONF_TASK_CREATED_BY_MEMBER_ID in const.py) was made
  *   visible only to whoever created it - not other children (already mostly
- *   excluded by their own forced "own tasks" filter) and, new in v0.22, not
- *   parents/admins either, whose view previously showed every task
- *   regardless. See the creator-only filter at the top of _renderTaskList.
- *   The coordinator-generated parent-confirmation task raised once such a
- *   task is completed (if it requires confirmation) is a separate task
- *   entity without this field, so it's unaffected and still shows up for
- *   parents as before.
+ *   excluded by their own forced "own tasks" filter) and not parents/admins
+ *   either, whose view previously showed every task regardless. See the
+ *   creator-only filter at the top of _renderTaskList. The
+ *   coordinator-generated parent-confirmation task raised once such a task
+ *   is completed (if it requires confirmation) is a separate task entity
+ *   without this field, so it's unaffected and still shows up for parents
+ *   as before. (v0.47 changes this again for parents/admins specifically -
+ *   see the v0.47 note near the top of this file.)
  * - Clicking a Bestenliste row (or pressing Enter/Space on it) opens a
  *   dialog listing exactly which tasks that member completed during the
  *   current calendar week, via the new family_tasks/member/
@@ -2266,7 +2271,6 @@
         <div class="task-actions-row">
           <div>
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
-            ${isChildUser && !isAdmin ? `<button class="add" data-action="new-own-task">+ Eigene Aufgabe hinzufügen</button>` : ""}
           </div>
           <div>${this._renderFavoritesLauncher(canManageFavorites)}</div>
         </div>
@@ -2648,17 +2652,23 @@
       const isParentUser = isAdmin && !this._isChildUser();
       // v0.22: a task a "child" member created for themselves (see
       // "created_by_member_id" / CONF_TASK_CREATED_BY_MEMBER_ID in const.py,
-      // set by ws_create_own_task in storage.py) is only ever visible to
-      // whoever created it - not even a parent/admin sees it in the normal
-      // task list, so a child's casual self-reminder doesn't clutter
-      // everyone else's view. The coordinator-generated parent-confirmation
-      // task raised once such a task is actually completed (if
-      // requires_confirmation is set) is a *separate* task entity with no
-      // created_by_member_id of its own, so it's unaffected and still shows
-      // up for parents as normal.
+      // historically set by ws_create_own_task in storage.py) used to be
+      // visible only to whoever created it - not even a parent/admin saw it
+      // in the normal task list, so a child's casual self-reminder didn't
+      // clutter everyone else's view. v0.47: children can no longer create
+      // these tasks at all (ws_create_own_task now always rejects), and a
+      // parent had no way to see or clean up ones a child had already made
+      // - so a parent/admin (isParentUser, computed above) now also sees
+      // them, same as any other task, and can edit/delete them with the
+      // normal admin controls further down. A plain "child" user (viewing
+      // their own list) still only ever sees the ones they made themselves.
+      // The coordinator-generated parent-confirmation task raised once such
+      // a task is actually completed (if requires_confirmation is set) is a
+      // *separate* task entity with no created_by_member_id of its own, so
+      // it's unaffected and still shows up for parents as before.
       ids = ids.filter((id) => {
         const createdBy = this._tasks[id].created_by_member_id;
-        return !createdBy || createdBy === currentMemberId;
+        return !createdBy || createdBy === currentMemberId || isParentUser;
       });
       // v0.33: hidden for the duration of Urlaubsmodus - see
       // _isVacationPaused. Filtered out here (independent of hideNotDue/

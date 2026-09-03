@@ -279,8 +279,11 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     # See TASK_KIND_CHECKLIST in const.py.
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
-    # See CONF_TASK_CREATED_BY_MEMBER_ID in const.py - only ever set by
-    # ws_create_own_task, never by the card's admin task-creation form.
+    # See CONF_TASK_CREATED_BY_MEMBER_ID in const.py. v0.47: ws_create_own_task
+    # no longer accepts new creations at all (children can no longer create
+    # their own tasks) - this field is kept only so households upgrading
+    # from an older version keep their already-existing self-created tasks
+    # tagged correctly (now visible to, and manageable by, parents/admins).
     vol.Optional(CONF_TASK_CREATED_BY_MEMBER_ID): str,
     # v0.32: what this task should do while the household-wide Urlaubsmodus
     # switch is on - "show" (default, behaves normally) or "pause" (skipped
@@ -1436,49 +1439,32 @@ def async_setup_websocket_api(
     async def ws_create_own_task(
         hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
     ) -> None:
-        """Let a "child" member create a task assigned only to themselves.
+        """Disabled (v0.47): "child" members may no longer create their own tasks.
 
-        No admin permission required - instead the caller must resolve (via
-        their linked person entity) to a member with role "child". Points are
-        always forced to 0 and the rotation is forced to that single member,
-        so a child can never award themselves points or assign the task to
-        someone else.
+        Used to let a caller who resolved (via their linked person entity) to
+        a member with role "child" create a task assigned only to
+        themselves, with points/coin_value forced to 0 and the rotation
+        forced to that single member. The household asked for this to be
+        retired - a parent had no visibility into, or way to clean up, what
+        a child had created for themselves (see CONF_TASK_CREATED_BY_MEMBER_ID
+        below). The command stays registered (so an already-cached card gets
+        a clear, explained rejection instead of an "unknown command"
+        failure) but now always errors, regardless of the caller's role.
+
+        Tasks created before this change keep their created_by_member_id tag
+        and are otherwise unaffected: they are now visible to parents/admins
+        too (see the "isParentUser" branch of the creator-only filter in the
+        card's _renderTaskList) and can be edited/deleted by them like any
+        other task, via the normal family_tasks/task/update and
+        family_tasks/task/delete commands.
         """
-        member_id = _member_id_for_user(hass, members, connection.user)
-        role = members.data.get(member_id, {}).get("role") if member_id else None
-        if member_id is None or role != MEMBER_ROLE_CHILD:
-            connection.send_error(
-                msg["id"],
-                websocket_api.ERR_UNAUTHORIZED,
-                "Nur Familienmitglieder mit der Rolle 'Kind' können eigene "
-                "Aufgaben ohne Admin-Rechte anlegen.",
-            )
-            return
-
-        data = dict(msg)
-        data.pop("id")
-        data.pop("type")
-        requires_confirmation = data.pop(CONF_TASK_REQUIRES_CONFIRMATION, True)
-        data["points"] = 0
-        # v0.44: same reasoning as "points" above - a child creating their
-        # own task must not be able to award themselves coins either.
-        data["coin_value"] = 0
-        data["enabled"] = True
-        data["rotation"] = {"member_ids": [member_id], "strategy": ROTATION_STRATEGY_FIXED}
-        data[CONF_TASK_REQUIRES_CONFIRMATION] = requires_confirmation
-        # v0.22: tags the task with its creator so the card can hide it from
-        # everyone else - see CONF_TASK_CREATED_BY_MEMBER_ID in const.py.
-        data[CONF_TASK_CREATED_BY_MEMBER_ID] = member_id
-
-        try:
-            item = await tasks.async_create_item(data)
-            connection.send_result(msg["id"], item)
-        except vol.Invalid as err:
-            connection.send_error(
-                msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(data, err)
-            )
-        except ValueError as err:
-            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
+        connection.send_error(
+            msg["id"],
+            websocket_api.ERR_UNAUTHORIZED,
+            "Das eigenständige Anlegen von Aufgaben durch Kinder wurde "
+            "deaktiviert. Bitte ein Elternteil bitten, die Aufgabe "
+            "anzulegen.",
+        )
 
     websocket_api.async_register_command(
         hass, WS_API_TASK_CREATE_OWN, ws_create_own_task, CREATE_OWN_TASK_SCHEMA

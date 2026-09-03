@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.47.0] - 2026-09-03
+
+### Changed
+- **Eltern können von Kindern selbst angelegte Aufgaben jetzt sehen und löschen; Kinder können keine eigenen Aufgaben mehr anlegen**: das „+ Eigene Aufgabe hinzufügen"-Formular für Kind-Konten ist entfernt. `family_tasks/task/create_own` (`ws_create_own_task` in `storage.py`) bleibt registriert, lehnt aber jeden Aufruf ab, unabhängig von der Rolle des Aufrufers - so bekommt eine noch zwischengespeicherte alte Karte eine klare Fehlermeldung statt „unbekannter Befehl". Grund: eine solche Aufgabe (`created_by_member_id`) war zuvor ausschließlich für das anlegende Kind selbst sichtbar, nicht einmal für Eltern/Admins - die konnten sie also weder einsehen noch löschen. `_renderTaskList` (`family-tasks-card.js`) lässt eine derart markierte Aufgabe jetzt zusätzlich für Eltern/Admins durch; sie erscheint dort wie jede andere Aufgabe samt der bestehenden „Bearbeiten"/„Löschen"-Buttons. Bereits bestehende, von Kindern angelegte Aufgaben behalten ihre Markierung und ihre Daten unverändert - nur die Möglichkeit, neue davon anzulegen, entfällt.
+
 ## [0.46.0] - 2026-09-03
 
 ### Changed
