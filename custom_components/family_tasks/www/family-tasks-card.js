@@ -432,21 +432,41 @@
     "Samstag",
     "Sonntag",
   ];
+  // v0.42: five user-facing task states, front and center in how the card
+  // communicates what needs attention - "Inaktiv" (grau, deaktivierte
+  // Aufgaben), "Aktiv" (dunkelgrün, aktive Aufgaben ohne einen der drei
+  // folgenden Zustände), "Bald fällig" (grün), "Fällig" (gelb), "Überfällig"
+  // (rot). "inactive" is a card-only pseudo-status (see
+  // _taskDisplayStatus - a disabled task has no status sensor at all);
+  // every other key here is a real TASK_STATUS_* value from coordinator.py.
+  // "done"/"awaiting_confirmation" are lifecycle end-states outside that
+  // five-state model and keep their own previous colors/labels.
   const STATUS_LABELS = {
-    idle: "Wartet auf Sensor",
-    pending: "Offen",
+    inactive: "Inaktiv",
+    // v0.42: "idle" now doubles as the catch-all "Aktiv" state for any
+    // enabled task that isn't Bald fällig/Fällig/Überfällig right now -
+    // covers both an untriggered sensor task and a calendar-based task with
+    // nothing due this week yet, previously both mislabeled "Wartet auf
+    // Sensor" even for the latter.
+    idle: "Aktiv",
+    pending: "Fällig",
     // v0.40: TASK_STATUS_UPCOMING - this week's occurrence is already known
     // but not due yet (see _current_period_date in coordinator.py). Only a
     // generic fallback: _renderTaskRow always replaces this with the actual
     // weekday it becomes due, this text is only ever seen if due_at were
     // somehow missing.
-    upcoming: "Anstehend",
+    upcoming: "Bald fällig",
     overdue: "Überfällig",
     awaiting_confirmation: "Wartet auf Bestätigung",
     done: "Erledigt",
   };
   const STATUS_COLORS = {
-    idle: "var(--disabled-text-color, #9e9e9e)",
+    // Same grey "idle" used to use - now specifically "deactivated", not
+    // "waiting for something" (see "Aktiv" below for that).
+    inactive: "var(--disabled-text-color, #9e9e9e)",
+    // v0.42: a distinct dark green, different from both "Bald fällig"'s
+    // lighter green and "Erledigt"'s - so all three read apart at a glance.
+    idle: "#1b5e20",
     pending: "var(--warning-color, #ff9800)",
     // v0.40: a distinct green from "done"'s (--success-color) so the two
     // are never confused at a glance in the same list.
@@ -461,6 +481,8 @@
   // alle bereits vorhersehbaren Aufgaben der jeweils laufenden Woche
   // angezeigt werden" means it must survive hideNotDue same as a due one,
   // it just can't be completed until its own day (see disableComplete).
+  // v0.42: "inactive"/"idle" ("Inaktiv"/"Aktiv") are deliberately excluded,
+  // same as before - neither needs action right now.
   const DUE_STATUSES = ["pending", "upcoming", "overdue", "awaiting_confirmation"];
   const STRATEGY_LABELS = {
     round_robin: "Reihum",
@@ -673,6 +695,10 @@
       // v0.34: see the matching field on TASK_TRIGGER_STATE_SCHEMA/
       // TASK_TRIGGER_NUMERIC_STATE_SCHEMA in storage.py.
       auto_complete_on_normalize: false,
+      // v0.42: see the matching field on TASK_TRIGGER_NUMERIC_STATE_SCHEMA
+      // in storage.py. Empty = 0 = no buffer, same as before this field
+      // existed.
+      buffer_minutes: "",
     };
   }
 
@@ -823,6 +849,11 @@
             // v0.34: see the matching field on TASK_TRIGGER_STATE_SCHEMA/
             // TASK_TRIGGER_NUMERIC_STATE_SCHEMA in storage.py.
             auto_complete_on_normalize: t?.auto_complete_on_normalize ?? false,
+            // v0.42: "Sicherheitspuffer" - see TASK_TRIGGER_NUMERIC_STATE_SCHEMA
+            // in storage.py / the module docstring in trigger.py. Kept as a
+            // string here like every other plain-number field on this form
+            // (e.g. "points" above) - _saveTask below converts it.
+            buffer_minutes: t?.buffer_minutes ? String(t.buffer_minutes) : "",
           };
         })(),
       },
@@ -1309,6 +1340,24 @@
       );
     }
 
+    // v0.42: a disabled task (task.enabled === false) never gets a
+    // TaskStatusData entry from the coordinator at all (see
+    // FamilyTasksCoordinator._async_update_data's "enabled" check) - there
+    // is no status sensor to read a state from, so every other status
+    // lookup below used to silently fall back to "pending" ("Fällig"/
+    // gelb) for it, same as a brand-new, not-yet-refreshed task. That made
+    // a deactivated task indistinguishable from a due one. This is the
+    // single place that decides a task's *displayed* status, folding in
+    // that missing-entity case as its own pseudo-status ("inactive",
+    // "Inaktiv"/grau - see STATUS_LABELS/STATUS_COLORS) instead of
+    // guessing "pending" - every other place that used to read
+    // `this._statusStateForTask(id)?.state ?? "pending"` should go through
+    // this instead.
+    _taskDisplayStatus(id) {
+      if (this._tasks[id]?.enabled === false) return "inactive";
+      return this._statusStateForTask(id)?.state ?? "pending";
+    }
+
     _memberName(memberId) {
       return this._members[memberId]?.name ?? "–";
     }
@@ -1641,6 +1690,10 @@
           recurrence.trigger = { kind: "numeric_state", entity_id: t.entity_id.trim() };
           // Single-direction crossing, not a range: exactly one of above/below.
           recurrence.trigger[t.direction === "below" ? "below" : "above"] = value;
+          // v0.42: "Sicherheitspuffer" - numeric_state only, see
+          // TASK_TRIGGER_NUMERIC_STATE_SCHEMA in storage.py. Empty/0 = no
+          // buffer.
+          recurrence.trigger.buffer_minutes = Math.max(0, Math.floor(Number(t.buffer_minutes) || 0));
         }
         // v0.34: see TASK_TRIGGER_STATE_SCHEMA/TASK_TRIGGER_NUMERIC_STATE_SCHEMA
         // in storage.py - applies to both trigger kinds above.
@@ -2550,7 +2603,7 @@
       // _render(). Ordering doesn't matter here since both filters only
       // ever remove ids, never add them back.
       if (this._hideCompleted) {
-        ids = ids.filter((id) => (this._statusStateForTask(id)?.state ?? "pending") !== "done");
+        ids = ids.filter((id) => this._taskDisplayStatus(id) !== "done");
       }
       const filterMemberId = this._effectiveTaskMemberFilterId();
       if (filterMemberId !== null) {
@@ -2577,7 +2630,7 @@
       // filtered id set hideNotDue itself would have used, without
       // duplicating the member-filter logic for both branches.
       if (this._hideNotDue) {
-        ids = ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"));
+        ids = ids.filter((id) => DUE_STATUSES.includes(this._taskDisplayStatus(id)));
       }
       if (!ids.length) {
         return `<p class="muted">${totalCount ? "Keine fälligen Aufgaben." : "Noch keine Aufgaben angelegt."}</p>`;
@@ -2602,7 +2655,7 @@
       // actually need attention - "Aufgaben sollen in chronologischer
       // Reihenfolge nach ihrer Fälligkeit dargestellt werden."
       const dueIds = this._sortByDueAt(
-        ids.filter((id) => DUE_STATUSES.includes(this._statusStateForTask(id)?.state ?? "pending"))
+        ids.filter((id) => DUE_STATUSES.includes(this._taskDisplayStatus(id)))
       );
       const notDueIds = ids.filter((id) => !dueIds.includes(id));
       const dueList = dueIds.length
@@ -2684,8 +2737,15 @@
       {
           const task = this._tasks[id];
           const statusState = this._statusStateForTask(id);
-          const status = statusState?.state ?? "pending";
-          const assignedIds = statusState?.attributes?.assigned_member_ids ?? [];
+          const status = this._taskDisplayStatus(id);
+          // v0.42: a disabled task (status "inactive") has no status sensor
+          // at all - assignedIds falls back to the raw stored assignment
+          // (rotation.member_ids) instead of a nonexistent sensor attribute,
+          // so "Inaktiv" still shows who it *would* be assigned to instead
+          // of "–".
+          const assignedIds =
+            statusState?.attributes?.assigned_member_ids ??
+            (status === "inactive" ? task.rotation?.member_ids ?? [] : []);
           // v0.40: TASK_STATUS_UPCOMING's badge shows the actual weekday
           // this occurrence becomes due (due_at, same attribute the
           // deadline/claim labels below already read) instead of a generic
@@ -2717,7 +2777,24 @@
           // read-only row, and "Bestätigen"/"Ablehnen" mean confirm/reject.
           const isConfirmation = !!task.confirms;
           const batteryEntities = statusState?.attributes?.battery_entities ?? [];
-          const subtasks = statusState?.attributes?.subtasks ?? [];
+          // v0.42: the sensor only ever carries a "subtasks" attribute for
+          // an occurrence that actually has a period_key (see
+          // subtasks_status in coordinator.py) - every "nothing to show
+          // right now" case (an untriggered sensor/confirmation task, a
+          // weekly task with nothing due this week, and now a deactivated
+          // task, which has no status sensor at all) leaves it empty, even
+          // though the task itself has a checklist configured. That used to
+          // make a checklist's items - and the "x/y erledigt" detail line -
+          // silently disappear whenever the task wasn't currently due,
+          // despite `isChecklist` above (read from the raw task, not the
+          // sensor) correctly staying true. Falls back to the task's own
+          // stored subtasks (nothing can be checked off yet without an open
+          // occurrence, so every item shows unchecked) instead of an empty
+          // list.
+          const sensorSubtasks = statusState?.attributes?.subtasks ?? [];
+          const subtasks = sensorSubtasks.length
+            ? sensorSubtasks
+            : (task.subtasks ?? []).map((s) => ({ ...s, checked: false }));
           const assigneeLabel = assignedIds.length
             ? assignedIds.map((mid) => esc(this._memberName(mid))).join(", ")
             : "–";
@@ -2788,6 +2865,7 @@
           const resolved =
             status === "done" ||
             status === "idle" ||
+            status === "inactive" ||
             status === "awaiting_confirmation" ||
             status === "upcoming";
           // v0.22: the plain "Überspringen" button (skip to the next
@@ -2946,8 +3024,10 @@
     // card entirely - see the fix note at that filter.
     _isPoolTaskOpen(id) {
       if (this._isClaimedPoolTask(id)) return false;
-      const status = this._statusStateForTask(id)?.state ?? "pending";
-      if (status === "done") return false;
+      const status = this._taskDisplayStatus(id);
+      // v0.42: a deactivated pool task has nothing to claim either - same
+      // as "done", just for a different reason.
+      if (status === "done" || status === "inactive") return false;
       // v0.36: a sensor-triggered ("trigger" recurrence) pool task has
       // nothing to claim/act on until its bound sensor actually opens an
       // occurrence (status "idle" - no open_occurrence yet, see
@@ -3890,6 +3970,10 @@
               </label>
               <label>Schwellenwert<input type="number" step="any" data-field="recurrence.trigger.value" value="${esc(t.value)}"></label>
             </div>
+            <label>Sicherheitspuffer (Minuten, optional)
+              <input type="number" min="0" step="1" placeholder="0" data-field="recurrence.trigger.buffer_minutes" value="${esc(t.buffer_minutes)}">
+            </label>
+            <p class="muted">Die Aufgabe wird erst erstellt, wenn der Sensorwert ununterbrochen so lange über/unter dem Schwellenwert bleibt – schützt vor schwankenden Werten (z. B. Bodenfeuchtesensoren). Leer/0 = sofort bei Grenzwertüberschreitung, wie bisher.</p>
           `}
           <p class="muted">Die Aufgabe wird fällig, sobald der Sensor die Bedingung erfüllt – statt nach einem festen Zeitplan.</p>
           <label class="inline"><input type="checkbox" data-field="recurrence.trigger.auto_complete_on_normalize" ${t.auto_complete_on_normalize ? "checked" : ""}> Automatisch erledigen, sobald sich der Sensor wieder normalisiert</label>

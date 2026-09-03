@@ -150,6 +150,20 @@ TASK_TRIGGER_NUMERIC_STATE_SCHEMA = vol.All(
             vol.Optional("above"): vol.Coerce(float),
             vol.Optional("below"): vol.Coerce(float),
             vol.Optional("auto_complete_on_normalize", default=False): bool,
+            # v0.42: "Sicherheitspuffer" - a numeric sensor (e.g. Bodenfeuchte)
+            # can wobble right around its threshold, opening and immediately
+            # re-closing an occurrence over and over. 0 (default) keeps the
+            # pre-v0.42 behavior - fire the instant the value first crosses
+            # the threshold. A value > 0 instead requires the value to stay
+            # continuously on the "matching" side of the threshold for that
+            # many minutes before the occurrence actually opens - see
+            # TaskTriggerListener in trigger.py, which owns the debounce
+            # timer this only configures. Not offered for a "state" trigger
+            # (TASK_TRIGGER_STATE_SCHEMA above) - a discrete state either
+            # matches or doesn't, with much less of a "wobble" concern.
+            vol.Optional("buffer_minutes", default=0): vol.All(
+                int, vol.Range(min=0, max=1440)
+            ),
         }
     ),
     _require_single_threshold,
