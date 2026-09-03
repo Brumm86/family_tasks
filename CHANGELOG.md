@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.43.0] - 2026-09-03
+
+### Fixed
+- **Mehrfach-Wochentage-Aufgabe zeigte "Überfällig" für einen verpassten früheren Wochentag statt für den aktuellen**: der v0.42-Fix ließ eine "Wöchentlich"-Aufgabe mit mehr als einem konfigurierten Wochentag (z. B. "jeden Montag und Donnerstag") an einem nicht erledigten früheren Wochentag derselben Woche "hängen" - nur ein tatsächliches Erledigen ließ sie zum nächsten konfigurierten Wochentag weiterrücken, ein einfach verstrichener (verpasster, nie erledigter) Termin dagegen nicht. Dadurch blieb die Aufgabe für den Rest der Woche auf dem alten, längst überfälligen Termin stehen, obwohl ein späterer, eigener Termin in derselben Woche noch gar nicht fällig oder überfällig war - z. B. eine erst am Dienstag angelegte Montag+Donnerstag-Aufgabe (Montag also ohnehin nie fällig gewesen), die am Donnerstag um 09:00 Uhr sofort als "Überfällig" erschien, obwohl ihr eigener Donnerstag-Termin (fällig 08:00, überfällig erst ab 22:00 Uhr) zu diesem Zeitpunkt noch gar nicht überfällig war. `_current_period_date` (`coordinator.py`) durchsucht die bereits vergangenen passenden Wochentage der laufenden Woche jetzt absteigend statt aufsteigend und liefert den jüngsten davon zurück (statt des frühesten noch nicht erledigten), solange dieser nicht bereits erledigt ist - eine Aufgabe richtet sich damit immer nach ihrem nächstgelegenen Fälligkeitstermin statt einem liegengebliebenen älteren, verpassten. Der eigentliche v0.42-Anwendungsfall (ein erledigter früherer Wochentag lässt die Aufgabe zum nächsten innerhalb derselben Woche vorrücken) bleibt unverändert erhalten. Eine Aufgabe mit nur einem konfigurierten Wochentag verhält sich unverändert.
+
 ## [0.42.0] - 2026-09-03
 
 ### Fixed

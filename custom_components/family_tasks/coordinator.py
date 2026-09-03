@@ -452,24 +452,27 @@ def _current_period_date(
         weekdays = recurrence.get("weekdays") or [0]
         week_start = today - timedelta(days=today.weekday())
 
-        # v0.42: a task with *more than one* configured weekday (e.g. "jeden
-        # Montag und Freitag") used to always resolve to the single most
-        # recent past-or-today match (see the old comment this replaces) -
-        # every *other* configured weekday within the same week was silently
-        # invisible: never due, never overdue, never "Bald fällig", and
-        # completing the most-recent match didn't advance to the next one
-        # either, since the backward search doesn't consult the completion
-        # log at all and just keeps returning the same date all week. A
-        # fixed weekly task with e.g. Monday+Friday configured would freeze
-        # on Monday's occurrence and never surface Friday's at all that
-        # week. Fixed by walking every past-or-today match in *ascending*
-        # order and returning the earliest one that is *not yet completed*
-        # instead of unconditionally the latest one - once Monday's
-        # occurrence is done, this naturally "advances" to Friday within the
-        # very same week (surfaced as TASK_STATUS_UPCOMING until Friday
-        # itself, exactly like a single-weekday task). A task with only one
-        # configured weekday behaves exactly as before, since there's only
-        # ever at most one past-or-today candidate to consider.
+        # v0.42 walked every past-or-today match in *ascending* order and
+        # returned the earliest one that wasn't yet completed, so that a
+        # fixed weekly task with e.g. Monday+Friday configured would
+        # "advance" from a done Monday to Friday within the same week
+        # instead of freezing on Monday all week (see the CHANGELOG). But
+        # that meant a *missed* (not completed) earlier weekday stayed "the"
+        # current period for the rest of the week too - only completing it
+        # advanced past it, so a task due Monday+Thursday whose Monday
+        # occurrence was never done kept reporting Monday (and, once
+        # Monday's own overdue_time had passed, "überfällig") straight
+        # through Thursday, even though Thursday - today, its own distinct,
+        # not-yet-due-let-alone-overdue occurrence - is what should actually
+        # determine the task's state by then. v0.43: walk the same matches
+        # in *descending* order instead and return the most recent one
+        # (today's own match, if today itself matches) unless *that one* is
+        # already completed, in which case fall through to the forward
+        # search below exactly as before - so the task's state always comes
+        # from its nearest due date, never a stale uncompleted one from
+        # earlier in the same week. A task with only one configured weekday
+        # behaves exactly as before either way, since there's only ever at
+        # most one past-or-today candidate to consider.
         passed_candidates: list[date] = []
         for offset in range(today.weekday() + 1):
             candidate = week_start + timedelta(days=offset)
@@ -477,17 +480,18 @@ def _current_period_date(
                 created_at is None or candidate >= created_at
             ):
                 passed_candidates.append(candidate)
-        for candidate in passed_candidates:
-            if is_completed is None or not is_completed(candidate):
-                return candidate
+        if passed_candidates:
+            most_recent_candidate = passed_candidates[-1]
+            if is_completed is None or not is_completed(most_recent_candidate):
+                return most_recent_candidate
 
-        # Nothing this week is still open (every past-or-today match is
-        # already completed, or none has happened yet, or every match so far
-        # predates created_at) - look forward to the earliest still-upcoming
-        # matching weekday, but only through the *end of this same week*.
-        # Beyond that there is nothing "already foreseeable" about it yet -
-        # it simply isn't shown at all until the week it falls in actually
-        # starts.
+        # Nothing this week is still open (the most recent past-or-today
+        # match is already completed, or none has happened yet, or every
+        # match so far predates created_at) - look forward to the earliest
+        # still-upcoming matching weekday, but only through the *end of
+        # this same week*. Beyond that there is nothing "already
+        # foreseeable" about it yet - it simply isn't shown at all until
+        # the week it falls in actually starts.
         for offset in range(today.weekday() + 1, 7):
             candidate = week_start + timedelta(days=offset)
             if candidate.weekday() in weekdays and (
