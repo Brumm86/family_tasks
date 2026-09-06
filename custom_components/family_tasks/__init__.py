@@ -431,6 +431,29 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     load correctly" symptom: it isn't a load failure so much as some devices
     silently running stale, incompatible JS. Bumping the query string on every
     release forces a fresh fetch instead.
+
+    v0.48: add_extra_js_url only ever registered the module URL (es5=False,
+    the default). Home Assistant's own frontend feature-detects the running
+    browser once at load time (window.latestJS) and only dynamically
+    import()s registered module URLs when that check passes; on a browser it
+    classifies as *not* "latest" it instead loads only the URLs separately
+    registered with es5=True (as a plain, non-module <script src="...">, see
+    home-assistant/frontend's index.html.template / its `_ls()` loader), and
+    never even attempts the module URL at all - no request, no console
+    error, nothing. Since this card's JS was only ever registered as a
+    module URL, such a browser silently never received it: Lovelace then
+    correctly reports "custom element doesn't exist" for
+    "family-tasks-card", deterministically, on every single load, immune to
+    a reload or to clearing the app's cache - unlike the caching problem
+    described above, the browser never even tries to fetch the file here.
+    Observed on two different Samsung phones' Home Assistant Companion App
+    WebView, never on iPhone/Safari (long since "latestJS" by that check).
+    The card file itself has no `import`/`export` statement - it never
+    needed ES-module semantics to begin with - so the exact same cache-
+    busted URL is now also registered under the es5 list: browsers HA
+    considers modern keep using the dynamic-import path exactly as before,
+    and any older/unrecognized browser now gets the identical file via the
+    plain-script fallback instead of nothing at all.
     """
     if hass.data.get(f"{DOMAIN}_frontend_registered"):
         return
@@ -443,7 +466,12 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     await hass.http.async_register_static_paths(
         [StaticPathConfig(CARD_URL_PATH, str(www_dir / CARD_FILENAME), cache_headers=False)]
     )
-    add_extra_js_url(hass, f"{CARD_URL_PATH}?{cache_buster}")
+    card_url = f"{CARD_URL_PATH}?{cache_buster}"
+    add_extra_js_url(hass, card_url)
+    # v0.48: see the docstring above - without this second call, a browser
+    # HA's frontend doesn't classify as "latestJS" would never even attempt
+    # to load the card at all, regardless of caching.
+    add_extra_js_url(hass, card_url, es5=True)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
