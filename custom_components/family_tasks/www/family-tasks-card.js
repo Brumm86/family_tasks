@@ -610,6 +610,16 @@
     return `${esc(n)} ${n === 1 ? "Münze" : "Münzen"}`;
   }
 
+  // v0.49: kleines Info-Symbol mit nativem title-Tooltip für eine optionale
+  // Aufgaben-/Favoriten-Notiz (CONF_TASK_NOTE in const.py) - so bleibt die
+  // Zeile selbst schlank, statt die Notiz immer vollständig einzublenden.
+  // Gibt "" zurück, wenn keine Notiz gesetzt ist, sodass Aufrufer sie einfach
+  // an ihre Zeile anhängen können, ohne selbst prüfen zu müssen.
+  function noteInfoIcon(note) {
+    if (!note) return "";
+    return `<span class="note-info" title="${esc(note)}" role="img" aria-label="Notiz: ${esc(note)}"><ha-icon icon="mdi:information-outline"></ha-icon></span>`;
+  }
+
   // Kleiner "· +30 Min. Bildschirmzeit"-Zusatz, gemeinsam genutzt vom
   // Belohnungs-Katalog und dem Einlöse-Verlauf - undefined/null/"" bedeuten
   // alle "nicht gesetzt".
@@ -741,6 +751,9 @@
       // deliberately sets one.
       coin_value: 0,
       icon: "",
+      // v0.49: see CONF_TASK_NOTE in const.py - optional free-text
+      // instructions/context, shown via a small info icon instead of inline.
+      note: "",
       enabled: true,
       due_time: "",
       // v0.31: paired with the "Fällig um" <ha-time-input>'s hour/minute
@@ -833,6 +846,8 @@
       points: task.points ?? 0,
       coin_value: task.coin_value ?? 0,
       icon: task.icon ?? "",
+      // v0.49: see the matching comment in emptyTaskForm above.
+      note: task.note ?? "",
       enabled: task.enabled !== false,
       due_time: task.due_time ?? "",
       // v0.31: see the matching comment in emptyTaskForm above. Starts empty
@@ -954,6 +969,9 @@
       // v0.44: see the matching comment in emptyTaskForm above.
       coin_value: 0,
       icon: "",
+      // v0.49: see the matching comment in emptyTaskForm above - carried
+      // onto every task created from this favorite.
+      note: "",
       member_ids: [],
       kind: "standard",
       subtasks: [],
@@ -966,6 +984,7 @@
       points: favorite?.points ?? 0,
       coin_value: favorite?.coin_value ?? 0,
       icon: favorite?.icon ?? "",
+      note: favorite?.note ?? "",
       member_ids: [...(favorite?.member_ids ?? [])],
       // v0.39: see the matching comment in taskToForm above.
       kind: favorite?.kind === "checklist" ? "standard" : favorite?.kind ?? "standard",
@@ -1049,6 +1068,12 @@
       // Belohnung (v0.24), z. B. das gewünschte Mittagessen - siehe
       // _selectReward/_confirmRedeem.
       this._pendingRedeemNote = "";
+      // v0.49: "Punkteshop" - ob die "Münzen in Punkte umtauschen"-Zeile
+      // gerade aufgeklappt ist, und wie viele Münzen der aktuelle Nutzer
+      // eingetragen hat - gleiches Muster wie _pendingRedeemId/
+      // _pendingInvestCoins oberhalb.
+      this._convertCoinsOpen = false;
+      this._pendingConvertCoins = 1;
       // Ob bereits erledigte Einlösungen in "Bisherige Einlösungen"
       // ausgeblendet sind - siehe setConfig für die Default-an/persistierte
       // First-Run-Regel, gleiches Muster wie die übrigen Karten-Toggles.
@@ -1064,6 +1089,17 @@
       // as the other *FormOpen dialog flags: it always starts closed on
       // load, same as _taskFormOpen/_memberFormOpen/etc.
       this._favoritesDialogOpen = false;
+      // v0.49: das Kind-Pendant zu _favoritesDialogOpen oberhalb - eigener
+      // Dialog statt Wiederverwendung, da Kinder auf einen komplett anderen,
+      // nicht-admin-gated Lesezugriff gehen (family_tasks/favorite/
+      // list_claimable statt der admin-only Storage-Collection-Subscription,
+      // siehe _openChildFavoritesDialog) und keine der Verwaltungs-Aktionen
+      // (Bearbeiten/Löschen/"für alle" instanziieren) sehen. Lädt bei jedem
+      // Öffnen frisch (kein Live-Abo), gleiches Muster wie
+      // _memberCompletions/_memberCompletionsLoading.
+      this._childFavoritesDialogOpen = false;
+      this._childFavorites = [];
+      this._childFavoritesLoading = false;
       // Wochenfortschritt/Belohnungen: independently collapsible. Anders als
       // beim v0.21-"Bestenliste"-Umschalter, den dieser Fortschrittsbalken
       // ersetzt (siehe _renderProgressSection), ist das Ausblenden hier
@@ -1516,6 +1552,18 @@
       };
     }
 
+    // v0.49: "Punkteshop" - household-wide coins->points conversion rate
+    // (CONF_COIN_TO_POINTS_RATE in const.py), same "rides along on every
+    // member's points sensor" pattern as _milestoneBonus/_streakBonus above.
+    // 0 means the feature is off.
+    _coinToPointsRate() {
+      if (!this._hass) return 0;
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      return Number(sensor?.attributes?.coin_to_points_rate ?? 0);
+    }
+
     // v0.36: household-wide "Streak-Bonus" coin amounts, one per fixed tier
     // - same "rides along on every member's points sensor" pattern as
     // _milestoneBonus above. Replaces the pre-v0.36 single
@@ -1794,6 +1842,13 @@
         vacation_behavior: form.vacation_paused ? "pause" : "show",
       };
       if (form.icon) payload.icon = form.icon.trim();
+      // v0.49: see CONF_TASK_NOTE in const.py. Editing can explicitly clear
+      // a previously set note by sending null (create simply omits it).
+      if (this._editingTaskId) {
+        payload.note = form.note.trim() || null;
+      } else if (form.note.trim()) {
+        payload.note = form.note.trim();
+      }
       if (form.due_time) payload.due_time = form.due_time;
       // v0.39: "Überfällig ab" - see emptyTaskForm's overdue_time comment.
       // Left unset (rather than forcing a value) when the admin doesn't set
@@ -2087,6 +2142,31 @@
       this._render();
     }
 
+    // v0.49: "Punkteshop" - Self-Service-Umtausch eigener Münzen in Punkte,
+    // gleiches Muster wie _selectReward/_cancelRedeem/_confirmRedeem oberhalb
+    // (aufklappbare Bestätigungszeile statt sofortiger Aktion). Das Backend
+    // (ws_convert_coins_to_points in storage.py) prüft Teilnahme/Guthaben/
+    // Kurs unabhängig noch einmal nach - der clientseitige "disabled"-Zustand
+    // hier sorgt nur dafür, dass es gar nicht erst angeboten wird.
+    _toggleConvertCoins() {
+      this._convertCoinsOpen = !this._convertCoinsOpen;
+      if (this._convertCoinsOpen) this._pendingConvertCoins = 1;
+      this._render();
+    }
+
+    _cancelConvertCoins() {
+      this._convertCoinsOpen = false;
+      this._render();
+    }
+
+    async _confirmConvertCoins() {
+      const coins = Math.max(1, Number(this._pendingConvertCoins) || 1);
+      await this._callWS({ type: "family_tasks/coin/convert_to_points", coins });
+      this._convertCoinsOpen = false;
+      this._pendingConvertCoins = 1;
+      this._render();
+    }
+
     async _fulfillRedemption(redemptionId) {
       await this._callWS({
         type: "family_tasks/reward_redemption/update",
@@ -2187,6 +2267,12 @@
         subtasks: f.subtasks.map((s) => ({ id: s.id, name: s.name.trim() })).filter((s) => s.name),
       };
       if (f.icon) payload.icon = f.icon.trim();
+      // v0.49: see the matching comment in _saveTask above.
+      if (this._editingFavoriteId) {
+        payload.note = f.note.trim() || null;
+      } else if (f.note.trim()) {
+        payload.note = f.note.trim();
+      }
       if (this._editingFavoriteId) {
         await this._callWS({
           type: "family_tasks/favorite/update",
@@ -2211,6 +2297,47 @@
     // dabei unverändert und lässt sich beliebig oft erneut anklicken.
     async _instantiateFavorite(favoriteId) {
       await this._callWS({ type: "family_tasks/favorite/instantiate", favorite_id: favoriteId });
+      // v0.49: the Favoriten-Fenster soll sich nach der Auswahl schließen,
+      // statt offen stehen zu bleiben - siehe auch _claimFavorite unten
+      // (Kinder-Variante), die aus demselben Grund ihren eigenen Dialog
+      // schließt.
+      this._closeFavoritesDialog();
+    }
+
+    // v0.49: Kind-Pendant zu _openFavoritesDialog/_instantiateFavorite oben -
+    // lädt den Katalog jeweils frisch über den nicht-admin-gated
+    // family_tasks/favorite/list_claimable-Befehl (kein Live-Abo, gleiches
+    // Muster wie _openMemberCompletions).
+    async _openChildFavoritesDialog() {
+      this._childFavoritesDialogOpen = true;
+      this._childFavorites = [];
+      this._childFavoritesLoading = true;
+      this._render();
+      try {
+        const result = await this._callWS({ type: "family_tasks/favorite/list_claimable" });
+        this._childFavorites = result?.favorites ?? [];
+      } catch (err) {
+        // _callWS already alerted the user - just leave the list empty.
+      } finally {
+        this._childFavoritesLoading = false;
+        this._render();
+      }
+    }
+
+    _closeChildFavoritesDialog() {
+      this._childFavoritesDialogOpen = false;
+      this._render();
+    }
+
+    // Erstellt sofort eine neue Aufgabe aus dem Favorit-Template, zugewiesen
+    // an das aktuelle Kind, und meldet sie im selben Zug als erledigt - siehe
+    // family_tasks/favorite/claim (ws_claim_favorite in storage.py), das den
+    // normalen Eltern-Bestätigungs-Flow auslöst, genau wie beim Erledigen
+    // einer regulären zugewiesenen Aufgabe. Schließt danach den Dialog,
+    // gleiches Verhalten wie _instantiateFavorite oben.
+    async _claimFavorite(favoriteId) {
+      await this._callWS({ type: "family_tasks/favorite/claim", favorite_id: favoriteId });
+      this._closeChildFavoritesDialog();
     }
 
     // --- rendering -------------------------------------------------------
@@ -2272,7 +2399,7 @@
           <div>
             ${isAdmin ? `<button class="add" data-action="new-task">+ Aufgabe hinzufügen</button>` : ""}
           </div>
-          <div>${this._renderFavoritesLauncher(canManageFavorites)}</div>
+          <div>${this._renderFavoritesLauncher(canManageFavorites)}${this._renderChildFavoritesLauncher(isChildUser)}</div>
         </div>
       `;
 
@@ -2345,6 +2472,14 @@
               <button type="button" class="link" data-action="close-favorites">Schließen</button>
             </div>
             ${this._renderFavoritesSection(canManageFavorites)}
+          </dialog>` : ""}
+          ${this._childFavoritesDialogOpen ? `
+          <dialog class="dialog" data-dialog="child-favorites">
+            <div class="section-header">
+              <h3>Favoriten</h3>
+              <button type="button" class="link" data-action="close-child-favorites">Schließen</button>
+            </div>
+            ${this._renderChildFavoritesSection()}
           </dialog>` : ""}
           ${this._memberCompletionsDialogOpen ? `
           <dialog class="dialog" data-dialog="member-completions">
@@ -2580,6 +2715,7 @@
         ["reward", () => this._rewardFormOpen, () => this._closeRewardForm()],
         ["favorite", () => this._favoriteFormOpen, () => this._closeFavoriteForm()],
         ["favorites-list", () => this._favoritesDialogOpen, () => this._closeFavoritesDialog()],
+        ["child-favorites", () => this._childFavoritesDialogOpen, () => this._closeChildFavoritesDialog()],
         ["member-completions", () => this._memberCompletionsDialogOpen, () => this._closeMemberCompletions()],
         ["screen-time-info", () => this._screenTimeInfoDialogOpen, () => this._closeScreenTimeInfo()],
       ];
@@ -3071,7 +3207,7 @@
                 <div class="row-main">
                   <span class="badge" style="background:${color}">${esc(label)}</span>
                   ${isMandatory ? `<span class="badge" style="background:var(--error-color, #db4437)">Pflicht</span>` : ""}
-                  <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}</span>
+                  <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}${noteInfoIcon(task.note)}</span>
                   <span class="muted">${detail}${claimSuffix}</span>
                 </div>
                 <div class="row-actions">
@@ -3245,7 +3381,7 @@
               return `
                 <div class="row">
                   <div class="row-main">
-                    <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}</span>
+                    <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.note)}</span>
                     <span class="muted">${esc(detailParts.join(" · "))}</span>
                   </div>
                   <div class="row-actions">
@@ -3273,6 +3409,45 @@
       if (!canManageFavorites) return "";
       const count = Object.keys(this._favorites).length;
       return `<button class="add" data-action="open-favorites">${count ? `Favoriten (${count})` : "Favoriten"}</button>`;
+    }
+
+    // v0.49: Kind-Pendant zu _renderFavoritesLauncher oberhalb - eigener,
+    // eigenständig gerenderter Button statt Wiederverwendung, da ein Kind nie
+    // canManageFavorites hat (siehe die Favoriten-Notiz im Datei-Header) und
+    // den Katalog nur zum Auswählen, nie zum Verwalten sieht. Zeigt bewusst
+    // keine Anzahl (die lädt erst beim Öffnen, siehe
+    // _openChildFavoritesDialog, anders als die schon lokal vorliegende
+    // Favoriten-Collection beim Eltern-Pendant).
+    _renderChildFavoritesLauncher(isChildUser) {
+      if (!isChildUser) return "";
+      return `<button class="add" data-action="open-child-favorites">Favoriten</button>`;
+    }
+
+    // Inhalt des Kind-Favoriten-Dialogs (_childFavoritesDialogOpen) - jede
+    // Zeile hat nur eine einzige Aktion ("Fertig gemeldet"), keine
+    // Bearbeiten-/Löschen-Buttons wie im Eltern-Pendant
+    // (_renderFavoritesSection).
+    _renderChildFavoritesSection() {
+      if (this._childFavoritesLoading) return `<p class="muted">Lädt…</p>`;
+      if (!this._childFavorites.length) {
+        return `<p class="muted">Noch keine Favoriten von den Eltern angelegt.</p>`;
+      }
+      return `<div class="list">${this._childFavorites
+        .map((f) => {
+          const detailParts = [pointsLabel(f.points ?? 0)];
+          if (f.coin_value) detailParts.push(coinsLabel(f.coin_value));
+          return `
+            <div class="row">
+              <div class="row-main">
+                <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.note)}</span>
+                <span class="muted">${esc(detailParts.join(" · "))}</span>
+              </div>
+              <div class="row-actions">
+                ${iconActionButton("claim-favorite", "mdi:check-bold", "Fertig gemeldet", { dataset: `data-favorite-id="${f.id}"`, extraClass: "success" })}
+              </div>
+            </div>`;
+        })
+        .join("")}</div>`;
     }
 
     _renderMemberList(canManageMembers) {
@@ -3457,6 +3632,31 @@
               const milestoneMarkersHtml = milestoneMarkers
                 .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels)${m.bonus > 0 ? ` · +${coinsLabel(m.bonus)}` : ""}`)}"></div>`)
                 .join("");
+              // v0.49: die Münzenbelohnung selbst ("+X Münzen") wird jetzt
+              // ausschließlich grafisch direkt am Balken dargestellt - ein
+              // kleines Badge (Münzsymbol + Bonuszahl) oberhalb der
+              // bestehenden Marken-Linie, an derselben Prozent-Position wie
+              // ".bar-milestone" oben - statt (wie bis v0.48) in einer
+              // separaten Text-Legende unter dem gesamten Balkenblock (siehe
+              // milestoneLegend weiter unten, dafür jetzt entfernt). Nur für
+              // Schwellen mit tatsächlich konfiguriertem Bonus (> 0) - eine
+              // 0-Schwelle zeigt ohnehin keine ".bar-milestone"-Linie an
+              // (siehe milestoneMarkers oben), hier zusätzlich defensiv
+              // geprüft. Die 200%-Marke sitzt exakt am rechten Rand des
+              // Balkens (left:100%) - rechtsbündig statt zentriert, damit ihr
+              // Badge nicht zur Hälfte über den Kartenrand hinausragt; die
+              // 150%-Marke (75%) hat genug Abstand für eine zentrierte
+              // Positionierung.
+              const milestoneBadgesHtml = milestoneMarkers
+                .filter((m) => m.bonus > 0)
+                .map((m) => {
+                  const edgeAligned = m.percent === 200;
+                  const style = edgeAligned
+                    ? `right:0`
+                    : `left:${Math.min(100, m.left)}%;transform:translateX(-50%)`;
+                  return `<div class="bar-milestone-badge${m.reached ? " reached" : ""}" style="${style}" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels) → +${coinsLabel(m.bonus)}`)}"><span class="coin">🪙</span>${esc(m.bonus)}</div>`;
+                })
+                .join("");
               const barFillClass = milestone200Reached
                 ? " milestone-2-reached"
                 : milestone150Reached
@@ -3511,10 +3711,13 @@
                       <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}</span>
                       <span class="points">${pointsLine}</span>
                     </div>
-                    <div class="bar-track">
-                      <div class="bar-fill${barFillClass}" style="width:${pct}%"></div>
-                      ${bandMarkersHtml}
-                      ${milestoneMarkersHtml}
+                    <div class="bar-wrap">
+                      <div class="bar-track">
+                        <div class="bar-fill${barFillClass}" style="width:${pct}%"></div>
+                        ${bandMarkersHtml}
+                        ${milestoneMarkersHtml}
+                      </div>
+                      ${milestoneBadgesHtml}
                     </div>
                     ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
                     ${screenTimeBadge}
@@ -3525,26 +3728,12 @@
             .join("")}</div>`
         : `<p class="muted">${isChildUser ? "Kein verknüpftes Familienmitglied gefunden." : "Noch keine teilnehmenden Kinder."}</p>`;
 
-      // v0.30/v0.36: kurze Legende der beiden festen Meilenstein-Schwellen
-      // samt Münzen-Bonus oben im Abschnitt, sofern der Haushalt mindestens
-      // eine davon konfiguriert hat - reine Anzeige (auch für
-      // Screenreader/schmale Displays, wo die Balken-Marken selbst schlecht
-      // lesbar sind); die eigentliche Vergabe übernimmt
-      // FamilyTasksCoordinator._async_process_milestone_coin_bonus. v0.32:
-      // zeigt den absoluten Punktwert statt nur des Prozentsatzes - siehe
-      // die Marker-Berechnung oben für die Rundungs-Begründung.
-      const milestoneLegend = milestone
-        ? [
-            milestone.bonus150 > 0
-              ? `150%: ab ${pointsLabel(milestone.threshold150Points)} → +${coinsLabel(milestone.bonus150)}`
-              : null,
-            milestone.bonus200 > 0
-              ? `200%: ab ${pointsLabel(milestone.threshold200Points)} → +${coinsLabel(milestone.bonus200)}`
-              : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")
-        : "";
+      // v0.49: die frühere Text-Legende der beiden Meilenstein-Schwellen
+      // ("150%: ab X Pkt. → +Y Münzen") entfällt - die Münzenbelohnung wird
+      // jetzt ausschließlich grafisch direkt am Balken dargestellt, siehe
+      // milestoneBadgesHtml oben. Die Balken-Marke selbst (".bar-milestone")
+      // trägt weiterhin einen title-Tooltip mit demselben Text, für
+      // Screenreader/Hover.
 
       // v0.36: "Streak-Bonus" Legende - siehe _streakBonus/
       // CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in const.py.
@@ -3569,7 +3758,6 @@
           ${canToggle ? `<button class="link" data-action="toggle-hide-progress">Ausblenden</button>` : ""}
         </div>
         ${goal > 0 ? `<p class="muted">Wochenziel: ${pointsLabel(goal)}</p>` : ""}
-        ${milestoneLegend ? `<p class="muted">${esc(milestoneLegend)}</p>` : ""}
         ${streakLegend ? `<p class="muted">${esc(streakLegend)}</p>` : ""}
         ${progressList}
       `;
@@ -3656,6 +3844,29 @@
       const currentParticipates =
         !!currentMember && currentMember.participates_in_rewards !== false && currentMember.paused !== true;
       const availableCoins = currentMemberId ? this._coinsAvailableFor(currentMemberId) : 0;
+
+      // v0.49: "Punkteshop" - Self-Service-Umtausch eigener Münzen in
+      // Punkte, zum festen Kurs CONF_COIN_TO_POINTS_RATE (0 = Funktion aus,
+      // siehe _coinToPointsRate). Gleiche Teilnahmebedingung wie "Auswählen"
+      // bei einer Katalog-Belohnung (currentParticipates).
+      const coinToPointsRate = this._coinToPointsRate();
+      const convertCoins = Math.max(1, Number(this._pendingConvertCoins) || 1);
+      const convertValid =
+        coinToPointsRate > 0 && currentParticipates && convertCoins >= 1 && convertCoins <= availableCoins;
+      const convertWidget =
+        currentMemberId && currentParticipates && coinToPointsRate > 0
+          ? this._convertCoinsOpen
+            ? `
+                <div class="confirm-row">
+                  <label>Münzen umtauschen
+                    <input type="number" min="1" max="${availableCoins}" data-action="convert-coins-amount" value="${esc(this._pendingConvertCoins ?? 1)}">
+                  </label>
+                  <span class="muted">→ ${pointsLabel(convertCoins * coinToPointsRate)}</span>
+                  <button data-action="confirm-convert-coins" ${convertValid ? "" : "disabled"}>Umtauschen</button>
+                  <button type="button" class="link" data-action="cancel-convert-coins">Abbrechen</button>
+                </div>`
+            : `<button type="button" class="link" data-action="toggle-convert-coins" ${availableCoins < 1 ? "disabled" : ""}>Münzen in Punkte umtauschen (1 Münze = ${esc(coinToPointsRate)} Pkt.)</button>`
+          : "";
 
       const rewardIds = Object.keys(this._rewards).sort(
         (a, b) => (this._rewards[a].coin_cost ?? 0) - (this._rewards[b].coin_cost ?? 0)
@@ -3755,6 +3966,7 @@
           <button class="link" data-action="toggle-hide-rewards">Ausblenden</button>
         </div>
         ${currentMemberId ? `<p class="muted">Dein Guthaben: ${coinsLabel(availableCoins)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
+        ${convertWidget}
         ${catalogList}
         ${canManageRewards ? `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>` : ""}
         <div class="section-header">
@@ -3841,6 +4053,7 @@
               <option value="mandatory" ${f.kind === "mandatory" ? "selected" : ""}>Pflichtaufgabe</option>
             </select>
           </label>
+          <label>Notiz (optional)<textarea data-field="note" rows="2" placeholder="Zusätzliche Hinweise, z. B. wie die Aufgabe erledigt werden soll">${esc(f.note)}</textarea></label>
           ${this._renderSubtaskEditor(f.subtasks)}
           <p class="muted">Jede daraus erstellte Aufgabe ist immer einmalig (keine Wiederholung) und offen, nicht bereits erledigt.</p>
           <div class="form-actions">
@@ -3965,6 +4178,7 @@
             </select>
           </label>
           ${f.kind === "mandatory" ? `<p class="muted">Pflichtaufgaben werden dem Kind besonders gekennzeichnet. Wird eine Pflichtaufgabe überfällig, pausiert die tick-basierte Handyzeitgewährung (siehe Entity "Handyzeitgewährung aktiv") für genau die Nutzer, denen sie zugewiesen ist, bis sie erledigt ist.</p>` : ""}
+          <label>Notiz (optional)<textarea data-field="note" rows="2" placeholder="Zusätzliche Hinweise, z. B. wie die Aufgabe erledigt werden soll">${esc(f.note)}</textarea></label>
           ${this._renderSubtaskEditor(f.subtasks)}
 
           <label>Wiederholung
@@ -4295,6 +4509,12 @@
         .name { font-weight: 500; display: flex; align-items: center; gap: 4px; }
         .badge { display: inline-block; color: #fff; border-radius: 10px; padding: 1px 8px;
                  font-size: 0.75em; width: fit-content; }
+        /* v0.49: kleines Info-Symbol neben Aufgaben-/Favoriten-Namen, sichtbar
+           nur wenn eine Notiz gesetzt ist (siehe noteInfoIcon) - der native
+           title-Tooltip zeigt den Text, ohne die Zeile selbst zu überfrachten. */
+        .note-info { display: inline-flex; width: 15px; height: 15px; vertical-align: -2px;
+                     margin-left: 2px; color: var(--secondary-text-color); cursor: help; }
+        .note-info ha-icon { width: 15px; height: 15px; --mdc-icon-size: 15px; }
         button { border: none; border-radius: 6px; padding: 6px 10px; font-size: 0.85em;
                  background: var(--primary-color); color: var(--text-primary-color, #fff); cursor: pointer; }
         button:disabled { opacity: 0.5; cursor: default; }
@@ -4343,6 +4563,12 @@
                               text-decoration-style: dotted; text-underline-offset: 2px; }
         .screen-time-badge:hover { color: var(--primary-text-color); }
         .screen-time-badge:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+        /* v0.49: umschließt .bar-track zusätzlich zu den Meilenstein-Badges
+           (.bar-milestone-badge unten) - der Balken selbst (.bar-track)
+           bleibt unverändert 6px hoch und "overflow: hidden" (für die
+           abgerundete .bar-fill-Ecke), die Badges schweben stattdessen
+           oberhalb davon in diesem eigenen, nicht abgeschnittenen Wrapper. */
+        .bar-wrap { position: relative; padding-top: 15px; }
         .bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
         .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
         /* v0.29: Wochenziel erreicht (siehe _renderProgressSection,
@@ -4373,6 +4599,20 @@
            sondern nur informativ die Tick-Anpassungs-Grenzen zeigen. */
         .bar-band-marker { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px;
                             background: var(--card-background-color, #fff); opacity: 0.5; }
+        /* v0.49: Münzenbelohnungs-Badge an einer Meilenstein-Schwelle -
+           schwebt in .bar-wrap's reserviertem oberem Padding, direkt über der
+           bestehenden .bar-milestone-Linie an derselben Position (siehe
+           milestoneBadgesHtml in _renderProgressSection). "reached" hebt das
+           Badge farblich hervor, sobald die Schwelle diese Woche schon
+           erreicht wurde - dieselbe Bedeutung wie .bar-fill.milestone-*-
+           reached oben, nur auf das Badge selbst angewandt. */
+        .bar-milestone-badge { position: absolute; top: 0; display: inline-flex; align-items: center;
+                                gap: 1px; font-size: 0.65em; font-weight: 600; line-height: 1.4;
+                                color: var(--secondary-text-color); background: var(--card-background-color, #fff);
+                                border: 1px solid var(--divider-color, #e0e0e0); border-radius: 8px;
+                                padding: 0 4px; white-space: nowrap; cursor: default; }
+        .bar-milestone-badge .coin { font-size: 1.1em; }
+        .bar-milestone-badge.reached { color: var(--primary-text-color); border-color: #ff6f00; }
         .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
                        border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
         /* v0.36: aufklappbare Untergruppen für nicht fällige Aufgaben, nach
@@ -4537,6 +4777,12 @@
           this._cancelRedeem();
         } else if (action === "confirm-redeem") {
           this._confirmRedeem(el.dataset.rewardId)?.catch(() => {});
+        } else if (action === "toggle-convert-coins") {
+          this._toggleConvertCoins();
+        } else if (action === "cancel-convert-coins") {
+          this._cancelConvertCoins();
+        } else if (action === "confirm-convert-coins") {
+          this._confirmConvertCoins()?.catch(() => {});
         } else if (action === "new-reward") {
           // Defense-in-depth, same reasoning as the edit/delete gating above -
           // the backend enforces this too regardless (see
@@ -4586,6 +4832,12 @@
           if (this._isAdmin() && !this._isChildUser()) this._openFavoritesDialog();
         } else if (action === "close-favorites") {
           this._closeFavoritesDialog();
+        } else if (action === "open-child-favorites") {
+          this._openChildFavoritesDialog()?.catch(() => {});
+        } else if (action === "close-child-favorites") {
+          this._closeChildFavoritesDialog();
+        } else if (action === "claim-favorite") {
+          this._claimFavorite(el.dataset.favoriteId)?.catch(() => {});
         } else if (action === "open-member-completions") {
           this._openMemberCompletions(el.dataset.memberId)?.catch(() => {});
         } else if (action === "close-member-completions") {
@@ -4657,6 +4909,16 @@
         const investEl = ev.target.closest('[data-action="invest-points"]');
         if (investEl) {
           this._pendingInvestCoins = Math.max(1, Number(investEl.value) || 1);
+          this._render();
+          return;
+        }
+
+        // v0.49: "Münzen in Punkte umtauschen"-Bestätigungszeile im
+        // Belohnungen-Abschnitt (Punkteshop) - gleiches Muster wie
+        // invest-points direkt oberhalb.
+        const convertCoinsEl = ev.target.closest('[data-action="convert-coins-amount"]');
+        if (convertCoinsEl) {
+          this._pendingConvertCoins = Math.max(1, Number(convertCoinsEl.value) || 1);
           this._render();
           return;
         }

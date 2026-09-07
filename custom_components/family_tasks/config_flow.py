@@ -28,6 +28,7 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
+    CONF_COIN_TO_POINTS_RATE,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MILESTONE_150_BONUS_COINS,
     CONF_MILESTONE_200_BONUS_COINS,
@@ -43,6 +44,7 @@ from .const import (
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
+    DEFAULT_COIN_TO_POINTS_RATE,
     DEFAULT_MILESTONE_150_BONUS_COINS,
     DEFAULT_MILESTONE_200_BONUS_COINS,
     DEFAULT_OVERDUE_AFTER_MINUTES,
@@ -309,6 +311,18 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                # v0.49: "Punkteshop" - how many Punkte one Münze is worth
+                # when a member converts their own coins into points on
+                # demand (see WS_API_COIN_CONVERT/ws_convert_coins_to_points
+                # in storage.py). 0 (default) disables the whole feature.
+                vol.Optional(
+                    CONF_COIN_TO_POINTS_RATE,
+                    default=current.get(
+                        CONF_COIN_TO_POINTS_RATE, DEFAULT_COIN_TO_POINTS_RATE
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=100, mode=NumberSelectorMode.BOX)
                 ),
                 # v0.32: only seeds VacationModeStateStore's initial value the
                 # first time it loads with nothing on disk yet - the actual

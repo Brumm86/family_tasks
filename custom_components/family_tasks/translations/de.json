@@ -32,6 +32,7 @@
           "streak_bonus_required_weeks": "Erforderliche Wochen in Folge für einen Streak-Bonus",
           "streak_150_bonus_coins": "Streak-Bonus-Münzen je Woche mit gehaltener 150%-Marke",
           "streak_200_bonus_coins": "Streak-Bonus-Münzen je Woche mit gehaltener 200%-Marke",
+          "coin_to_points_rate": "Punkte je im Punkteshop umgetauschter Münze (0 deaktiviert den Umtausch)",
           "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
       }

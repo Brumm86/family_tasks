@@ -27,7 +27,10 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    COIN_CONVERSION_TASK_ID,
+    COIN_REASON_CONVERTED_TO_POINTS,
     COIN_REASON_REDEMPTION,
+    CONF_COIN_TO_POINTS_RATE,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_PAUSED,
@@ -39,8 +42,10 @@ from .const import (
     CONF_REWARD_SCREEN_TIME_MINUTES,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_TASK_CREATED_BY_MEMBER_ID,
+    CONF_TASK_NOTE,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
+    DEFAULT_COIN_TO_POINTS_RATE,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     EVENT_REWARD_REDEEMED,
@@ -85,7 +90,10 @@ from .const import (
     TASK_TRIGGER_STATE,
     VACATION_BEHAVIOR_SHOW,
     VACATION_BEHAVIORS,
+    WS_API_COIN_CONVERT,
+    WS_API_FAVORITE_CLAIM,
     WS_API_FAVORITE_INSTANTIATE,
+    WS_API_FAVORITE_LIST_CLAIMABLE,
     WS_API_MEMBER_WEEKLY_COMPLETIONS,
     WS_API_POINTS_AWARD,
     WS_API_PREFIX_BATTERY_OVERRIDES,
@@ -292,6 +300,9 @@ TASK_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional(CONF_TASK_VACATION_BEHAVIOR, default=VACATION_BEHAVIOR_SHOW): vol.In(
         VACATION_BEHAVIORS
     ),
+    # See CONF_TASK_NOTE in const.py - optional free-text instructions/
+    # context, shown behind a small info icon in the card rather than inline.
+    vol.Optional(CONF_TASK_NOTE): str,
 }
 
 TASK_UPDATE_SCHEMA: collection.VolDictType = {
@@ -326,6 +337,8 @@ TASK_UPDATE_SCHEMA: collection.VolDictType = {
     # CONF_COMPLETION_BUTTON_ENTITY_ID above.
     vol.Optional("last_rejection_note"): vol.Any(None, str),
     vol.Optional("last_rejection_at"): vol.Any(None, str),
+    # See TASK_CREATE_SCHEMA above. Explicit null clears a previously set note.
+    vol.Optional(CONF_TASK_NOTE): vol.Any(None, str),
 }
 
 MEMBER_CREATE_SCHEMA: collection.VolDictType = {
@@ -562,6 +575,10 @@ FAVORITE_CREATE_SCHEMA: collection.VolDictType = {
     vol.Optional("member_ids", default=list): [str],
     vol.Optional("kind", default=TASK_KIND_STANDARD): vol.In(TASK_KINDS),
     vol.Optional("subtasks", default=list): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+    # See CONF_TASK_NOTE in const.py - carried over onto every task
+    # ws_instantiate_favorite/ws_claim_favorite creates from this template,
+    # same as "points"/"coin_value" above.
+    vol.Optional(CONF_TASK_NOTE): str,
 }
 
 FAVORITE_UPDATE_SCHEMA: collection.VolDictType = {
@@ -572,6 +589,7 @@ FAVORITE_UPDATE_SCHEMA: collection.VolDictType = {
     vol.Optional("member_ids"): [str],
     vol.Optional("kind"): vol.In(TASK_KINDS),
     vol.Optional("subtasks"): vol.All([SUBTASK_SCHEMA], _require_unique_subtask_ids),
+    vol.Optional(CONF_TASK_NOTE): vol.Any(None, str),
 }
 
 
@@ -1104,6 +1122,75 @@ AWARD_POINTS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
 )
 
 
+# v0.49 - see WS_API_COIN_CONVERT in const.py. "coins" is how many Münzen to
+# debit; the resulting Punkte are computed server-side from
+# CONF_COIN_TO_POINTS_RATE, never supplied by the caller.
+CONVERT_COINS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_COIN_CONVERT,
+        vol.Required("coins"): vol.All(int, vol.Range(min=1)),
+    }
+)
+
+# v0.49 - see WS_API_FAVORITE_CLAIM in const.py.
+CLAIM_FAVORITE_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_FAVORITE_CLAIM,
+        vol.Required("favorite_id"): str,
+    }
+)
+
+LIST_CLAIMABLE_FAVORITES_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_FAVORITE_LIST_CLAIMABLE,
+    }
+)
+
+
+def _task_data_from_favorite(favorite: dict) -> dict[str, Any]:
+    """Build TASK_CREATE_SCHEMA-shaped data for a new task instantiated from a Favorit.
+
+    Shared by ws_instantiate_favorite (parent, WS_API_FAVORITE_INSTANTIATE)
+    and ws_claim_favorite (child, WS_API_FAVORITE_CLAIM below) so both create
+    an identically-shaped task from the same template - the only difference
+    between the two flows is who ends up assigned to it (see each caller) and
+    whether the new task is then immediately submitted as done.
+    """
+    task_data: dict[str, Any] = {
+        "name": favorite["name"],
+        "points": favorite.get("points", 0),
+        # v0.44: see "coin_value" on TASK_CREATE_SCHEMA/FAVORITE_CREATE_SCHEMA.
+        "coin_value": favorite.get("coin_value", 0),
+        "enabled": True,
+        # Always a single, never-repeating occurrence - see RECURRENCE_ONCE
+        # in const.py. TaskStorageCollection._process_create_data fills in
+        # "anchor_date" (today) since it's absent here.
+        "recurrence": {"type": RECURRENCE_ONCE},
+        # ROTATION_STRATEGY_FIXED with the favorite's member_ids as-is -
+        # zero, one, or several members, exactly like an admin-created
+        # task's own "Fest zugewiesen" rotation (several means shared,
+        # all simultaneously assigned, not "pick one"). ws_claim_favorite
+        # overwrites this with just the claiming child - see below.
+        "rotation": {
+            "member_ids": list(favorite.get("member_ids") or []),
+            "strategy": ROTATION_STRATEGY_FIXED,
+        },
+        "kind": favorite.get("kind", TASK_KIND_STANDARD),
+    }
+    if favorite.get("icon"):
+        task_data["icon"] = favorite["icon"]
+    if favorite.get(CONF_TASK_NOTE):
+        task_data[CONF_TASK_NOTE] = favorite[CONF_TASK_NOTE]
+    if favorite.get("subtasks"):
+        # Fresh copy, not a shared reference - each instantiated task owns
+        # its own subtask list from here on, editable independently of the
+        # favorite it was created from. v0.39: keyed off whether the
+        # favorite actually has any subtasks, not its (now legacy-only)
+        # "kind" - see TASK_KIND_CHECKLIST in const.py.
+        task_data["subtasks"] = [dict(s) for s in favorite.get("subtasks", [])]
+    return task_data
+
+
 @callback
 def async_setup_websocket_api(
     hass: HomeAssistant,
@@ -1436,6 +1523,95 @@ def async_setup_websocket_api(
     websocket_api.async_register_command(hass, WS_API_POINTS_AWARD, ws_award_points, AWARD_POINTS_SCHEMA)
 
     @websocket_api.async_response
+    async def ws_convert_coins_to_points(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """"Punkteshop": let a participating member trade their own Münzen for Punkte.
+
+        Self-service, no admin permission required - same resolution/
+        participation checks as ws_redeem_reward above (the caller must
+        resolve via their linked person entity to a member who participates
+        in the reward system and isn't currently paused). The rate
+        (CONF_COIN_TO_POINTS_RATE) is read fresh from the config entry's
+        options every time, same "no restart needed" pattern
+        CONF_SCREEN_TIME_MINUTES_PER_POINT already uses just above. A rate of
+        0 (the default, feature disabled) rejects every conversion outright -
+        the card itself already hides the whole UI in that case, this is just
+        the server-side half of that same gate.
+
+        The debit (Münzen) and credit (Punkte) are two separate, independent
+        log entries - a CoinLedgerStore entry (COIN_REASON_CONVERTED_TO_POINTS)
+        and a normal CompletionLogStore entry under the COIN_CONVERSION_TASK_ID
+        sentinel (mirrors ws_award_points' MANUAL_POINTS_TASK_ID) - written in
+        that order so a failure crediting the points side never happens after
+        coins were already silently kept; if the debit itself fails validation
+        nothing is written at all.
+        """
+        member_id = _member_id_for_user(hass, members, connection.user)
+        member = members.data.get(member_id) if member_id else None
+        if member is None:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Kein mit diesem Konto verknüpftes Familienmitglied.",
+            )
+            return
+
+        if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or member.get(CONF_MEMBER_PAUSED, False):
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Dieses Familienmitglied nimmt aktuell nicht am Belohnungssystem teil.",
+            )
+            return
+
+        options = entry.options if entry is not None else {}
+        rate = options.get(CONF_COIN_TO_POINTS_RATE, DEFAULT_COIN_TO_POINTS_RATE)
+        if not rate:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_NOT_SUPPORTED,
+                "Der Umtausch von Münzen in Punkte ist nicht aktiviert.",
+            )
+            return
+
+        coins = msg["coins"]
+        available = coin_ledger.balance(member_id)
+        if available < coins:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_INVALID_FORMAT,
+                "Nicht genug Münzen für diesen Umtausch.",
+            )
+            return
+
+        points = coins * rate
+        await coin_ledger.async_add_entry(
+            member_id=member_id,
+            amount=-coins,
+            reason=COIN_REASON_CONVERTED_TO_POINTS,
+            note=f"{coins} Münzen → {points} Punkte",
+        )
+        entry_item = await completions.async_add_entry(
+            task_id=COIN_CONVERSION_TASK_ID,
+            period_key=dt_util.utcnow().date().isoformat(),
+            member_id=member_id,
+            points_awarded=points,
+            task_name=f"{coins} Münzen umgetauscht",
+        )
+
+        runtime_data = getattr(entry, "runtime_data", None) if entry is not None else None
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is not None:
+            await coordinator.async_request_refresh()
+
+        connection.send_result(msg["id"], entry_item)
+
+    websocket_api.async_register_command(
+        hass, WS_API_COIN_CONVERT, ws_convert_coins_to_points, CONVERT_COINS_SCHEMA
+    )
+
+    @websocket_api.async_response
     async def ws_create_own_task(
         hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
     ) -> None:
@@ -1577,35 +1753,7 @@ def async_setup_websocket_api(
             )
             return
 
-        task_data: dict[str, Any] = {
-            "name": favorite["name"],
-            "points": favorite.get("points", 0),
-            # v0.44: see "coin_value" on TASK_CREATE_SCHEMA/FAVORITE_CREATE_SCHEMA.
-            "coin_value": favorite.get("coin_value", 0),
-            "enabled": True,
-            # Always a single, never-repeating occurrence - see RECURRENCE_ONCE
-            # in const.py. TaskStorageCollection._process_create_data fills in
-            # "anchor_date" (today) since it's absent here.
-            "recurrence": {"type": RECURRENCE_ONCE},
-            # ROTATION_STRATEGY_FIXED with the favorite's member_ids as-is -
-            # zero, one, or several members, exactly like an admin-created
-            # task's own "Fest zugewiesen" rotation (several means shared,
-            # all simultaneously assigned, not "pick one").
-            "rotation": {
-                "member_ids": list(favorite.get("member_ids") or []),
-                "strategy": ROTATION_STRATEGY_FIXED,
-            },
-            "kind": favorite.get("kind", TASK_KIND_STANDARD),
-        }
-        if favorite.get("icon"):
-            task_data["icon"] = favorite["icon"]
-        if favorite.get("subtasks"):
-            # Fresh copy, not a shared reference - each instantiated task owns
-            # its own subtask list from here on, editable independently of the
-            # favorite it was created from. v0.39: keyed off whether the
-            # favorite actually has any subtasks, not its (now legacy-only)
-            # "kind" - see TASK_KIND_CHECKLIST in const.py.
-            task_data["subtasks"] = [dict(s) for s in favorite.get("subtasks", [])]
+        task_data = _task_data_from_favorite(favorite)
 
         try:
             item = await tasks.async_create_item(task_data)
@@ -1625,6 +1773,125 @@ def async_setup_websocket_api(
                 vol.Required("favorite_id"): str,
             }
         ),
+    )
+
+    @websocket_api.async_response
+    async def ws_list_claimable_favorites(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """List the Favoriten catalog for a child to pick from (WS_API_FAVORITE_LIST_CLAIMABLE).
+
+        No admin permission required, unlike the plain "family_tasks/favorite/
+        subscribe" collection command (still @require_admin via
+        DictStorageCollectionWebsocket's base class, see
+        FavoriteStorageCollectionWebsocket above) - a child's non-admin HA
+        user could never call that one at all. Only requires the caller to
+        resolve, via their linked person entity, to *some* family member
+        (any role - same minimal check ws_redeem_reward uses). Returns a
+        plain read-only snapshot (not a live subscription) of every
+        household favorite - see the "Alle Favoriten automatisch freigegeben"
+        decision in CONF_TASK_NOTE's sibling comments: there is no per-
+        favorite opt-out from this listing, every Favorit a parent maintains
+        is fair game for a child to pick via ws_claim_favorite below.
+        """
+        member_id = _member_id_for_user(hass, members, connection.user)
+        if member_id is None:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Kein mit diesem Konto verknüpftes Familienmitglied.",
+            )
+            return
+
+        items = [
+            {
+                "id": favorite_id,
+                "name": favorite.get("name"),
+                "icon": favorite.get("icon"),
+                "points": favorite.get("points", 0),
+                "coin_value": favorite.get("coin_value", 0),
+                CONF_TASK_NOTE: favorite.get(CONF_TASK_NOTE),
+            }
+            for favorite_id, favorite in favorites.data.items()
+        ]
+        connection.send_result(msg["id"], {"favorites": items})
+
+    websocket_api.async_register_command(
+        hass,
+        WS_API_FAVORITE_LIST_CLAIMABLE,
+        ws_list_claimable_favorites,
+        LIST_CLAIMABLE_FAVORITES_SCHEMA,
+    )
+
+    @websocket_api.async_response
+    async def ws_claim_favorite(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Create a task from a Favorit for the caller and submit it as already done.
+
+        WS_API_FAVORITE_CLAIM - the child-facing counterpart to
+        ws_instantiate_favorite above. Unlike that parent-only command, this
+        both creates the new RECURRENCE_ONCE task (assigned only to the
+        caller, never the favorite's own "member_ids") *and* immediately
+        drives it through FamilyTasksCoordinator.async_complete_task exactly
+        as if the caller had tapped "Erledigt" on it themselves - for a
+        "child" member that raises the normal parent-confirmation task
+        (unless the household somehow set requires_confirmation=False on a
+        Favorit-instantiated task, which nothing here does), so a parent
+        always still signs off before points/coins are actually credited,
+        same as any other child task completion. No admin permission
+        required - same minimal "resolves to some member" check as
+        ws_list_claimable_favorites above, so a parent could technically call
+        this too (it would just complete instantly for them, same as
+        completing any of their own tasks directly - no confirmation gate
+        applies to a "parent"-role assignee).
+        """
+        member_id = _member_id_for_user(hass, members, connection.user)
+        if member_id is None:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Kein mit diesem Konto verknüpftes Familienmitglied.",
+            )
+            return
+
+        favorite = favorites.data.get(msg["favorite_id"])
+        if favorite is None:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Favorit nicht gefunden."
+            )
+            return
+
+        task_data = _task_data_from_favorite(favorite)
+        # Always the claiming member alone - deliberately ignoring the
+        # favorite's own "member_ids" (that field only matters for the
+        # parent-triggered ws_instantiate_favorite flow above).
+        task_data["rotation"] = {"member_ids": [member_id], "strategy": ROTATION_STRATEGY_FIXED}
+
+        try:
+            item = await tasks.async_create_item(task_data)
+        except vol.Invalid as err:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, humanize_error(task_data, err)
+            )
+            return
+
+        runtime_data = getattr(entry, "runtime_data", None) if entry is not None else None
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is None:
+            # Setup not finished yet - vanishingly unlikely in practice (the
+            # card can't even be showing a favorite to claim before setup
+            # completes), but leaving the freshly created task sitting open
+            # rather than raising is still safe: the member can just tap
+            # "Erledigt" on it normally afterwards.
+            connection.send_result(msg["id"], item)
+            return
+
+        await coordinator.async_complete_task(item["id"], member_id)
+        connection.send_result(msg["id"], item)
+
+    websocket_api.async_register_command(
+        hass, WS_API_FAVORITE_CLAIM, ws_claim_favorite, CLAIM_FAVORITE_SCHEMA
     )
 
 

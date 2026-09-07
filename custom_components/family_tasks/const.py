@@ -216,6 +216,18 @@ STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 # above for the only thing that does since v0.44.
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 
+# v0.49: sentinel task_id for the Punkte side of a member's own coins->points
+# conversion (WS_API_COIN_CONVERT/ws_convert_coins_to_points in storage.py) -
+# mirrors MANUAL_POINTS_TASK_ID above (same "not a real task" reasoning,
+# excluded from the per-member weekly completion history for the same
+# reason) but kept as its own distinct sentinel rather than reused, since a
+# conversion is self-service (any participating member may trigger it for
+# themselves) while MANUAL_POINTS_TASK_ID stays exclusively a parent-only
+# action (ws_award_points) - keeping them apart means the completion log
+# never confuses the two. Counts normally toward points_total/points_week/
+# points_month, same as MANUAL_POINTS_TASK_ID does.
+COIN_CONVERSION_TASK_ID: Final = "__coin_conversion__"
+
 # v0.29: household-wide weekly point goal backing each child's
 # "Wochenfortschritt" progress bar (replaces the flat Bestenliste ranking -
 # see family-tasks-card.js) and the fixed PROGRESS_THRESHOLD_PERCENTS
@@ -451,6 +463,17 @@ CONF_MEMBER_NOTIFY_SERVICE: Final = "notify_service"
 # WS_API_TASK_CREATE_OWN below) choose this explicitly instead.
 CONF_TASK_REQUIRES_CONFIRMATION: Final = "requires_confirmation"
 
+# v0.49: optional free-text note a parent can attach to a task - additional
+# instructions/context (e.g. "nur die Innenfenster, nicht die Terrassentür")
+# that would clutter the task row itself if shown inline, so the card renders
+# it behind a small info icon with a tooltip instead (see
+# _renderTaskList/_renderFavoritesSection in family-tasks-card.js). Also
+# accepted on a Favorit template (FAVORITE_CREATE_SCHEMA/_UPDATE_SCHEMA) so a
+# task instantiated from one inherits it, same pattern as "points"/
+# "coin_value". Purely descriptive - unlike CONF_TASK_REQUIRES_CONFIRMATION
+# and friends, nothing in the backend ever branches on its value.
+CONF_TASK_NOTE: Final = "note"
+
 # v0.22: set only by ws_create_own_task (WS_API_TASK_CREATE_OWN) - which
 # family member created this task for themselves. Purely a visibility flag:
 # family-tasks-card.js hides a task carrying this field from everyone except
@@ -491,6 +514,25 @@ CONF_COMPLETION_BUTTON_ENTITY_ID: Final = "completion_button_entity_id"
 # instantiate favorites at all - see FavoriteStorageCollectionWebsocket.
 WS_API_PREFIX_FAVORITES: Final = f"{DOMAIN}/favorite"
 WS_API_FAVORITE_INSTANTIATE: Final = f"{WS_API_PREFIX_FAVORITES}/instantiate"
+
+# v0.49: lets a member with role "child" (resolved via their linked person
+# entity, same as ws_redeem_reward below - no HA admin account required)
+# browse the parent-maintained Favoriten catalog and pick one they already
+# did, without it having been assigned to them first - see
+# ws_list_claimable_favorites/ws_claim_favorite in storage.py. Deliberately
+# not the same command as WS_API_FAVORITE_INSTANTIATE above (still
+# @require_admin, parent-only): WS_API_FAVORITE_LIST_CLAIMABLE is a read-only
+# listing (no admin permission required at all), and WS_API_FAVORITE_CLAIM
+# combines "create the task for myself" with "immediately submit it as done"
+# in one action, going through the exact same child-completion/parent-
+# confirmation path (FamilyTasksCoordinator.async_complete_task) as claiming
+# any other assigned task - a parent always still has to confirm it. Unlike
+# the v0.47-retired WS_API_TASK_CREATE_OWN, the *set* of tasks a child can
+# pick from here is always exactly the parent-maintained Favoriten catalog,
+# never anything freely invented by the child - so parents keep full
+# visibility into, and control over, what can appear this way.
+WS_API_FAVORITE_LIST_CLAIMABLE: Final = f"{WS_API_PREFIX_FAVORITES}/list_claimable"
+WS_API_FAVORITE_CLAIM: Final = f"{WS_API_PREFIX_FAVORITES}/claim"
 
 # --- Task kinds / checklists --------------------------------------------------
 #
@@ -688,6 +730,36 @@ WS_API_MEMBER_WEEKLY_COMPLETIONS: Final = f"{WS_API_PREFIX_MEMBERS}/weekly_compl
 WS_API_PREFIX_REWARDS: Final = f"{DOMAIN}/reward"
 WS_API_PREFIX_REWARD_REDEMPTIONS: Final = f"{DOMAIN}/reward_redemption"
 WS_API_REWARD_REDEEM: Final = f"{WS_API_PREFIX_REWARD_REDEMPTIONS}/redeem"
+
+# v0.49: "Punkteshop" - lets a participating member trade their own Münzen
+# for Punkte on demand, the reverse direction of a completed task's own
+# "Münzwert" (coin_value, see COIN_REASON_TASK_COMPLETION above). Self-
+# service, same permission model as WS_API_REWARD_REDEEM (resolved via the
+# caller's linked person entity, no admin account needed, blocked while
+# CONF_MEMBER_REWARDS_OPT_IN is off or CONF_MEMBER_PAUSED is set) - see
+# ws_convert_coins_to_points in storage.py. Any amount, not fixed "package"
+# sizes; the rate is CONF_COIN_TO_POINTS_RATE below.
+WS_API_PREFIX_COINS: Final = f"{DOMAIN}/coin"
+WS_API_COIN_CONVERT: Final = f"{WS_API_PREFIX_COINS}/convert_to_points"
+
+# v0.49: household-wide conversion rate for the Punkteshop coins->points
+# trade above - how many Punkte one converted Münze is worth. Read fresh
+# from the config entry's options at conversion time, same
+# "no restart needed" pattern as CONF_SCREEN_TIME_MINUTES_PER_POINT. 0 (the
+# default) disables the whole feature - the card hides the conversion UI
+# entirely, same "0 means off" convention as every other coin-bonus rate in
+# this section.
+CONF_COIN_TO_POINTS_RATE: Final = "coin_to_points_rate"
+DEFAULT_COIN_TO_POINTS_RATE: Final = 0
+
+# A member's own coins->points conversion debit (negative amount) - see
+# ws_convert_coins_to_points in storage.py and CONF_COIN_TO_POINTS_RATE
+# above. The credited Punkte side of the same trade is a normal completions
+# entry under COIN_CONVERSION_TASK_ID (see the "Child tasks / parent
+# confirmation" sentinels above) instead - this ledger only ever holds the
+# Münzen side of the exchange, same as COIN_REASON_REDEMPTION only ever
+# holding a reward's debit.
+COIN_REASON_CONVERTED_TO_POINTS: Final = "converted_to_points"
 
 # Optional per-reward field (v0.11): how many minutes of extra screen time
 # this catalog item is worth, purely informational as far as this integration

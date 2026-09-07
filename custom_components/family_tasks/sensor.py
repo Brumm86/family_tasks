@@ -266,6 +266,12 @@ class FamilyTasksMemberPointsSensor(
             # "Wochenfortschritt" progress-bar target; 0 means no goal is
             # configured (every earned point is immediately spendable).
             "weekly_progress_goal_points": self.coordinator.data.weekly_progress_goal_points,
+            # v0.49: "Punkteshop" - household-wide coins->points conversion
+            # rate (see CONF_COIN_TO_POINTS_RATE in const.py), identical on
+            # every member's points sensor - same "rides along, no dedicated
+            # entity" reasoning as the attributes above. 0 means the feature
+            # is off; the card then hides the conversion control entirely.
+            "coin_to_points_rate": self.coordinator.data.coin_to_points_rate,
             # v0.32: whether Urlaubsmodus is currently on - also the native
             # on/off state of switch.FamilyTasksVacationModeSwitch, repeated
             # here purely so the card can read it off this same per-refresh
