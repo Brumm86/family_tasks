@@ -51,9 +51,13 @@ class FamilyTasksTaskStatusSensor(
     def name(self) -> str:
         return self._task.name
 
-    @property
-    def icon(self) -> str | None:
-        return self._task.icon
+    # v0.51: no longer shows the task's own "icon" field (see const.py/
+    # storage.py TASK_*_SCHEMA and family-tasks-card.js) - task icons are no
+    # longer assignable at all (the "Icon (optional)" field was removed from
+    # the "Aufgabe hinzufügen/bearbeiten" form), and a task saved with one
+    # before this version should stop being displayed anywhere, this entity
+    # included. Falls back to whatever Home Assistant's own default icon
+    # logic picks for a plain SensorEntity instead.
 
     @property
     def native_value(self) -> str:

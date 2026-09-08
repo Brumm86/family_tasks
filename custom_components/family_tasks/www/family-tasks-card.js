@@ -750,7 +750,6 @@
       // independent of "points", default 0 (no coins) until a parent
       // deliberately sets one.
       coin_value: 0,
-      icon: "",
       // v0.49: see CONF_TASK_NOTE in const.py - optional free-text
       // instructions/context, shown via a small info icon instead of inline.
       note: "",
@@ -807,7 +806,6 @@
     // checklist task with their own named sub-items.
     return {
       name: "",
-      icon: "",
       due_time: "",
       // v0.31: see the matching comment in emptyTaskForm above.
       _dueTimeHour: "",
@@ -845,7 +843,6 @@
       name: task.name ?? "",
       points: task.points ?? 0,
       coin_value: task.coin_value ?? 0,
-      icon: task.icon ?? "",
       // v0.49: see the matching comment in emptyTaskForm above.
       note: task.note ?? "",
       enabled: task.enabled !== false,
@@ -1841,7 +1838,6 @@
         // v0.32: see CONF_TASK_VACATION_BEHAVIOR in const.py.
         vacation_behavior: form.vacation_paused ? "pause" : "show",
       };
-      if (form.icon) payload.icon = form.icon.trim();
       // v0.49: see CONF_TASK_NOTE in const.py. Editing can explicitly clear
       // a previously set note by sending null (create simply omits it).
       if (this._editingTaskId) {
@@ -1905,7 +1901,6 @@
           .map((s) => ({ id: s.id, name: s.name.trim() }))
           .filter((s) => s.name),
       };
-      if (form.icon) payload.icon = form.icon.trim();
       if (form.due_time) payload.due_time = form.due_time;
       if (form.overdue_time) payload.overdue_time = form.overdue_time;
       if (form.overdue_after_minutes !== "") {
@@ -2231,6 +2226,21 @@
       this._editingFavoriteId = favoriteId;
       this._favoriteForm = favoriteId ? favoriteToForm(this._favorites[favoriteId]) : emptyFavoriteForm();
       this._favoriteFormOpen = true;
+      // v0.51: close the "Favoriten" catalog dialog (_favoritesDialogOpen)
+      // whenever its nested add/edit form opens on top of it - both are
+      // separate native <dialog>s (see _openFavoritesDialog above), and
+      // every _render() tears down and recreates the whole shadow DOM, so
+      // _syncDialogs() re-showModal()s every dialog whose *Open flag is
+      // still true on every single render. Since "favorites-list" comes
+      // after "favorite" in _syncDialogs' specs array, leaving both flags
+      // true made the catalog dialog get re-added to the native <dialog>
+      // top layer *after* the edit form on every re-render, permanently
+      // burying the edit form behind it - it never became reachable, even
+      // though the form itself was technically open. Same fix/reasoning as
+      // _instantiateFavorite/_claimFavorite already closing their own
+      // dialog after selecting a favorite (v0.49) - here it just also
+      // covers opening "+ Favorit hinzufügen"/"Bearbeiten" from the list.
+      this._favoritesDialogOpen = false;
       this._render();
     }
 
@@ -3203,7 +3213,7 @@
                 <div class="row-main">
                   <span class="badge" style="background:${color}">${esc(label)}</span>
                   ${isMandatory ? `<span class="badge" style="background:var(--error-color, #db4437)">Pflicht</span>` : ""}
-                  <span class="name">${task.icon ? `<ha-icon icon="${esc(task.icon)}"></ha-icon> ` : ""}${esc(task.name)}${noteInfoIcon(task.note)}</span>
+                  <span class="name">${esc(task.name)}${noteInfoIcon(task.note)}</span>
                   <span class="muted">${detail}${claimSuffix}</span>
                 </div>
                 <div class="row-actions">
@@ -4164,7 +4174,6 @@
           <div class="grid2">
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
             <label>Münzwert (optional)<input type="number" min="0" data-field="coin_value" value="${esc(f.coin_value)}"></label>
-            <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></ha-icon-picker></label>
           </div>
 
           <label>Aufgabentyp
@@ -4236,7 +4245,6 @@
       return `
         <form class="form" data-form="own-task">
           <label>Name<input type="text" data-field="name" value="${esc(f.name)}" required></label>
-          <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:trash-can" value="${esc(f.icon)}"></ha-icon-picker></label>
 
           ${this._renderSubtaskEditor(f.subtasks)}
 

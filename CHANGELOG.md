@@ -2,6 +2,14 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.51.0] - 2026-09-08
+
+### Fixed
+- **Das Bearbeiten eines Favoriten öffnete das Aufgaben-Bearbeiten-Fenster hinter dem noch offenen Favoriten-Fenster**: das Favoriten-Katalog-Fenster (`_favoritesDialogOpen`) und das darin verschachtelte Anlegen-/Bearbeiten-Formular eines einzelnen Favoriten (`_favoriteFormOpen`) sind zwei unabhängige native `<dialog>`-Elemente. `_openFavoriteForm` öffnete das Formular bisher, ohne das Katalog-Fenster zu schließen - beide blieben also gleichzeitig offen. Da jedes `_render()` das komplette Shadow-DOM neu aufbaut (jedes `<dialog>` startet danach zwangsläufig wieder geschlossen), ruft `_syncDialogs()` bei jedem erneuten Rendern für jedes noch als offen markierte Fenster erneut `showModal()` auf - und zwar in der Reihenfolge seiner Einträge in dessen `specs`-Liste. Da „favorites-list" dort nach „favorite" steht, landete das Katalog-Fenster bei jedem Render zuverlässig über dem gerade erst geöffneten Bearbeiten-Formular in der nativen Dialog-Stapelreihenfolge und verdeckte es dauerhaft - es war zwar technisch geöffnet, aber nie erreichbar. Behoben, indem `_openFavoriteForm` das Katalog-Fenster jetzt explizit schließt, bevor es das Formular öffnet - genau wie `_instantiateFavorite`/`_claimFavorite` es seit v0.49 bereits beim Auswählen eines Favoriten tun. Betrifft sowohl „Bearbeiten" als auch „+ Favorit hinzufügen", beide werden ausschließlich aus dem Katalog-Fenster heraus ausgelöst.
+
+### Removed
+- **Aufgaben lassen sich nicht mehr mit einem eigenen Icon versehen**: das Feld „Icon (optional)" ist aus dem Formular „Aufgabe hinzufügen/bearbeiten" sowie aus dem (seit v0.47 ohnehin nicht mehr erreichbaren) Formular „Eigene Aufgabe hinzufügen" entfernt - beide senden beim Speichern kein `icon`-Feld mehr. Ein bereits vorhandenes Icon einer schon bestehenden Aufgabe wird nirgends mehr angezeigt: weder in der Aufgabenliste der Karte (`family-tasks-card.js`) noch am zugehörigen `sensor`-Entity, dessen `icon`-Property jetzt immer auf Home Assistants eigene Standardauswahl zurückfällt statt `task.icon`. Icons für Favoriten, Familienmitglieder und Belohnungen sind davon nicht betroffen - dort bleibt der Icon-Picker unverändert nutzbar.
+
 ## [0.50.0] - 2026-09-08
 
 ### Fixed
