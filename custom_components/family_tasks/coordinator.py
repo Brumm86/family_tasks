@@ -177,21 +177,11 @@ class TaskStatusData:
     # rotation.current_index.
     assigned_member_ids: list[str] = field(default_factory=list)
     # v0.25: who may currently act on (complete) this occurrence - normally
-    # identical to assigned_member_ids, but with two additions layered on
-    # top, neither of which changes assigned_member_ids itself (that field
-    # stays the "whose turn/responsibility is this" display value used for
-    # the assignee label, per-member open-task counts, and new-task
+    # identical to assigned_member_ids, but with one addition layered on
+    # top, which doesn't change assigned_member_ids itself (that field stays
+    # the "whose turn/responsibility is this" display value used for the
+    # assignee label, per-member open-task counts, and new-task
     # notifications):
-    # - every other active MEMBER_ROLE_CHILD member in the household, once
-    #   this occurrence is TASK_STATUS_OVERDUE and at least one of its
-    #   current assignees is itself a child - see the eligible_member_ids
-    #   computation in _async_update_data. Lets a sibling step in on a
-    #   sibling's overdue task instead of it just sitting there; whoever
-    #   actually completes it is still credited individually (async_add_entry
-    #   is always called with the acting member's own id), and since a task's
-    #   completion is keyed by (task_id, period_key) rather than per-member,
-    #   one sibling completing it resolves the occurrence for both - there is
-    #   no separate "done" state per child to reconcile.
     # - a parent completing a task currently assigned to a child is *always*
     #   allowed (not only once overdue) - this needs no special entry here
     #   since async_complete_task never actually checked eligible_member_ids
@@ -206,6 +196,17 @@ class TaskStatusData:
     #   starts with assigned_member_ids always empty (no fixed assignee, no
     #   rotation), so without this nobody would ever be eligible to claim or
     #   complete it at all.
+    #
+    # v0.50: previously (v0.25-v0.49) a third addition let every other active
+    # MEMBER_ROLE_CHILD sibling step in on a child's own occurrence once it
+    # went TASK_STATUS_OVERDUE ("ein Geschwisterkind einspringen lassen").
+    # Removed on explicit user request - "Einem Kind zugewiesene Aufgaben
+    # sollen nie einem anderen Kind angezeigt werden, solange die Zuweisung
+    # fortbesteht" - so a task assigned to one child (fixed or rotation) is
+    # now visible/actionable only for that child (and, as always, any
+    # parent) for as long as that assignment stands, overdue or not. See
+    # _async_update_data, where the sibling-widening loop was deleted
+    # outright rather than just disabled.
     eligible_member_ids: list[str] = field(default_factory=list)
     # Only populated for recurrence type "trigger" (see RECURRENCE_TRIGGER):
     # the bound sensor's current state/value and unit of measurement, so the
@@ -747,7 +748,21 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # weekly_progress_goal_points too.
         local_now = dt_util.now()
         start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
-        start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
+        # v0.50 bugfix: this used to be
+        # "start_of_today - timedelta(days=start_of_today.weekday())" -
+        # start_of_today is a UTC-converted instant, and for any timezone
+        # with a positive UTC offset (e.g. Europe/Berlin, UTC+1/+2) local
+        # midnight converts to the *previous* UTC calendar day, so
+        # start_of_today.weekday() silently returned the wrong weekday
+        # (always one day behind the actual local weekday, wrapping around
+        # on Mondays) - the week was then bounded from the wrong day,
+        # permanently excluding Monday's own points from "this week" every
+        # day from Tuesday on (and, on Mondays themselves, reaching 6 days
+        # too far back into the *previous* week instead of starting fresh).
+        # local_now.weekday() is computed on the local-timezone-aware
+        # datetime itself, before any UTC conversion, so it always reflects
+        # the real local weekday (Monday=0) regardless of offset.
+        start_of_week = start_of_today - timedelta(days=local_now.weekday())
         start_of_month = dt_util.as_utc(
             dt_util.start_of_local_day(local_now.replace(day=1))
         )
@@ -1069,29 +1084,15 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 task_id, task["name"], period_key, status, is_pool_task, assigned_member_ids
             )
 
-            # v0.25: once this occurrence is overdue and at least one current
-            # assignee is a child, every other active child in the household
-            # also becomes eligible to step in and complete it - see
-            # eligible_member_ids on TaskStatusData for the full reasoning.
-            # Deliberately keyed off "any assignee is a child" rather than
-            # "every assignee is a child" so a mixed fixed assignment (e.g. a
-            # parent + a child sharing a task) still opens up to the other
-            # children too, not just to the household's parents (who could
-            # already act on it regardless, per async_complete_task).
+            # v0.50: previously widened to every other active child sibling
+            # once this occurrence went overdue (see the removed v0.25
+            # comment on TaskStatusData.eligible_member_ids for the old
+            # reasoning) - removed on explicit user request, a task assigned
+            # to a child is now only ever eligible for that child (a parent
+            # can still always act on it regardless, per
+            # async_complete_task/canAct in family-tasks-card.js - that was
+            # never gated on eligible_member_ids to begin with).
             eligible_member_ids = list(assigned_member_ids)
-            if status == TASK_STATUS_OVERDUE and any(
-                self._member_role(mid) == MEMBER_ROLE_CHILD for mid in assigned_member_ids
-            ):
-                for other_id, other_member in self.members.data.items():
-                    if (
-                        other_id not in eligible_member_ids
-                        and other_member.get("active", True)
-                        # v0.37: a paused member isn't offered someone else's
-                        # overdue task either - see CONF_MEMBER_PAUSED.
-                        and not self._member_paused(other_id)
-                        and self._member_role(other_id) == MEMBER_ROLE_CHILD
-                    ):
-                        eligible_member_ids.append(other_id)
 
             # v0.30: an Aufgabenpool task (is_pool_task, see above) starts
             # with nobody assigned at all - assigned_member_ids is always

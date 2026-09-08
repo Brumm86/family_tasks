@@ -3037,31 +3037,25 @@
             ? assignedIds.map((mid) => esc(this._memberName(mid))).join(", ")
             : "–";
           // v0.25: eligible_member_ids (see coordinator.py) - who may
-          // currently act on this occurrence beyond assignedIds itself. Used
-          // below both to decide whether *this* logged-in member can act on
-          // a task assigned to someone else (a sibling stepping in once it's
-          // overdue) and to surface that as a short hint next to the
-          // assignee, since otherwise an "Erledigt" button showing up on a
-          // task assigned to someone else would be confusing.
+          // currently act on this occurrence beyond assignedIds itself.
+          // v0.50: a sibling can no longer step in on another child's
+          // overdue task (removed on explicit user request - "Einem Kind
+          // zugewiesene Aufgaben sollen nie einem anderen Kind angezeigt
+          // werden, solange die Zuweisung fortbesteht"), so in practice this
+          // now only ever differs from assignedIds for a shared "fixed"
+          // multi-assignee rotation, or once claimed_by_member_id narrows it
+          // down (see _async_update_data) - used below to decide whether
+          // *this* logged-in member can act on the occurrence.
           const eligibleIds = statusState?.attributes?.eligible_member_ids ?? assignedIds;
           const assignedToChild = assignedIds.some((mid) => this._members[mid]?.role === "child");
           // Whoever actually completes an occurrence is credited for it
           // (see async_complete_task in coordinator.py, which always logs
-          // the acting member's own id) - so a sibling stepping in on an
-          // overdue task, or a parent completing a child's task, both keep
-          // their own points instead of the original assignee's.
+          // the acting member's own id) - so a parent completing a child's
+          // task keeps their own points instead of the original assignee's.
           const actingForOther =
             currentMemberId &&
             !assignedIds.includes(currentMemberId) &&
             (eligibleIds.includes(currentMemberId) || (isParentUser && assignedToChild));
-          const overdueSiblingHint =
-            !isConfirmation &&
-            status === "overdue" &&
-            currentMemberId &&
-            !assignedIds.includes(currentMemberId) &&
-            eligibleIds.includes(currentMemberId)
-              ? " · jetzt auch für dich (überfällig)"
-              : "";
           // v0.27: the task's Karenzzeit, shown as the clock time it's
           // actually due by (deadline_at - see _deadline_at in
           // coordinator.py) instead of just the internal "Überfällig ab"
@@ -3097,7 +3091,7 @@
                 : "Keine Batterie niedrig"
               : `${assigneeLabel} · ${esc(task.points ?? 0)} Pkt.${
                   task.coin_value ? ` · ${esc(coinsLabel(task.coin_value))}` : ""
-                }${overdueSiblingHint}`) + deadlineSuffix;
+                }`) + deadlineSuffix;
           // v0.40: TASK_STATUS_UPCOMING counts as "resolved" here too -
           // not because it's finished, but because "Diese Aufgaben sollen
           // erst am Tag ihrer Fälligkeit erledigt werden können" - the same
@@ -3122,17 +3116,11 @@
           // (currentMemberId null) never matches any assignedIds, so they
           // simply never see the button, same as before this member never
           // being one of the assignees.
-          // v0.25: two additions on top of that v0.22 rule, both re-adding
-          // ways to act on someone *else's* task (rather than reverting to
-          // the pre-v0.22 "anyone, always" behavior) - see actingForOther
-          // above for why points still go to whoever actually clicks either
-          // way:
-          // - eligibleIds also matches once a child's task goes overdue (see
-          //   eligible_member_ids in coordinator.py), so a sibling sees the
-          //   button on it too, not just the originally assigned child.
-          // - a parent (isParentUser) always sees the button on any task
-          //   currently assigned to a child, overdue or not - the backend
-          //   never blocked this to begin with, only the card's UI did.
+          // v0.25: on top of that v0.22 rule, a parent (isParentUser) always
+          // sees the button on any task currently assigned to a child,
+          // overdue or not - the backend never blocked this to begin with,
+          // only the card's UI did. (v0.50: a sibling no longer gets the
+          // button on another child's overdue task - see eligibleIds above.)
           //
           // v0.27: "Annehmen" reservation (see claimed_by_member_id/
           // claim_expires_at/claimable task attributes, coordinator.py) adds
@@ -3165,11 +3153,19 @@
               ? ` · von dir reserviert bis ${esc(formatDeadline(claimExpiresAt))}`
               : ` · reserviert von ${esc(this._memberName(claimedByMemberId))} bis ${esc(formatDeadline(claimExpiresAt))}`
             : "";
-          // A checklist task only becomes "done" once every sub-item is
-          // checked (see async_toggle_subtask in coordinator.py) - the
-          // manual "Erledigt" button is disabled for it so completion always
-          // goes through the checklist itself.
-          const disableComplete = resolved || isChecklist;
+          // A checklist task normally only becomes "done" once every
+          // sub-item is checked (see async_toggle_subtask in
+          // coordinator.py) - the manual "Erledigt" button is disabled for
+          // it so a child's completion always goes through the checklist
+          // itself. v0.50: a parent may still complete it directly at any
+          // time without ticking every sub-item first (explicit user
+          // request - "Checklistenaufgaben sollten für Eltern auch dann
+          // erfüllbar sein, wenn die einzelnen Unterpunkte nicht angeklickt
+          // wurden"); async_complete_task itself never checked subtask
+          // state to begin with, so this is purely relaxing the card's own
+          // gate for isParentUser, same pattern as the isParentUser
+          // bypasses elsewhere in this function.
+          const disableComplete = resolved || (isChecklist && !isParentUser);
           // Alphabetical, unchecked items first (v0.12): a checklist can grow
           // to a couple dozen items (e.g. a packing list) and the backend
           // preserves whatever order they were originally typed in, which
@@ -4569,7 +4565,15 @@
            abgerundete .bar-fill-Ecke), die Badges schweben stattdessen
            oberhalb davon in diesem eigenen, nicht abgeschnittenen Wrapper. */
         .bar-wrap { position: relative; padding-top: 15px; }
-        .bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2); overflow: hidden; }
+        /* v0.50: a thin border so the (otherwise empty) track stays visible
+           even at 0 points, i.e. before .bar-fill has any width at all -
+           "Sorge dafür, dass der Fortschrittsbalken selbst auch sichtbar
+           ist, wenn noch keine Punkte erreicht wurden." box-sizing:
+           border-box keeps the track's total height at 6px including the
+           border, so nothing else needs adjusting (.bar-fill's height:100%
+           still exactly fills the space inside it). */
+        .bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2);
+                     border: 1px solid var(--divider-color, #e0e0e0); box-sizing: border-box; overflow: hidden; }
         .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
         /* v0.29: Wochenziel erreicht (siehe _renderProgressSection,
            goalReached) - eigene Farbe, damit auf einen Blick klar ist,

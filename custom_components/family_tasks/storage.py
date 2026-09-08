@@ -1675,7 +1675,13 @@ def async_setup_websocket_api(
 
         local_now = dt_util.now()
         start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
-        start_of_week = start_of_today - timedelta(days=start_of_today.weekday())
+        # v0.50 bugfix: same off-by-a-timezone-offset bug fixed in
+        # FamilyTasksCoordinator._async_update_data's start_of_week (see the
+        # comment there for the full explanation) - use local_now.weekday()
+        # (computed before the UTC conversion) instead of
+        # start_of_today.weekday(). Kept in sync with that computation
+        # deliberately, per this method's own docstring.
+        start_of_week = start_of_today - timedelta(days=local_now.weekday())
 
         results: list[dict[str, Any]] = []
         for entry in completions.entries:

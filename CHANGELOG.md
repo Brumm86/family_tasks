@@ -2,6 +2,16 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.50.0] - 2026-09-08
+
+### Fixed
+- **Wochenpunkte folgten nicht zuverlässig der Kalenderwoche Montag-Sonntag**: `start_of_week` (`coordinator.py`, gespiegelt in `storage.py`s `ws_list_member_weekly_completions`) wurde bislang aus einem bereits nach UTC umgerechneten Zeitpunkt bestimmt (`start_of_today.weekday()`) - in einer Zeitzone mit positivem UTC-Versatz (z. B. Europe/Berlin) landet lokale Mitternacht dadurch auf dem *vorherigen* UTC-Kalendertag, sodass der ermittelte Wochentag an jedem Tag außer Montag genau einen Tag zu spät lag - Montags-Punkte fielen dadurch dauerhaft aus der laufenden Woche heraus (Wochenfortschritt, Meilenstein-/Streak-Bonus, Handyzeit-Malus). An einem Montag selbst griff der Fehler in die andere Richtung (6 Tage zu weit in die Vorwoche). Behoben, indem der Wochentag jetzt vor der UTC-Umrechnung aus dem lokalen Zeitpunkt bestimmt wird (`local_now.weekday()`).
+- **Wochenfortschrittsbalken bei 0 Punkten praktisch unsichtbar**: `.bar-track` hatte keine eigene Umrandung - ohne jede Balkenfüllung war je nach Theme kaum zu erkennen, dass dort überhaupt ein Fortschrittsbalken ist. Neu: eine dünne Umrandung, sodass der Balken immer sichtbar bleibt.
+- **Eine für ein Kind angelegte Pflichtaufgabe war auch für andere Kinder sichtbar, sobald sie überfällig wurde**: seit v0.25 wurde eine einem Kind zugewiesene, überfällige Aufgabe automatisch auch für jedes andere aktive Kind eligibel (`eligible_member_ids` in `coordinator.py`), damit ein Geschwisterkind einspringen kann. Auf ausdrücklichen Nutzerwunsch entfernt - eine Kind-Aufgabe bleibt jetzt ausschließlich für das/die zugewiesene(n) Kind(er) sichtbar/erledigbar, unabhängig vom Fälligkeitsstatus. Eltern konnten (und können weiterhin) jederzeit unabhängig davon einspringen.
+
+### Changed
+- **Checklistenaufgaben von Eltern jetzt auch ohne Abhaken der Unterpunkte abschließbar**: die manuelle „Erledigt"-Aktion war bislang für jede Aufgabe mit Checkliste komplett deaktiviert. Für Eltern ist sie jetzt immer nutzbar; für Kinder bleibt es unverändert bei „nur über die Checkliste selbst".
+
 ## [0.49.0] - 2026-09-07
 
 ### Added
