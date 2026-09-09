@@ -156,6 +156,16 @@ CONF_STREAK_BONUS_REQUIRED_WEEKS: Final = "streak_bonus_required_weeks"
 CONF_STREAK_150_BONUS_COINS: Final = "streak_150_bonus_coins"
 CONF_STREAK_200_BONUS_COINS: Final = "streak_200_bonus_coins"
 
+# v0.52: "Wochensieger-Bonus" - extra bonus coins for the single household
+# member with the most points in a fully-elapsed calendar week (absolute
+# points, not relative to their own weekly goal). Off exactly when 0, same
+# "no separate enabled switch" convention as every other coin-bonus amount
+# above. No bonus is paid at all if there is no single member with the
+# strictly most points that week (a tie, or every eligible member at 0) -
+# see FamilyTasksCoordinator._async_process_top_scorer_coin_bonus and
+# TopScorerBonusStateStore in storage.py.
+CONF_TOP_SCORER_BONUS_COINS: Final = "top_scorer_bonus_coins"
+
 # Internal-only sentinel "reason" values for CoinLedgerStore entries created
 # by FamilyTasksCoordinator._async_process_milestone_coin_bonus/
 # _async_process_streak_coin_bonus - see storage.CoinLedgerStore. Unlike the
@@ -170,6 +180,8 @@ COIN_REASON_MILESTONE_150: Final = "milestone_150"
 COIN_REASON_MILESTONE_200: Final = "milestone_200"
 COIN_REASON_STREAK_150: Final = "streak_150"
 COIN_REASON_STREAK_200: Final = "streak_200"
+# v0.52: see CONF_TOP_SCORER_BONUS_COINS above.
+COIN_REASON_TOP_SCORER: Final = "top_scorer"
 # A shop redemption (negative amount) - see ws_redeem_reward in storage.py.
 COIN_REASON_REDEMPTION: Final = "redemption"
 # v0.44: a completed task's own "Münzwert" (task.get("coin_value", 0)),
@@ -278,6 +290,7 @@ DEFAULT_MILESTONE_200_BONUS_COINS: Final = 0
 DEFAULT_STREAK_BONUS_REQUIRED_WEEKS: Final = 2
 DEFAULT_STREAK_150_BONUS_COINS: Final = 0
 DEFAULT_STREAK_200_BONUS_COINS: Final = 0
+DEFAULT_TOP_SCORER_BONUS_COINS: Final = 0
 DEFAULT_VACATION_MODE: Final = False
 
 ROTATION_STRATEGY_ROUND_ROBIN: Final = "round_robin"
@@ -667,6 +680,10 @@ STORAGE_KEY_CLAIM_STATE: Final = f"{DOMAIN}.claim_state"
 # v0.32: per-member Streak-Bonus cursor/counter - see StreakBonusStateStore
 # in storage.py and CONF_STREAK_BONUS_ENABLED above.
 STORAGE_KEY_STREAK_BONUS_STATE: Final = f"{DOMAIN}.streak_bonus_state"
+# v0.52: household-wide Wochensieger-Bonus cursor - see
+# TopScorerBonusStateStore in storage.py and CONF_TOP_SCORER_BONUS_COINS
+# above.
+STORAGE_KEY_TOP_SCORER_BONUS_STATE: Final = f"{DOMAIN}.top_scorer_bonus_state"
 # v0.32: the household-wide Urlaubsmodus on/off state - see
 # VacationModeStateStore in storage.py and CONF_VACATION_MODE_DEFAULT above.
 STORAGE_KEY_VACATION_MODE: Final = f"{DOMAIN}.vacation_mode"

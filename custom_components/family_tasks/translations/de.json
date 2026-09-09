@@ -33,6 +33,7 @@
           "streak_150_bonus_coins": "Streak-Bonus-Münzen je Woche mit gehaltener 150%-Marke",
           "streak_200_bonus_coins": "Streak-Bonus-Münzen je Woche mit gehaltener 200%-Marke",
           "coin_to_points_rate": "Punkte je im Punkteshop umgetauschter Münze (0 deaktiviert den Umtausch)",
+          "top_scorer_bonus_coins": "Bonus-Münzen für das Kind mit den meisten Punkten der Woche (0 deaktiviert es; bei Gleichstand kein Bonus)",
           "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
       }

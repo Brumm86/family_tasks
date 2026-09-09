@@ -33,6 +33,7 @@
           "streak_150_bonus_coins": "Streak-Bonus coins per week maintaining 150%",
           "streak_200_bonus_coins": "Streak-Bonus coins per week maintaining 200%",
           "coin_to_points_rate": "Points awarded per coin converted in the reward shop (0 disables conversion)",
+          "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week (0 disables it; no bonus on a tie)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
       }

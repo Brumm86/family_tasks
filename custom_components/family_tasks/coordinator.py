@@ -32,6 +32,7 @@ from .const import (
     COIN_REASON_STREAK_150,
     COIN_REASON_STREAK_200,
     COIN_REASON_TASK_COMPLETION,
+    COIN_REASON_TOP_SCORER,
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_COIN_TO_POINTS_RATE,
@@ -49,6 +50,7 @@ from .const import (
     CONF_STREAK_200_BONUS_COINS,
     CONF_STREAK_BONUS_REQUIRED_WEEKS,
     CONF_TASK_CREATED_BY_MEMBER_ID,
+    CONF_TOP_SCORER_BONUS_COINS,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
@@ -66,6 +68,7 @@ from .const import (
     DEFAULT_STREAK_150_BONUS_COINS,
     DEFAULT_STREAK_200_BONUS_COINS,
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+    DEFAULT_TOP_SCORER_BONUS_COINS,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
     EVENT_TASK_DUE,
@@ -108,6 +111,7 @@ from .storage import (
     RewardRedemptionStorageCollection,
     StreakBonusStateStore,
     TaskStorageCollection,
+    TopScorerBonusStateStore,
     TriggerStateStore,
     VacationModeStateStore,
 )
@@ -416,6 +420,15 @@ class FamilyTasksData:
     streak_150_bonus_coins: int = DEFAULT_STREAK_150_BONUS_COINS
     streak_200_bonus_coins: int = DEFAULT_STREAK_200_BONUS_COINS
     streak_bonus_required_weeks: int = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+    # v0.52: "Wochensieger-Bonus" coin amount (see
+    # CONF_TOP_SCORER_BONUS_COINS in const.py) - rides along here for the
+    # same "no dedicated entity for a plain options value" reason the
+    # milestone/streak settings above do. 0 means the feature is off; the
+    # card then hides the live leader indicator entirely. Purely
+    # informational for the card (labels the crown's tooltip) - the actual
+    # awarding is FamilyTasksCoordinator._async_process_top_scorer_coin_bonus,
+    # which reads the option itself rather than this snapshot.
+    top_scorer_bonus_coins: int = DEFAULT_TOP_SCORER_BONUS_COINS
     # v0.49: "Punkteshop" - household-wide coins->points conversion rate (see
     # CONF_COIN_TO_POINTS_RATE in const.py) - rides along here for the same
     # "no dedicated entity for a plain options value" reason
@@ -704,6 +717,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         vacation_mode_state: VacationModeStateStore,
         coin_ledger: CoinLedgerStore,
         deadline_notification_state: DeadlineNotificationStateStore,
+        top_scorer_bonus_state: TopScorerBonusStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -731,6 +745,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # idempotency for the "fällig"/"überfällig"/Aufgabenpool-"appeared"
         # notifications raised from _async_notify_task_status below.
         self.deadline_notification_state = deadline_notification_state
+        # v0.52: see TopScorerBonusStateStore in storage.py - idempotency
+        # cursor for _async_process_top_scorer_coin_bonus below.
+        self.top_scorer_bonus_state = top_scorer_bonus_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -830,6 +847,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # is nothing left for it to correct.
         await self._async_process_milestone_coin_bonus(start_of_week, weekly_progress_goal_points)
         await self._async_process_streak_coin_bonus(start_of_week, weekly_progress_goal_points)
+        await self._async_process_top_scorer_coin_bonus(start_of_week)
 
         # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
         # storage.py. Read once per refresh, same pattern as
@@ -1387,6 +1405,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         streak_200_bonus_coins = DEFAULT_STREAK_200_BONUS_COINS
         streak_bonus_required_weeks = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
         coin_to_points_rate = DEFAULT_COIN_TO_POINTS_RATE
+        top_scorer_bonus_coins = DEFAULT_TOP_SCORER_BONUS_COINS
         if self.config_entry:
             options = self.config_entry.options
             milestone_150_bonus_coins = options.get(
@@ -1409,6 +1428,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             )
             coin_to_points_rate = options.get(
                 CONF_COIN_TO_POINTS_RATE, DEFAULT_COIN_TO_POINTS_RATE
+            )
+            top_scorer_bonus_coins = options.get(
+                CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
             )
 
         # See FamilyTasksData.milestone_150_threshold_points's docstring -
@@ -1440,6 +1462,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             streak_200_bonus_coins=streak_200_bonus_coins,
             streak_bonus_required_weeks=streak_bonus_required_weeks,
             coin_to_points_rate=coin_to_points_rate,
+            top_scorer_bonus_coins=top_scorer_bonus_coins,
             vacation_mode_active=vacation_mode_active,
             pool_tasks_open=pool_tasks_open,
             screen_time_tick_minutes=screen_time_tick_minutes,
@@ -2623,6 +2646,98 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if weeks_processed:
             await self.streak_bonus_state.async_set(member_id, tier, cursor, streak_count)
 
+    async def _async_process_top_scorer_coin_bonus(self, start_of_week: datetime) -> None:
+        """Credit the "Wochensieger-Bonus" for every fully-elapsed calendar week.
+
+        See CONF_TOP_SCORER_BONUS_COINS in const.py. Unlike the Meilenstein-/
+        Streak-Bonus above (each judged per member, against that member's
+        own share of the household-wide weekly goal), this compares
+        *absolute* points_week across every eligible member household-wide
+        for a week that has actually ended, and pays the single member with
+        strictly the most points - so, unlike those two, it is not gated on
+        CONF_WEEKLY_PROGRESS_GOAL_POINTS being configured at all. No bonus
+        is paid for a week that ends in a tie for first place (including a
+        tie at 0, e.g. nobody completed anything that week) - deliberately
+        simple over splitting/duplicating the bonus, so a bonus payout
+        always has exactly one unambiguous recipient. Also requires at
+        least two eligible members that week; with only one (or zero) there
+        is no one to be "top" relative to, so nothing is paid - same
+        reasoning as why a solo household never sees a competitive
+        leaderboard on the card either (see _progressMembers's isChildUser
+        branch in family-tasks-card.js).
+
+        Uses the same "catch up on every elapsed week since a persisted
+        cursor, oldest first" shape as
+        _async_process_member_streak_tier/StreakBonusStateStore, just with a
+        single household-wide cursor (TopScorerBonusStateStore) instead of
+        one per member/tier, since there is only ever one winner to judge
+        per week, not one outcome per member. A brand-new household (no
+        cursor yet) starts at "last week" rather than the beginning of time,
+        same reasoning as the streak cursor's own first-run behaviour.
+        """
+        if not self.config_entry:
+            return
+        bonus_coins = self.config_entry.options.get(
+            CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
+        )
+        if bonus_coins <= 0:
+            return
+
+        cursor = self.top_scorer_bonus_state.processed_through or (
+            start_of_week - timedelta(days=7)
+        )
+
+        # Same 52-week catch-up cap as _async_process_member_streak_tier,
+        # same reasoning (a household offline for a long time still ends up
+        # correct, just spread across a few extra refreshes).
+        weeks_processed = 0
+        while cursor < start_of_week and weeks_processed < 52:
+            eligible_member_ids = [
+                member_id
+                for member_id, member in self.members.data.items()
+                if member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                and member.get("active", True)
+                # v0.37: paused (temporarily away) is excluded here too -
+                # see CONF_MEMBER_PAUSED.
+                and not member.get(CONF_MEMBER_PAUSED, False)
+            ]
+            if len(eligible_member_ids) >= 2:
+                week_points = {
+                    member_id: self.completions.points_between(
+                        member_id, cursor, cursor + timedelta(days=7)
+                    )
+                    for member_id in eligible_member_ids
+                }
+                max_points = max(week_points.values())
+                leaders = [
+                    member_id
+                    for member_id, points in week_points.items()
+                    if points == max_points
+                ]
+                if max_points > 0 and len(leaders) == 1:
+                    winner = leaders[0]
+                    await self.coin_ledger.async_add_entry(
+                        member_id=winner,
+                        amount=bonus_coins,
+                        reason=COIN_REASON_TOP_SCORER,
+                        note=(
+                            f"Wochensieger-Bonus: meiste Punkte der Woche "
+                            f"({max_points} Pkt.)"
+                        ),
+                    )
+                    _LOGGER.debug(
+                        "Credited %s Wochensieger-Bonus coin(s) to %s for the week of %s (%s Pkt.)",
+                        bonus_coins,
+                        winner,
+                        dt_util.as_local(cursor).date().isoformat(),
+                        max_points,
+                    )
+            cursor += timedelta(days=7)
+            weeks_processed += 1
+
+        if weeks_processed:
+            await self.top_scorer_bonus_state.async_set_processed_through(cursor)
+
     async def async_reset_points(self, member_id: str | None = None) -> None:
         """Reset stored *points* data - see SERVICE_RESET_POINTS in const.py.
 
@@ -2644,6 +2759,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self.coin_ledger.async_reset(member_id)
         await self.milestone_bonus_state.async_reset(member_id)
         await self.streak_bonus_state.async_reset(member_id)
+        # v0.52: TopScorerBonusStateStore holds no per-member data (see its
+        # docstring) - only a whole-household reset (member_id is None)
+        # makes sense to apply to it; resetting a single member's points
+        # shouldn't retroactively change who already won already-judged
+        # weeks for the rest of the household.
+        if member_id is None:
+            await self.top_scorer_bonus_state.async_reset()
         _LOGGER.info("Reset points data for %s", member_id or "every member")
         await self.async_request_refresh()
 

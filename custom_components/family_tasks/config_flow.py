@@ -40,6 +40,7 @@ from .const import (
     CONF_STREAK_150_BONUS_COINS,
     CONF_STREAK_200_BONUS_COINS,
     CONF_STREAK_BONUS_REQUIRED_WEEKS,
+    CONF_TOP_SCORER_BONUS_COINS,
     CONF_VACATION_MODE_DEFAULT,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
@@ -55,6 +56,7 @@ from .const import (
     DEFAULT_STREAK_150_BONUS_COINS,
     DEFAULT_STREAK_200_BONUS_COINS,
     DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+    DEFAULT_TOP_SCORER_BONUS_COINS,
     DEFAULT_VACATION_MODE,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
@@ -308,6 +310,24 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     CONF_STREAK_200_BONUS_COINS,
                     default=current.get(
                         CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                # v0.52: "Wochensieger-Bonus" - extra bonus coins for the single
+                # household member with the most points in a fully-elapsed
+                # calendar week (absolute points, not relative to any
+                # individual weekly goal - unlike the Meilenstein-/
+                # Streak-Bonus above, this does not require a weekly goal to
+                # be configured at all). No bonus is paid on a tie for first
+                # place. See CONF_TOP_SCORER_BONUS_COINS in const.py and
+                # FamilyTasksCoordinator._async_process_top_scorer_coin_bonus.
+                # Off exactly when 0 (default), same convention as every
+                # other bonus amount above.
+                vol.Optional(
+                    CONF_TOP_SCORER_BONUS_COINS,
+                    default=current.get(
+                        CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)

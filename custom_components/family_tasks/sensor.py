@@ -250,6 +250,20 @@ class FamilyTasksMemberPointsSensor(
             "streak_150_bonus_coins": self.coordinator.data.streak_150_bonus_coins,
             "streak_200_bonus_coins": self.coordinator.data.streak_200_bonus_coins,
             "streak_bonus_required_weeks": self.coordinator.data.streak_bonus_required_weeks,
+            # v0.52: "Wochensieger-Bonus" - household-wide bonus coin amount
+            # for the member with the most points_week among every eligible
+            # member once a calendar week ends (see
+            # CONF_TOP_SCORER_BONUS_COINS in const.py and
+            # FamilyTasksCoordinator._async_process_top_scorer_coin_bonus) -
+            # same "rides along, no dedicated entity" reasoning as the
+            # Meilenstein-/Streak-Bonus attributes above. 0 means the
+            # feature is off; the card then hides the live leader indicator
+            # entirely. Everything else the card needs to show the live
+            # "who's currently leading" crown (each member's own
+            # points_week) is already available from this same attribute
+            # dict on every member's own points sensor - no separate
+            # "current leader" attribute is needed.
+            "top_scorer_bonus_coins": self.coordinator.data.top_scorer_bonus_coins,
             # v0.32: this member's current consecutive-week streak length,
             # one per fixed tier since v0.36 - see
             # MemberSummaryData.streak_weeks_150/streak_weeks_200 in

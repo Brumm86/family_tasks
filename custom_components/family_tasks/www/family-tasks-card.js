@@ -453,6 +453,38 @@
     "Samstag",
     "Sonntag",
   ];
+  // v0.52: German month names for the "Datum"/"Ankerdatum" fallback picker
+  // (see _renderFallbackDateInput) - only used when the real <ha-date-input>
+  // component isn't registered (see _hydrateDateTimeInputs).
+  const MONTH_LABELS = [
+    "Januar",
+    "Februar",
+    "März",
+    "April",
+    "Mai",
+    "Juni",
+    "Juli",
+    "August",
+    "September",
+    "Oktober",
+    "November",
+    "Dezember",
+  ];
+
+  // v0.52: "YYYY-MM-DD" for today in the *local* timezone (not UTC - unlike
+  // Date.toISOString(), which is UTC-based and can be off by a day near
+  // midnight for a positive UTC offset, e.g. Europe/Berlin - same class of
+  // bug already root-caused for start_of_week in coordinator.py, see the
+  // v0.50 CHANGELOG entry). Used to pre-fill "Datum"/"Ankerdatum" fields
+  // with today's date as a default (see the ha-date-input value="..."
+  // attributes below) - both the real component and its select-dropdown
+  // fallback below then simply display/edit that default like any other
+  // value, rather than needing their own separate "no value yet" state.
+  function todayIsoDate() {
+    const d = new Date();
+    const pad2 = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
   // v0.42: five user-facing task states, front and center in how the card
   // communicates what needs attention - "Inaktiv" (grau, deaktivierte
   // Aufgaben), "Aktiv" (dunkelgrün, aktive Aufgaben ohne einen der drei
@@ -610,14 +642,25 @@
     return `${esc(n)} ${n === 1 ? "Münze" : "Münzen"}`;
   }
 
-  // v0.49: kleines Info-Symbol mit nativem title-Tooltip für eine optionale
-  // Aufgaben-/Favoriten-Notiz (CONF_TASK_NOTE in const.py) - so bleibt die
-  // Zeile selbst schlank, statt die Notiz immer vollständig einzublenden.
-  // Gibt "" zurück, wenn keine Notiz gesetzt ist, sodass Aufrufer sie einfach
-  // an ihre Zeile anhängen können, ohne selbst prüfen zu müssen.
-  function noteInfoIcon(note) {
+  // v0.49: kleines Info-Symbol für eine optionale Aufgaben-/Favoriten-Notiz
+  // (CONF_TASK_NOTE in const.py) - so bleibt die Zeile selbst schlank, statt
+  // die Notiz immer vollständig einzublenden. Gibt "" zurück, wenn keine
+  // Notiz gesetzt ist, sodass Aufrufer sie einfach an ihre Zeile anhängen
+  // können, ohne selbst prüfen zu müssen.
+  //
+  // v0.52 fix: this used to be a plain native `title`-attribute tooltip
+  // (role="img", not interactive) - that only ever shows on hover, which
+  // never fires on a touch device, so the icon was visible but genuinely
+  // unclickable on a phone, exactly the reported bug. Now a real
+  // data-action button (role="button"/tabindex, same pattern as the
+  // "📱 X Min. Handyzeit heute" badge's screenTimeBadge in
+  // _renderProgressSection) that opens a small dialog with the note text -
+  // see _openNoteDialog/_closeNoteDialog and the "note-info" dialog markup
+  // in _render(). `name` (the task's/favorite's own name) titles that
+  // dialog, so every call site now passes it alongside `note`.
+  function noteInfoIcon(name, note) {
     if (!note) return "";
-    return `<span class="note-info" title="${esc(note)}" role="img" aria-label="Notiz: ${esc(note)}"><ha-icon icon="mdi:information-outline"></ha-icon></span>`;
+    return `<span class="note-info" data-action="open-note-info" data-note-title="${esc(name)}" data-note-text="${esc(note)}" role="button" tabindex="0" title="Notiz anzeigen" aria-label="Notiz zu ${esc(name)} anzeigen"><ha-icon icon="mdi:information-outline"></ha-icon></span>`;
   }
 
   // Kleiner "· +30 Min. Bildschirmzeit"-Zusatz, gemeinsam genutzt vom
@@ -1129,6 +1172,14 @@
       // dialog flags: always starts closed on load.
       this._screenTimeInfoDialogOpen = false;
       this._screenTimeInfoMemberId = null;
+      // v0.52: "Notiz"-Dialog, geöffnet per Klick/Tap auf ein Notiz-Info-
+      // Symbol (siehe noteInfoIcon/_openNoteDialog) - ersetzt den bis dahin
+      // rein hover-basierten title-Tooltip, der auf einem Touchscreen nie
+      // ausgelöst wird. Rein lokal, kein Websocket-Roundtrip nötig - der
+      // Notiztext liegt bereits im jeweiligen Task-/Favoriten-Objekt vor.
+      this._noteDialogOpen = false;
+      this._noteDialogTitle = "";
+      this._noteDialogText = "";
     }
 
     setConfig(config) {
@@ -1588,6 +1639,20 @@
         weeks150: Number(sensor?.attributes?.streak_weeks_150 ?? 0),
         weeks200: Number(sensor?.attributes?.streak_weeks_200 ?? 0),
       };
+    }
+
+    // v0.52: "Wochensieger-Bonus" - household-wide bonus coin amount for the
+    // member with the most points_week once a calendar week ends (see
+    // CONF_TOP_SCORER_BONUS_COINS in const.py) - same "rides along on every
+    // member's points sensor" pattern as _streakBonus/_coinToPointsRate
+    // above. 0 means the feature is off, hiding the live leader crown
+    // entirely - see the topScorerId computation in _renderProgressSection.
+    _topScorerBonusCoins() {
+      if (!this._hass) return 0;
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      return Number(sensor?.attributes?.top_scorer_bonus_coins ?? 0);
     }
 
     // v0.32: whether the household-wide Urlaubsmodus switch is currently on
@@ -2220,6 +2285,22 @@
       this._render();
     }
 
+    // v0.52: opened by clicking/tapping a task's or Favorit's Notiz-Info-
+    // Symbol - see noteInfoIcon.
+    _openNoteDialog(title, note) {
+      this._noteDialogTitle = title;
+      this._noteDialogText = note;
+      this._noteDialogOpen = true;
+      this._render();
+    }
+
+    _closeNoteDialog() {
+      this._noteDialogOpen = false;
+      this._noteDialogTitle = "";
+      this._noteDialogText = "";
+      this._render();
+    }
+
     // --- Favoriten actions (v0.17) ---------------------------------------
 
     _openFavoriteForm(favoriteId) {
@@ -2507,6 +2588,14 @@
             </div>
             ${this._renderScreenTimeInfo()}
           </dialog>` : ""}
+          ${this._noteDialogOpen ? `
+          <dialog class="dialog" data-dialog="note-info">
+            <div class="section-header">
+              <h3>${esc(this._noteDialogTitle)}</h3>
+              <button type="button" class="link" data-action="close-note-info">Schließen</button>
+            </div>
+            <p>${esc(this._noteDialogText)}</p>
+          </dialog>` : ""}
         </ha-card>
       `;
       this._attachListenersOnce();
@@ -2633,10 +2722,20 @@
     // bug this fixes. Replaced with two native <select> dropdowns (hour/
     // minute, see _renderFallbackTimeInput below) - no typing needed at all,
     // "eine komfortablere Auswahloption" as requested, and every phone's
-    // on-screen keyboard/picker already handles a <select> natively. The
-    // date fallback (ha-date-input, "YYYY-MM-DD") is unaffected - a dash is
-    // available on every keyboard, and this report was about the time field
-    // specifically.
+    // on-screen keyboard/picker already handles a <select> natively.
+    //
+    // v0.52: the date fallback ("Datum"/"Ankerdatum", ha-date-input) used to
+    // stay a single plain text field requiring a literal "jjjj-mm-tt" with
+    // dashes - "a dash is available on every keyboard" turned out to be
+    // wrong for at least the iPhone's numeric keypad (inputMode="numeric"),
+    // which has no "-" key, exactly the same class of bug the time-field
+    // fallback above was already fixed for in v0.29. Replaced with the same
+    // "no typing at all" approach: three <select> dropdowns (Tag/Monat/
+    // Jahr, see _renderFallbackDateInput below), pre-filled with today's
+    // date by default (see todayIsoDate() and the ha-date-input
+    // value="..." attributes in _renderTaskForm/_renderOwnTaskForm) so a
+    // parent creating an "Einmalig" task usually doesn't have to touch this
+    // field at all.
     _replaceWithPlainDateTimeInput(el) {
       const isTime = el.tagName.toLowerCase() === "ha-time-input";
       const fieldAttr = el.getAttribute("data-field");
@@ -2653,15 +2752,48 @@
         return;
       }
 
-      const fallback = document.createElement("input");
-      fallback.type = "text";
-      fallback.inputMode = "numeric";
-      fallback.placeholder = "jjjj-mm-tt";
-      fallback.pattern = "\\d{4}-\\d{2}-\\d{2}";
-      fallback.autocomplete = "off";
-      if (fieldAttr) fallback.dataset.field = fieldAttr;
-      fallback.value = rawValue;
-      el.replaceWith(fallback);
+      el.replaceWith(this._renderFallbackDateInput(fieldAttr, rawValue));
+    }
+
+    // Builds the <span data-field data-fallback-date> composite described
+    // in _replaceWithPlainDateTimeInput's v0.52 comment above: three
+    // <select> dropdowns (day/month/year). Unlike _renderFallbackTimeInput,
+    // there is no "--"/unset option here and no cross-render partial-pick
+    // stashing needed - rawValue always already carries a complete
+    // "YYYY-MM-DD" (either the task's real stored anchor_date, or today's
+    // date via todayIsoDate() when it had none), so every render already
+    // has a full date to preselect and _applyFieldChange's anchor_date
+    // branch below always has all three parts to combine.
+    _renderFallbackDateInput(fieldAttr, rawValue) {
+      const today = todayIsoDate();
+      const [rawY, rawM, rawD] = (rawValue.includes("-") ? rawValue : today).split("-");
+      const pad2 = (n) => String(n).padStart(2, "0");
+      const dayOptions = Array.from({ length: 31 }, (_, i) => pad2(i + 1))
+        .map((v) => `<option value="${v}" ${v === rawD ? "selected" : ""}>${v}</option>`)
+        .join("");
+      const monthOptions = MONTH_LABELS
+        .map((label, i) => {
+          const v = pad2(i + 1);
+          return `<option value="${v}" ${v === rawM ? "selected" : ""}>${label}</option>`;
+        })
+        .join("");
+      // A modest ±5-year range around the current year - anchor_date is
+      // either a near-term "Einmalig" due date or an "Intervall (Tage)"
+      // reference point, never meaningfully far in the past or future.
+      const currentYear = new Date().getFullYear();
+      const yearOptions = Array.from({ length: 11 }, (_, i) => String(currentYear - 5 + i))
+        .map((v) => `<option value="${v}" ${v === rawY ? "selected" : ""}>${v}</option>`)
+        .join("");
+      const wrapper = document.createElement("span");
+      wrapper.className = "fallback-date-input";
+      if (fieldAttr) wrapper.dataset.field = fieldAttr;
+      wrapper.dataset.fallbackDate = "1";
+      wrapper.innerHTML = `
+        <select data-date-part="day" aria-label="Tag">${dayOptions}</select>
+        <select data-date-part="month" aria-label="Monat">${monthOptions}</select>
+        <select data-date-part="year" aria-label="Jahr">${yearOptions}</select>
+      `;
+      return wrapper;
     }
 
     // Builds the <span data-field data-fallback-time> composite described
@@ -2728,6 +2860,7 @@
         ["child-favorites", () => this._childFavoritesDialogOpen, () => this._closeChildFavoritesDialog()],
         ["member-completions", () => this._memberCompletionsDialogOpen, () => this._closeMemberCompletions()],
         ["screen-time-info", () => this._screenTimeInfoDialogOpen, () => this._closeScreenTimeInfo()],
+        ["note-info", () => this._noteDialogOpen, () => this._closeNoteDialog()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -3213,7 +3346,7 @@
                 <div class="row-main">
                   <span class="badge" style="background:${color}">${esc(label)}</span>
                   ${isMandatory ? `<span class="badge" style="background:var(--error-color, #db4437)">Pflicht</span>` : ""}
-                  <span class="name">${esc(task.name)}${noteInfoIcon(task.note)}</span>
+                  <span class="name">${esc(task.name)}${noteInfoIcon(task.name, task.note)}</span>
                   <span class="muted">${detail}${claimSuffix}</span>
                 </div>
                 <div class="row-actions">
@@ -3387,7 +3520,7 @@
               return `
                 <div class="row">
                   <div class="row-main">
-                    <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.note)}</span>
+                    <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.name, f.note)}</span>
                     <span class="muted">${esc(detailParts.join(" · "))}</span>
                   </div>
                   <div class="row-actions">
@@ -3445,7 +3578,7 @@
           return `
             <div class="row">
               <div class="row-main">
-                <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.note)}</span>
+                <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.name, f.note)}</span>
                 <span class="muted">${esc(detailParts.join(" · "))}</span>
               </div>
               <div class="row-actions">
@@ -3575,6 +3708,38 @@
       // noch strecken müsste.
       const barMaxPercent = 200;
 
+      // v0.52: "Wochensieger-Bonus" - live "wer führt gerade" Krone, siehe
+      // _topScorerBonusCoins/CONF_TOP_SCORER_BONUS_COINS in const.py. Rein
+      // clientseitig berechnet (jedes Mitglied hat points_week bereits über
+      // seinen eigenen Punkte-Sensor verfügbar) - der eigentliche
+      // Münzenbonus wird weiterhin serverseitig einmal je abgeschlossener
+      // Woche vergeben, siehe
+      // FamilyTasksCoordinator._async_process_top_scorer_coin_bonus. Die
+      // Krone erscheint nur, solange es einen einzigen, eindeutigen
+      // Erstplatzierten mit mehr als 0 Punkten gibt - bei Gleichstand (oder
+      // wenn niemand diese Woche etwas erledigt hat) bekäme am Wochenende
+      // ohnehin niemand den Bonus, siehe dieselbe Regel serverseitig. Nur
+      // relevant, wenn mehr als ein Balken angezeigt wird (members.length >
+      // 1) - ein einzelnes Kind (eigene Ansicht, oder ein Haushalt mit nur
+      // einem teilnehmenden Kind) hat naturgemäß nichts, wogegen es
+      // "führen" könnte.
+      const topScorerBonusCoins = this._topScorerBonusCoins();
+      let topScorerId = null;
+      if (topScorerBonusCoins > 0 && members.length > 1) {
+        let maxPoints = -1;
+        let leaderIds = [];
+        for (const { id } of members) {
+          const wp = Number(this._pointsSensorForMember(id)?.attributes?.points_week ?? 0);
+          if (wp > maxPoints) {
+            maxPoints = wp;
+            leaderIds = [id];
+          } else if (wp === maxPoints) {
+            leaderIds.push(id);
+          }
+        }
+        topScorerId = maxPoints > 0 && leaderIds.length === 1 ? leaderIds[0] : null;
+      }
+
       // v0.22: jede Zeile öffnet per Klick einen Dialog mit den diese Woche
       // von diesem Mitglied erledigten Aufgaben - siehe
       // _openMemberCompletions. role="button"/tabindex sorgen zusammen mit
@@ -3674,14 +3839,33 @@
               // v0.36: ein Streak kann jetzt für die 150%- und die
               // 200%-Marke unabhängig voneinander laufen - siehe
               // _streakWeeksFor.
+              //
+              // v0.52: statt als Text ("🔥 X Wochen (150%)") unter der
+              // Zeile wird der Streak-Bonus jetzt als eigenes Flammen-Badge
+              // direkt am Balken dargestellt (streakBadgesHtml unten) - an
+              // denselben 150%/200%-Positionen wie die Meilenstein-
+              // Münzbadges oben, nur unterhalb des Balkens statt oberhalb,
+              // damit sich beide nicht überlappen. Details (wievielte Woche
+              // in Folge, Bonushöhe) stehen weiterhin im title-Tooltip des
+              // Badges, ganz wie beim Meilenstein-Badge.
               const streakWeeks = this._streakWeeksFor(id);
-              const streakParts = [];
-              if (streak.bonus150 > 0 && streakWeeks.weeks150 > 0) {
-                streakParts.push(`🔥 ${streakWeeks.weeks150} Wochen (150%)`);
-              }
-              if (streak.bonus200 > 0 && streakWeeks.weeks200 > 0) {
-                streakParts.push(`🔥 ${streakWeeks.weeks200} Wochen (200%)`);
-              }
+              const streakBadgesHtml = [
+                streak.bonus150 > 0 && streakWeeks.weeks150 > 0
+                  ? { percent: 150, weeks: streakWeeks.weeks150, bonus: streak.bonus150 }
+                  : null,
+                streak.bonus200 > 0 && streakWeeks.weeks200 > 0
+                  ? { percent: 200, weeks: streakWeeks.weeks200, bonus: streak.bonus200 }
+                  : null,
+              ]
+                .filter(Boolean)
+                .map((tier) => {
+                  const edgeAligned = tier.percent === 200;
+                  const style = edgeAligned
+                    ? `right:0`
+                    : `left:${Math.min(100, (tier.percent / barMaxPercent) * 100)}%;transform:translateX(-50%)`;
+                  return `<div class="bar-streak-badge" style="${style}" title="${esc(`${tier.weeks}. Woche in Folge über ${tier.percent}% des Wochenziels → +${coinsLabel(tier.bonus)}/Woche`)}"><span class="flame">🔥</span>${esc(tier.weeks)}</div>`;
+                })
+                .join("");
               // v0.37: no longer shows the Münzen balance here - coins now
               // persist independently of the calendar week (see
               // WeeklyCoinConversionStateStore/coins_available in
@@ -3689,12 +3873,13 @@
               // *weekly* progress readout any more; the balance still shows
               // in the Belohnungen section (_renderRewardsContent) and on
               // each member's dedicated Münzen sensor. Just the remaining
-              // goal distance plus any streak - and only rendered at all
-              // when there's actually something to say.
+              // goal distance - and only rendered at all when there's
+              // actually something to say. v0.52: no longer also carries
+              // the streak text (moved to streakBadgesHtml above).
               const goalNote = goal > 0 && !goalReached
                 ? `noch ${esc(goal - weekPoints)} Pkt. bis zum Wochenziel`
                 : "";
-              const balanceLine = [goalNote, streakParts.join(" · ")].filter(Boolean).join(" · ");
+              const balanceLine = goalNote;
               // v0.45: "📱 X Min. heute" - the child's (or, for a parent,
               // each child's) estimated Handyzeit for today, per
               // _screenTimeInfoFor. Its own data-action/role="button" makes
@@ -3710,11 +3895,16 @@
               const screenTimeBadge = screenTimeInfo
                 ? `<div class="screen-time-badge" data-action="open-screen-time-info" data-member-id="${id}" role="button" tabindex="0" title="Berechnung anzeigen">📱 ${esc(screenTimeInfo.dailyMinutes)} Min. Handyzeit heute</div>`
                 : "";
+              // v0.52: "Wochensieger"-Krone neben dem Namen - siehe die
+              // topScorerId-Berechnung oben (vor progressList).
+              const topScorerBadge = id === topScorerId
+                ? `<span class="top-scorer-badge" title="${esc(`Aktuell die meisten Punkte diese Woche - bleibt das so bis Wochenende, gibt es +${coinsLabel(topScorerBonusCoins)}`)}">👑</span>`
+                : "";
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
                     <div class="row-top">
-                      <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}</span>
+                      <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}${topScorerBadge}</span>
                       <span class="points">${pointsLine}</span>
                     </div>
                     <div class="bar-wrap">
@@ -3724,6 +3914,7 @@
                         ${milestoneMarkersHtml}
                       </div>
                       ${milestoneBadgesHtml}
+                      ${streakBadgesHtml}
                     </div>
                     ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
                     ${screenTimeBadge}
@@ -3740,31 +3931,17 @@
       // milestoneBadgesHtml oben. Die Balken-Marke selbst (".bar-milestone")
       // trägt weiterhin einen title-Tooltip mit demselben Text, für
       // Screenreader/Hover.
-
-      // v0.36: "Streak-Bonus" Legende - siehe _streakBonus/
-      // CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in const.py.
-      // Nur Text-Zeilen (kein Balken-Marker, da die Schwelle sich
-      // wochenweise über die Zeit erstreckt, nicht auf einer einzelnen
-      // Woche liegt) - eine pro konfiguriertem Tier. streak selbst ist
-      // bereits weiter oben deklariert (vor progressList).
-      const streakLegendParts = [];
-      if (streak.bonus150 > 0) {
-        streakLegendParts.push(`150%: ${streak.requiredWeeks}× in Folge → +${coinsLabel(streak.bonus150)}`);
-      }
-      if (streak.bonus200 > 0) {
-        streakLegendParts.push(`200%: ${streak.requiredWeeks}× in Folge → +${coinsLabel(streak.bonus200)}`);
-      }
-      const streakLegend = streakLegendParts.length
-        ? `Streak-Bonus: ${streakLegendParts.join(" · ")}`
-        : "";
+      //
+      // v0.52: dieselbe Umstellung jetzt auch für den Streak-Bonus - die
+      // frühere Text-Legende ("Streak-Bonus: 150%: 2× in Folge → +X
+      // Münzen") entfällt ersatzlos, siehe streakBadgesHtml oben (pro
+      // Mitglied direkt am Balken statt einmal zentral als Text).
 
       return `
         <div class="section-header">
           <h3>Wochenfortschritt</h3>
           ${canToggle ? `<button class="link" data-action="toggle-hide-progress">Ausblenden</button>` : ""}
         </div>
-        ${goal > 0 ? `<p class="muted">Wochenziel: ${pointsLabel(goal)}</p>` : ""}
-        ${streakLegend ? `<p class="muted">${esc(streakLegend)}</p>` : ""}
         ${progressList}
       `;
     }
@@ -4195,10 +4372,10 @@
           ${f.recurrence.type === "interval_days" ? `
             <div class="grid2">
               <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
-              <label>Ankerdatum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>
+              <label>Ankerdatum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date || todayIsoDate())}"></ha-date-input></label>
             </div>` : ""}
           ${f.recurrence.type === "once" ? `
-            <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>` : ""}
+            <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date || todayIsoDate())}"></ha-date-input></label>` : ""}
           ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
           ${f.recurrence.type === "trigger" ? this._renderCompletionButtonField(f.completion_button_entity_id) : ""}
           ${f.recurrence.type === "battery" ? `
@@ -4257,10 +4434,10 @@
           ${f.recurrence.type === "interval_days" ? `
             <div class="grid2">
               <label>Intervall (Tage)<input type="number" min="1" data-field="recurrence.interval" value="${esc(f.recurrence.interval)}"></label>
-              <label>Ankerdatum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>
+              <label>Ankerdatum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date || todayIsoDate())}"></ha-date-input></label>
             </div>` : ""}
           ${f.recurrence.type === "once" ? `
-            <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date)}"></ha-date-input></label>` : ""}
+            <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date || todayIsoDate())}"></ha-date-input></label>` : ""}
 
           <div class="grid2">
             <label>Fällig um (optional)<ha-time-input clearable data-field="due_time" data-fallback-hour="${esc(f._dueTimeHour ?? "")}" data-fallback-minute="${esc(f._dueTimeMinute ?? "")}" value="${esc(f.due_time)}"></ha-time-input></label>
@@ -4514,10 +4691,16 @@
         .badge { display: inline-block; color: #fff; border-radius: 10px; padding: 1px 8px;
                  font-size: 0.75em; width: fit-content; }
         /* v0.49: kleines Info-Symbol neben Aufgaben-/Favoriten-Namen, sichtbar
-           nur wenn eine Notiz gesetzt ist (siehe noteInfoIcon) - der native
-           title-Tooltip zeigt den Text, ohne die Zeile selbst zu überfrachten. */
+           nur wenn eine Notiz gesetzt ist (siehe noteInfoIcon) - öffnet per
+           Klick/Tap einen kleinen Dialog mit dem Notiztext, ohne die Zeile
+           selbst zu überfrachten. v0.52: cursor/Fokus-Stil an einen echten
+           Button angepasst (siehe noteInfoIcon) statt des vorherigen rein
+           hover-basierten title-Tooltips, der auf einem Touchscreen nie
+           auslöste. */
         .note-info { display: inline-flex; width: 15px; height: 15px; vertical-align: -2px;
-                     margin-left: 2px; color: var(--secondary-text-color); cursor: help; }
+                     margin-left: 2px; color: var(--secondary-text-color); cursor: pointer; }
+        .note-info:hover { color: var(--primary-text-color); }
+        .note-info:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         .note-info ha-icon { width: 15px; height: 15px; --mdc-icon-size: 15px; }
         button { border: none; border-radius: 6px; padding: 6px 10px; font-size: 0.85em;
                  background: var(--primary-color); color: var(--text-primary-color, #fff); cursor: pointer; }
@@ -4536,6 +4719,10 @@
            ha-time-input isn't registered - see _renderFallbackTimeInput. */
         .fallback-time-input { display: inline-flex; align-items: center; gap: 4px; }
         .fallback-time-input select { width: auto; }
+        /* v0.52: day/month/year <select> fallback for anchor_date when
+           ha-date-input isn't registered - see _renderFallbackDateInput. */
+        .fallback-date-input { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+        .fallback-date-input select { width: auto; }
         .form input, .form select { padding: 6px; border-radius: 4px; border: 1px solid var(--divider-color, #ccc);
                                      background: var(--card-background-color, #fff); color: inherit; }
         .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -4572,7 +4759,10 @@
            bleibt unverändert 6px hoch und "overflow: hidden" (für die
            abgerundete .bar-fill-Ecke), die Badges schweben stattdessen
            oberhalb davon in diesem eigenen, nicht abgeschnittenen Wrapper. */
-        .bar-wrap { position: relative; padding-top: 15px; }
+        /* v0.52: padding-bottom added to fit .bar-streak-badge below the
+           bar, symmetric to the top padding .bar-milestone-badge already
+           uses above it. */
+        .bar-wrap { position: relative; padding-top: 15px; padding-bottom: 15px; }
         /* v0.50: a thin border so the (otherwise empty) track stays visible
            even at 0 points, i.e. before .bar-fill has any width at all -
            "Sorge dafür, dass der Fortschrittsbalken selbst auch sichtbar
@@ -4625,6 +4815,26 @@
                                 padding: 0 4px; white-space: nowrap; cursor: default; }
         .bar-milestone-badge .coin { font-size: 1.1em; }
         .bar-milestone-badge.reached { color: var(--primary-text-color); border-color: #ff6f00; }
+        /* v0.52: Streak-Bonus-Badge - dieselbe Optik wie .bar-milestone-badge
+           oben, nur unterhalb des Balkens ("bottom: 0" statt "top: 0", siehe
+           .bar-wrap's padding-bottom) statt oberhalb, damit sich beide Badge-
+           Reihen an derselben 150%/200%-Position nicht überlappen. Immer in
+           der "erreicht"-Farbe (nie ein neutraler Zustand) - anders als das
+           Meilenstein-Badge wird dieses Badge überhaupt nur gerendert,
+           solange der Streak diese Woche aktiv läuft (siehe streakBadgesHtml
+           in _renderProgressSection), es gibt also keinen "noch nicht
+           erreicht"-Zustand, den es von einem "erreicht"-Zustand optisch zu
+           unterscheiden gäbe. */
+        .bar-streak-badge { position: absolute; bottom: 0; display: inline-flex; align-items: center;
+                             gap: 1px; font-size: 0.65em; font-weight: 600; line-height: 1.4;
+                             color: var(--primary-text-color); background: var(--card-background-color, #fff);
+                             border: 1px solid #ff6f00; border-radius: 8px;
+                             padding: 0 4px; white-space: nowrap; cursor: default; }
+        .bar-streak-badge .flame { font-size: 1.1em; }
+        /* v0.52: "Wochensieger"-Krone neben dem Namen in der
+           Wochenfortschritt-Zeile - siehe topScorerBadge in
+           _renderProgressSection. */
+        .top-scorer-badge { margin-left: 2px; font-size: 0.9em; cursor: default; }
         .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
                        border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
         /* v0.36: aufklappbare Untergruppen für nicht fällige Aufgaben, nach
@@ -4858,6 +5068,10 @@
           this._openScreenTimeInfo(el.dataset.memberId);
         } else if (action === "close-screen-time-info") {
           this._closeScreenTimeInfo();
+        } else if (action === "open-note-info") {
+          this._openNoteDialog(el.dataset.noteTitle, el.dataset.noteText);
+        } else if (action === "close-note-info") {
+          this._closeNoteDialog();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.
@@ -5121,6 +5335,27 @@
           return;
         }
         target[leaf] = el.value ? el.value.slice(0, 5) : el.value;
+        return;
+      }
+
+      // v0.52: anchor_date ("Datum"/"Ankerdatum") comes from <ha-date-input>
+      // (or, when that isn't registered, its select-dropdown fallback - see
+      // _renderFallbackDateInput/_replaceWithPlainDateTimeInput) - same
+      // "wrapping element with no single .value of its own" shape as
+      // due_time/overdue_time's fallback-time handling above, just reading
+      // three child <select>s instead of two and combining them back into
+      // "YYYY-MM-DD".
+      if (leaf === "anchor_date") {
+        let obj = target;
+        for (let i = 0; i < path.length - 1; i++) obj = obj[path[i]];
+        if (el.dataset.fallbackDate) {
+          const day = el.querySelector('[data-date-part="day"]')?.value || "";
+          const month = el.querySelector('[data-date-part="month"]')?.value || "";
+          const year = el.querySelector('[data-date-part="year"]')?.value || "";
+          obj[leaf] = day && month && year ? `${year}-${month}-${day}` : "";
+          return;
+        }
+        obj[leaf] = el.value;
         return;
       }
 

@@ -55,6 +55,7 @@ from .storage import (
     RewardStorageCollection,
     StreakBonusStateStore,
     TaskStorageCollection,
+    TopScorerBonusStateStore,
     TriggerStateStore,
     VacationModeStateStore,
     async_create_battery_overrides_collection,
@@ -69,6 +70,7 @@ from .storage import (
     async_create_rewards_collection,
     async_create_streak_bonus_state_store,
     async_create_tasks_collection,
+    async_create_top_scorer_bonus_state_store,
     async_create_trigger_state_store,
     async_create_vacation_mode_state_store,
     async_member_id_for_context,
@@ -134,6 +136,7 @@ class FamilyTasksRuntimeData:
     vacation_mode_state: VacationModeStateStore
     coin_ledger: CoinLedgerStore
     deadline_notification_state: DeadlineNotificationStateStore
+    top_scorer_bonus_state: TopScorerBonusStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -180,6 +183,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     milestone_bonus_state = await async_create_milestone_bonus_state_store(hass)
     claim_state = await async_create_claim_state_store(hass)
     streak_bonus_state = await async_create_streak_bonus_state_store(hass)
+    # v0.52: see TopScorerBonusStateStore in storage.py.
+    top_scorer_bonus_state = await async_create_top_scorer_bonus_state_store(hass)
     # v0.32: CONF_VACATION_MODE_DEFAULT only ever seeds this the very first
     # time it loads with nothing on disk yet - see VacationModeStateStore in
     # storage.py.
@@ -208,6 +213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         vacation_mode_state,
         coin_ledger,
         deadline_notification_state,
+        top_scorer_bonus_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -227,6 +233,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         vacation_mode_state=vacation_mode_state,
         coin_ledger=coin_ledger,
         deadline_notification_state=deadline_notification_state,
+        top_scorer_bonus_state=top_scorer_bonus_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence

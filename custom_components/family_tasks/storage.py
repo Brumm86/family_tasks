@@ -76,6 +76,7 @@ from .const import (
     STORAGE_KEY_REWARD_REDEMPTIONS,
     STORAGE_KEY_REWARDS,
     STORAGE_KEY_STREAK_BONUS_STATE,
+    STORAGE_KEY_TOP_SCORER_BONUS_STATE,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
     STORAGE_KEY_VACATION_MODE,
@@ -2626,6 +2627,61 @@ class StreakBonusStateStore:
 async def async_create_streak_bonus_state_store(hass: HomeAssistant) -> StreakBonusStateStore:
     """Create and load the Streak-coin-bonus state store."""
     store = StreakBonusStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class TopScorerBonusStateStore:
+    """Household-wide cursor for the weekly "Wochensieger-Bonus".
+
+    See CONF_TOP_SCORER_BONUS_COINS in const.py and
+    FamilyTasksCoordinator._async_process_top_scorer_coin_bonus. Unlike
+    StreakBonusStateStore (per member, per tier), there is at most one
+    winner determined per fully-elapsed calendar week, household-wide - so
+    this only ever needs a single cursor ("processed_through": every week
+    strictly before this one has already been judged, whether or not it
+    actually had a winner), not the per-member/per-tier shape that store
+    uses. Not a StorageCollection, coordinator-internal bookkeeping never
+    edited by the user, same as StreakBonusStateStore/MilestoneBonusStateStore.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY_TOP_SCORER_BONUS_STATE, minor_version=STORAGE_VERSION_MINOR
+        )
+        self._state: dict[str, Any] = {}
+
+    async def async_load(self) -> None:
+        """Load the household-wide cursor from disk."""
+        self._state = await self._store.async_load() or {}
+
+    @property
+    def processed_through(self) -> datetime | None:
+        """The UTC start-of-week instant every week before has already been judged, if any."""
+        raw = self._state.get("processed_through")
+        return dt_util.parse_datetime(raw) if raw else None
+
+    async def async_set_processed_through(self, processed_through: datetime) -> None:
+        """Persist the updated cursor after catching up on one or more elapsed weeks."""
+        self._state["processed_through"] = processed_through.isoformat()
+        await self._store.async_save(self._state)
+
+    async def async_reset(self) -> None:
+        """Clear the cursor - see SERVICE_RESET_POINTS in const.py.
+
+        No ``member_id`` parameter (unlike the per-member stores above) -
+        this is household-wide state, not tied to any one member, so a
+        points reset always clears it entirely regardless of which member
+        (or "every member") was reset; the next elapsed week is then judged
+        fresh from "last week" again, same as a brand-new household.
+        """
+        self._state = {}
+        await self._store.async_save(self._state)
+
+
+async def async_create_top_scorer_bonus_state_store(hass: HomeAssistant) -> TopScorerBonusStateStore:
+    """Create and load the Wochensieger-Bonus cursor store."""
+    store = TopScorerBonusStateStore(hass)
     await store.async_load()
     return store
 
