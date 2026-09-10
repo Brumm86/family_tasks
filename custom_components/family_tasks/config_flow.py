@@ -281,14 +281,17 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 ),
                 # v0.36: "Streak-Bonus" - replaces the old single
                 # configurable-threshold, points-based version (v0.32). Bonus
-                # coins for *maintaining* a fixed checkpoint (150% or 200% of
-                # the weekly goal) for more than streak_bonus_required_weeks
+                # coins for reaching/maintaining a fixed checkpoint (150% or
+                # 200% of the weekly goal) for streak_bonus_required_weeks
                 # consecutive calendar weeks - one bonus amount per tier, so
                 # a household can reward the two checkpoints differently. See
                 # CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in
                 # const.py and
                 # FamilyTasksCoordinator._async_process_streak_coin_bonus. A
-                # tier is off exactly when its bonus is 0.
+                # tier is off exactly when its bonus is 0. v0.53: paid at
+                # most twice per streak (at streak_bonus_required_weeks and
+                # streak_bonus_required_weeks + 1 consecutive weeks), not
+                # every further week - see that method's docstring.
                 vol.Optional(
                     CONF_STREAK_BONUS_REQUIRED_WEEKS,
                     default=current.get(

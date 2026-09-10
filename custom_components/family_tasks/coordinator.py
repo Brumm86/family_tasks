@@ -2532,12 +2532,20 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         every fully-elapsed calendar week since that tier's
         StreakBonusStateStore cursor last stopped, oldest first, judging
         each one against the tier's checkpoint and incrementing/resetting a
-        per-tier streak counter. Once a tier's counter reaches
-        streak_bonus_required_weeks, *every* further consecutive week that
-        still meets that checkpoint credits the bonus again (rolling) - a
-        maintained streak, not a one-off reward for first reaching it. A
-        no-op if goal_points is 0 - both checkpoints are a percentage of the
-        weekly goal.
+        per-tier streak counter. v0.53: the bonus is now paid at most twice
+        per streak - once when the counter first reaches
+        streak_bonus_required_weeks, and a second, final time when it
+        reaches streak_bonus_required_weeks + 1 - not every further week the
+        streak continues. The old "rolling forever" behaviour (v0.36-v0.52)
+        made an indefinitely long streak worth an unbounded number of
+        payouts, one every week; capping it at two matches the three-dot
+        streak display next to a member's name in the card, which also
+        tops out at the same two milestones (see the streak-dots markup in
+        family-tasks-card.js). A streak that keeps going past
+        streak_bonus_required_weeks + 1 earns nothing further until it
+        breaks (a week under the checkpoint resets the counter to 0) and is
+        built back up from scratch. A no-op if goal_points is 0 - both
+        checkpoints are a percentage of the weekly goal.
 
         A brand-new member (or a tier's very first run) starts its cursor at
         "last week" rather than the beginning of time, so turning a bonus on
@@ -2599,7 +2607,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         percent: int,
         coin_reason: str,
     ) -> None:
-        """Catch up one member's Streak-Bonus cursor, for one tier, through every elapsed week."""
+        """Catch up one member's Streak-Bonus cursor, for one tier, through every elapsed week.
+
+        v0.53: pays out at most twice per streak (required_weeks and
+        required_weeks + 1 consecutive qualifying weeks), then caps - see
+        the "if streak_count in (...)" check below and the docstring of
+        _async_process_streak_coin_bonus for why.
+        """
         state = self.streak_bonus_state.get(member_id, tier)
         if state and state.get("processed_through"):
             cursor = dt_util.parse_datetime(state["processed_through"]) or (
@@ -2622,7 +2636,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 streak_count += 1
             else:
                 streak_count = 0
-            if streak_count >= required_weeks:
+            # v0.53: paid at most twice per streak - once on first
+            # reaching required_weeks, once more on reaching
+            # required_weeks + 1 - then capped (see the docstring of
+            # _async_process_streak_coin_bonus above for the full
+            # reasoning). Any streak_count beyond required_weeks + 1 simply
+            # matches neither value below, so no further payout happens
+            # until the streak breaks (streak_count resets to 0) and is
+            # built back up.
+            if streak_count in (required_weeks, required_weeks + 1):
+                is_final_payout = streak_count == required_weeks + 1
                 await self.coin_ledger.async_add_entry(
                     member_id=member_id,
                     amount=bonus_coins,
@@ -2630,6 +2653,13 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     note=(
                         f"Streak-Bonus: {streak_count}. Woche in Folge "
                         f"über der {percent}%-Marke"
+                        + (
+                            " (letzte Auszahlung dieser Serie - weitere "
+                            "Wochen in Folge bringen keinen zusätzlichen "
+                            "Bonus mehr)"
+                            if is_final_payout
+                            else ""
+                        )
                     ),
                 )
                 _LOGGER.debug(

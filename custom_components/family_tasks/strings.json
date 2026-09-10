@@ -30,8 +30,8 @@
           "milestone_150_bonus_coins": "Meilensteinbonus coins at 150% of weekly goal",
           "milestone_200_bonus_coins": "Meilensteinbonus coins at 200% of weekly goal",
           "streak_bonus_required_weeks": "Consecutive weeks required for a Streak-Bonus",
-          "streak_150_bonus_coins": "Streak-Bonus coins per week maintaining 150%",
-          "streak_200_bonus_coins": "Streak-Bonus coins per week maintaining 200%",
+          "streak_150_bonus_coins": "Streak-Bonus coins per payout while maintaining 150% (paid up to twice per streak)",
+          "streak_200_bonus_coins": "Streak-Bonus coins per payout while maintaining 200% (paid up to twice per streak)",
           "coin_to_points_rate": "Points awarded per coin converted in the reward shop (0 disables conversion)",
           "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week (0 disables it; no bonus on a tie)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"

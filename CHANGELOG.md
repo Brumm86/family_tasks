@@ -2,6 +2,16 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.53.0] - 2026-09-10
+
+### Added
+- **Wochensieger-Bonus: Klickbare Krone + permanenter Info-Punkt**: die seit v0.52 gezeigte Krone (👑) neben dem Namen der aktuell führenden Person ist jetzt anklickbar/antippbar und öffnet einen kleinen Dialog mit der geltenden Wochensieger-Regel (Bonus-Münzen, Gleichstand-Regel, Auszahlungszeitpunkt) statt nur eines Hover-Tooltips. Zusätzlich zeigt der Abschnittskopf "Wochenfortschritt" jetzt ein permanentes kleines Info-Symbol (sichtbar sobald die Funktion konfiguriert ist), das denselben Dialog öffnet - anders als die Krone (nur bei eindeutiger Führung mit mehr als 0 Punkten sichtbar) bleibt die Regel dadurch auch bei Gleichstand oder ganz ohne Punkte jederzeit nachlesbar.
+- **Drei Streak-Punkte neben dem Namen**: zusätzlich zum bestehenden Flammen-Badge am Fortschrittsbalken zeigt die Karte jetzt drei kleine, farbige Punkte direkt neben dem Namen jedes Kindes - Fortschritt der laufenden Serie für die jeweils höhere aktuell laufende Streak-Schwelle (200 % falls aktiv, sonst 150 %). Punkt 1 leuchtet ab einer begonnenen Serie, Punkt 2 ab der ersten Bonus-Auszahlung, Punkt 3 ab der zweiten, letzten Auszahlung (siehe Streak-Bonus-Deckelung unten) - jede Position in einer eigenen, zunehmend kräftigeren Farbe; ohne laufende Serie bleiben alle drei grau/leer. Antippen öffnet einen Dialog mit Schwelle, benötigten Wochen, aktuellem Stand und resultierendem Bonus.
+- **Manuell erteilte/abgezogene Punkte jetzt im "diese Woche erledigt"-Dialog sichtbar**: bisher wurden alle über `MANUAL_POINTS_TASK_ID` verbuchten Einträge (bewusste Punktevergabe/-abzug, Ablehnungs-Abzug bei nicht freigegebener Kind-Erledigung, Abzug bei abgelaufener Aufgabenpool-Reservierung) aus der wöchentlichen Erledigt-Liste ausgeblendet, obwohl sie ganz normal in die Wochenpunkte einfließen. Alle drei erscheinen jetzt dort mit ihrem jeweils schon vorhandenen, unterscheidbaren Text (eingegebene Notiz bzw. "Punkte erteilt/abgezogen", "Nicht freigegeben: <Aufgabe>", "Reservierung abgelaufen: <Aufgabe>") und ihrem Punktwert - ohne die separate Ablehnungs-Begründung, die weiterhin nur direkt an der betroffenen Aufgabe angezeigt wird. Meilenstein-/Streak-Bonus- und Korrektur-Einträge bleiben weiterhin ausgeblendet.
+
+### Changed
+- **Streak-Bonus jetzt auf zwei Auszahlungen je Serie gedeckelt**: bisher wurde der konfigurierte Streak-Bonus *jede* abgeschlossene Woche erneut ausgezahlt, sobald eine Serie die erforderliche Wochenzahl erreicht hatte ("rollend", potenziell unbegrenzt). Neu: die Auszahlung erfolgt genau zweimal je Serie - einmal beim Erreichen der erforderlichen Wochenzahl, ein zweites, letztes Mal eine Woche später. Läuft die Serie darüber hinaus weiter, bleibt es bei diesen zwei Auszahlungen, bis die Serie abreißt und neu beginnt. Passt sich weiterhin an die konfigurierbare Einstellung "Erforderliche Wochen in Folge" an (Standard 2, Auszahlungen also bei Woche 2 und 3) und spiegelt sich in den drei neuen Streak-Punkten oben.
+
 ## [0.52.0] - 2026-09-09
 
 ### Fixed

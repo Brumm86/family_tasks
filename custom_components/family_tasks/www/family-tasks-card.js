@@ -1172,6 +1172,18 @@
       // dialog flags: always starts closed on load.
       this._screenTimeInfoDialogOpen = false;
       this._screenTimeInfoMemberId = null;
+      // v0.53: "Wochensieger-Bonus" info dialog, opened either by clicking
+      // the leader's Kronen-Badge or the new permanent Info-Symbol in the
+      // "Wochenfortschritt"-Abschnittskopf (siehe topScorerBadge/den neuen
+      // Info-Link in _renderProgressSection) - rein lokal, kein Websocket-
+      // Roundtrip nötig, da alles bereits auf dem Punkte-Sensor jedes
+      // Mitglieds mitreist (siehe _topScorerBonusCoins).
+      this._topScorerInfoDialogOpen = false;
+      // v0.53: "Streak-Bonus" info dialog, geöffnet per Klick auf die drei
+      // Streak-Punkte neben einem Namen - siehe streakDotsHtml in
+      // _renderProgressSection/_activeStreakTierFor.
+      this._streakInfoDialogOpen = false;
+      this._streakInfoMemberId = null;
       // v0.52: "Notiz"-Dialog, geöffnet per Klick/Tap auf ein Notiz-Info-
       // Symbol (siehe noteInfoIcon/_openNoteDialog) - ersetzt den bis dahin
       // rein hover-basierten title-Tooltip, der auf einem Touchscreen nie
@@ -1638,6 +1650,35 @@
       return {
         weeks150: Number(sensor?.attributes?.streak_weeks_150 ?? 0),
         weeks200: Number(sensor?.attributes?.streak_weeks_200 ?? 0),
+      };
+    }
+
+    // v0.53: picks which Streak-Bonus tier (150%/200%) to represent for one
+    // member with a single set of "streak dots"/info dialog - the higher
+    // currently-running tier if one is running (weeks200 > 0 wins, since
+    // reaching 200% implies 150% was already held too), otherwise whichever
+    // tier is actually configured (preferring 200%, the "bigger" one), so a
+    // member with no streak running yet still gets a sensible tier to show
+    // as all-gray/empty rather than nothing at all. Shared by the dots
+    // (_renderProgressSection) and their info dialog (_renderStreakInfo) so
+    // both always agree on which tier/numbers they're describing.
+    _activeStreakTierFor(memberId) {
+      const streak = this._streakBonus();
+      const weeks = this._streakWeeksFor(memberId);
+      const enabled = streak.bonus150 > 0 || streak.bonus200 > 0;
+      const tier = weeks.weeks200 > 0
+        ? "200"
+        : weeks.weeks150 > 0
+          ? "150"
+          : streak.bonus200 > 0
+            ? "200"
+            : "150";
+      return {
+        enabled,
+        tier,
+        requiredWeeks: streak.requiredWeeks,
+        currentWeeks: tier === "200" ? weeks.weeks200 : weeks.weeks150,
+        bonus: tier === "200" ? streak.bonus200 : streak.bonus150,
       };
     }
 
@@ -2285,6 +2326,34 @@
       this._render();
     }
 
+    // v0.53: opened by clicking the leader's crown badge, or the permanent
+    // info icon in the "Wochenfortschritt" section header - see
+    // topScorerBadge/the info link in _renderProgressSection. Purely local,
+    // same reasoning as _openScreenTimeInfo above.
+    _openTopScorerInfo() {
+      this._topScorerInfoDialogOpen = true;
+      this._render();
+    }
+
+    _closeTopScorerInfo() {
+      this._topScorerInfoDialogOpen = false;
+      this._render();
+    }
+
+    // v0.53: opened by clicking a member's three streak dots - see
+    // streakDotsHtml in _renderProgressSection.
+    _openStreakInfo(memberId) {
+      this._streakInfoMemberId = memberId;
+      this._streakInfoDialogOpen = true;
+      this._render();
+    }
+
+    _closeStreakInfo() {
+      this._streakInfoDialogOpen = false;
+      this._streakInfoMemberId = null;
+      this._render();
+    }
+
     // v0.52: opened by clicking/tapping a task's or Favorit's Notiz-Info-
     // Symbol - see noteInfoIcon.
     _openNoteDialog(title, note) {
@@ -2588,6 +2657,22 @@
             </div>
             ${this._renderScreenTimeInfo()}
           </dialog>` : ""}
+          ${this._topScorerInfoDialogOpen ? `
+          <dialog class="dialog" data-dialog="top-scorer-info">
+            <div class="section-header">
+              <h3>Wochensieger-Bonus</h3>
+              <button type="button" class="link" data-action="close-top-scorer-info">Schließen</button>
+            </div>
+            ${this._renderTopScorerInfo()}
+          </dialog>` : ""}
+          ${this._streakInfoDialogOpen ? `
+          <dialog class="dialog" data-dialog="streak-info">
+            <div class="section-header">
+              <h3>${esc(this._memberName(this._streakInfoMemberId))}: Streak-Bonus</h3>
+              <button type="button" class="link" data-action="close-streak-info">Schließen</button>
+            </div>
+            ${this._renderStreakInfo()}
+          </dialog>` : ""}
           ${this._noteDialogOpen ? `
           <dialog class="dialog" data-dialog="note-info">
             <div class="section-header">
@@ -2860,6 +2945,8 @@
         ["child-favorites", () => this._childFavoritesDialogOpen, () => this._closeChildFavoritesDialog()],
         ["member-completions", () => this._memberCompletionsDialogOpen, () => this._closeMemberCompletions()],
         ["screen-time-info", () => this._screenTimeInfoDialogOpen, () => this._closeScreenTimeInfo()],
+        ["top-scorer-info", () => this._topScorerInfoDialogOpen, () => this._closeTopScorerInfo()],
+        ["streak-info", () => this._streakInfoDialogOpen, () => this._closeStreakInfo()],
         ["note-info", () => this._noteDialogOpen, () => this._closeNoteDialog()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
@@ -3897,14 +3984,38 @@
                 : "";
               // v0.52: "Wochensieger"-Krone neben dem Namen - siehe die
               // topScorerId-Berechnung oben (vor progressList).
+              // v0.53: die Krone ist jetzt anklickbar (data-action, wie
+              // schon das Handyzeit-Abzeichen oben) - öffnet einen Dialog
+              // mit der Wochensieger-Regel statt nur eines Hover-Tooltips
+              // (das auf einem Touchscreen ohnehin nie ausgelöst wird,
+              // gleiche Motivation wie beim Notiz-Info-Symbol in v0.52).
               const topScorerBadge = id === topScorerId
-                ? `<span class="top-scorer-badge" title="${esc(`Aktuell die meisten Punkte diese Woche - bleibt das so bis Wochenende, gibt es +${coinsLabel(topScorerBonusCoins)}`)}">👑</span>`
+                ? `<span class="top-scorer-badge" data-action="open-top-scorer-info" role="button" tabindex="0" title="${esc(`Aktuell die meisten Punkte diese Woche - bleibt das so bis Wochenende, gibt es +${coinsLabel(topScorerBonusCoins)}. Antippen für Details.`)}">👑</span>`
+                : "";
+              // v0.53: drei kleine "Streak-Punkte" neben dem Namen - zeigen
+              // den Fortschritt zur (und die Deckelung der) Streak-Bonus-
+              // Auszahlung für die aktuell höhere laufende Schwelle dieses
+              // Mitglieds. Punkt 1 leuchtet ab einer laufenden Serie (>= 1
+              // abgeschlossene qualifizierende Woche), Punkt 2 ab der
+              // ersten Auszahlung (requiredWeeks), Punkt 3 ab der zweiten,
+              // letzten Auszahlung (requiredWeeks + 1) - danach kann die
+              // Serie beliebig weiterlaufen, alle drei Punkte bleiben aber
+              // einfach auf ihrem Maximum stehen, da kein weiterer Bonus
+              // mehr folgt (siehe _async_process_member_streak_tier in
+              // coordinator.py). Unabhängig von members.length - anders als
+              // die Krone braucht ein Streak keine Konkurrenz.
+              const activeStreak = this._activeStreakTierFor(id);
+              const streakDotThresholds = [1, activeStreak.requiredWeeks, activeStreak.requiredWeeks + 1];
+              const streakDotsHtml = activeStreak.enabled
+                ? `<span class="streak-dots" data-action="open-streak-info" data-member-id="${id}" role="button" tabindex="0" title="Streak-Bonus - Details antippen">${streakDotThresholds
+                    .map((threshold, index) => `<span class="streak-dot${activeStreak.currentWeeks >= threshold ? ` streak-dot-${index + 1}` : ""}"></span>`)
+                    .join("")}</span>`
                 : "";
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
                   <div class="row-main">
                     <div class="row-top">
-                      <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}${topScorerBadge}</span>
+                      <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}${streakDotsHtml}${topScorerBadge}</span>
                       <span class="points">${pointsLine}</span>
                     </div>
                     <div class="bar-wrap">
@@ -3937,9 +4048,21 @@
       // Münzen") entfällt ersatzlos, siehe streakBadgesHtml oben (pro
       // Mitglied direkt am Balken statt einmal zentral als Text).
 
+      // v0.53: permanentes Info-Symbol neben der Überschrift, das denselben
+      // Wochensieger-Dialog öffnet wie die Krone selbst - anders als die
+      // Krone (nur sichtbar, solange es eine eindeutige führende Person mit
+      // mehr als 0 Punkten gibt) ist dieses Symbol immer da, sobald die
+      // Funktion überhaupt konfiguriert ist, damit die Regel auch bei
+      // Gleichstand oder ganz ohne Punkte nachlesbar bleibt. Nutzt dieselbe
+      // ".note-info"-Optik wie die Notiz-Info-Symbole (v0.52) statt eines
+      // eigenen Stils.
+      const topScorerInfoIcon = topScorerBonusCoins > 0
+        ? `<span class="note-info" data-action="open-top-scorer-info" role="button" tabindex="0" title="Wochensieger-Bonus - Details anzeigen" aria-label="Wochensieger-Bonus - Details anzeigen"><ha-icon icon="mdi:information-outline"></ha-icon></span>`
+        : "";
+
       return `
         <div class="section-header">
-          <h3>Wochenfortschritt</h3>
+          <h3>Wochenfortschritt${topScorerInfoIcon}</h3>
           ${canToggle ? `<button class="link" data-action="toggle-hide-progress">Ausblenden</button>` : ""}
         </div>
         ${progressList}
@@ -4004,6 +4127,50 @@
         <p class="points"><strong>${esc(dailyMinutes)} Minuten Handyzeit heute</strong></p>
         ${malusLine}
         <p class="muted">Schätzung auf Basis des Wochenfortschritts der Vorwoche - dieser Wert steht für die gesamte laufende Woche fest und ändert sich erst wieder mit dem nächsten Wochenwechsel. Die tatsächliche Gewährung übernimmt weiterhin die Handyzeit-Automation.</p>
+      `;
+    }
+
+    // v0.53: Inhalt des "Wochensieger-Bonus"-Infofensters, geöffnet per
+    // Klick entweder auf die Krone einer aktuell führenden Person oder auf
+    // das permanente Info-Symbol im "Wochenfortschritt"-Abschnittskopf -
+    // siehe _openTopScorerInfo. Der zweite Weg existiert extra dafür, dass
+    // die Regel auch bei Gleichstand oder ganz ohne Punkte nachlesbar
+    // bleibt, wenn also gerade keine Krone zu sehen ist.
+    _renderTopScorerInfo() {
+      const coins = this._topScorerBonusCoins();
+      if (coins <= 0) {
+        return `<p class="muted">Kein Wochensieger-Bonus konfiguriert.</p>`;
+      }
+      return `
+        <p>Wer am Ende der Woche (Sonntag Mitternacht) die meisten Punkte gesammelt hat, erhält <strong>${esc(coinsLabel(coins))}</strong>.</p>
+        <p class="muted">Es zählt der absolute Punktestand der Woche, nicht der Fortschritt zu einem Wochenziel. Bei Gleichstand - auch wenn niemand diese Woche etwas erledigt hat - wird der Bonus an niemanden vergeben. Ausgezahlt wird erst, nachdem die Woche vollständig abgelaufen ist.</p>
+      `;
+    }
+
+    // v0.53: Inhalt des "Streak-Bonus"-Infofensters, geöffnet per Klick auf
+    // die drei Streak-Punkte neben einem Namen - siehe streakDotsHtml in
+    // _renderProgressSection/_activeStreakTierFor (dieselbe Tier-Auswahl-
+    // Logik, damit Punkte und Dialog nie auseinanderlaufen).
+    _renderStreakInfo() {
+      const memberId = this._streakInfoMemberId;
+      if (!memberId) return "";
+      const info = this._activeStreakTierFor(memberId);
+      if (!info.enabled) {
+        return `<p class="muted">Kein Streak-Bonus konfiguriert.</p>`;
+      }
+      if (info.currentWeeks <= 0) {
+        return `<p class="muted">Aktuell läuft keine Serie - ${esc(info.requiredWeeks)} Wochen in Folge mit mindestens ${esc(info.tier)}% des Wochenziels starten eine neue.</p>`;
+      }
+      const payoutsSoFar = info.currentWeeks >= info.requiredWeeks + 1 ? 2 : info.currentWeeks >= info.requiredWeeks ? 1 : 0;
+      const payoutsLabel = payoutsSoFar === 0 ? "noch nichts" : payoutsSoFar === 1 ? "einmal" : "zweimal (Maximum erreicht)";
+      const cappedNote = info.currentWeeks > info.requiredWeeks + 1
+        ? `<p class="muted">Die Serie läuft weiter, bringt ab hier aber keinen weiteren Bonus mehr - er ist auf zwei Auszahlungen je Serie gedeckelt.</p>`
+        : "";
+      return `
+        <p>${esc(info.currentWeeks)}. Woche in Folge über der ${esc(info.tier)}%-Marke des Wochenziels.</p>
+        <p>Ab ${esc(info.requiredWeeks)} Wochen in Folge gibt es einmalig <strong>${esc(coinsLabel(info.bonus))}</strong>, ab ${esc(info.requiredWeeks + 1)} Wochen in Folge ein zweites (und letztes) Mal - danach ist der Bonus für diese Serie ausgeschöpft.</p>
+        <p class="muted">Bisher in dieser Serie ausgezahlt: ${payoutsLabel}.</p>
+        ${cappedNote}
       `;
     }
 
@@ -4834,7 +5001,23 @@
         /* v0.52: "Wochensieger"-Krone neben dem Namen in der
            Wochenfortschritt-Zeile - siehe topScorerBadge in
            _renderProgressSection. */
-        .top-scorer-badge { margin-left: 2px; font-size: 0.9em; cursor: default; }
+        .top-scorer-badge { margin-left: 2px; font-size: 0.9em; cursor: pointer; }
+        .top-scorer-badge:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+        /* v0.53: drei kleine "Streak-Punkte" neben dem Namen - siehe
+           streakDotsHtml/_activeStreakTierFor in _renderProgressSection.
+           Leer/grau (kein eigenes Modifier, nur die Basisfarbe) solange die
+           jeweilige Woche/Schwelle noch nicht erreicht ist; die drei
+           erreichten Zustände (.streak-dot-1/-2/-3) werden zunehmend
+           kräftiger, damit auf einen Blick sichtbar ist, wie weit die Serie
+           gediehen ist - Punkt 3 markiert zugleich die gedeckelte, letzte
+           Auszahlung. */
+        .streak-dots { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: 1px; cursor: pointer; }
+        .streak-dots:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+        .streak-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                      background: var(--disabled-text-color, #bdbdbd); opacity: 0.5; }
+        .streak-dot-1 { background: #ffcc80; opacity: 1; }
+        .streak-dot-2 { background: #ffa726; opacity: 1; }
+        .streak-dot-3 { background: #ff6f00; opacity: 1; }
         .confirm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px;
                        border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; }
         /* v0.36: aufklappbare Untergruppen für nicht fällige Aufgaben, nach
@@ -5068,6 +5251,14 @@
           this._openScreenTimeInfo(el.dataset.memberId);
         } else if (action === "close-screen-time-info") {
           this._closeScreenTimeInfo();
+        } else if (action === "open-top-scorer-info") {
+          this._openTopScorerInfo();
+        } else if (action === "close-top-scorer-info") {
+          this._closeTopScorerInfo();
+        } else if (action === "open-streak-info") {
+          this._openStreakInfo(el.dataset.memberId);
+        } else if (action === "close-streak-info") {
+          this._closeStreakInfo();
         } else if (action === "open-note-info") {
           this._openNoteDialog(el.dataset.noteTitle, el.dataset.noteText);
         } else if (action === "close-note-info") {

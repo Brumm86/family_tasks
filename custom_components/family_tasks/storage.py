@@ -1661,11 +1661,28 @@ def async_setup_websocket_api(
         figure already shown on the leaderboard. Not admin-restricted - any
         logged-in user may look up any member's completions, same as the
         leaderboard/points sensors themselves are already visible to
-        everyone regardless of role. Excludes MANUAL_POINTS_TASK_ID (v0.24),
-        MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID, and
-        POINTS_CORRECTION_TASK_ID (v0.30) entries - none of these is a
-        completed task, even though all count normally toward the member's
-        point totals.
+        everyone regardless of role.
+
+        Still excludes MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID
+        and POINTS_CORRECTION_TASK_ID (v0.30) entries - none of these is
+        attributable to a single deliberate action a parent/child took, so
+        surfacing them here would be confusing. MANUAL_POINTS_TASK_ID
+        entries (v0.24), however, ARE included as of v0.53 - explicit user
+        request to show them "unter den erledigten Aufgaben" with their
+        point value and note. This sentinel covers three distinct cases,
+        all of which now show up: points a parent deliberately awarded or
+        deducted via ws_award_points (task_name is the entered note, or a
+        generic "Punkte erteilt"/"Punkte abgezogen" fallback - see that
+        handler), the CONFIRMATION_REJECTION_PENALTY_POINTS deduction
+        logged by async_skip_task when a parent rejects a child's claimed
+        completion ("Nicht freigegeben: <Aufgabe>" - its own separate
+        rejection-reason note is deliberately NOT surfaced here, only in
+        task.last_rejection_note, per explicit user request), and the
+        CLAIM_PENALTY_POINTS deduction _async_expire_claim logs for an
+        expired Aufgabenpool reservation ("Reservierung abgelaufen:
+        <Aufgabe>"). All three already carry a distinguishing task_name and
+        their points_awarded, so no new response field was needed - they
+        render through the exact same row as a real task completion.
         """
         member_id = msg["member_id"]
         if member_id not in members.data:
@@ -1688,8 +1705,12 @@ def async_setup_websocket_api(
         for entry in completions.entries:
             if entry.get("completed_by_member_id") != member_id:
                 continue
+            # v0.53: MANUAL_POINTS_TASK_ID removed from this exclusion -
+            # see the docstring above for why. The bonus/correction
+            # sentinels stay excluded; none of them is a deliberate,
+            # single-action point award/deduction the way the other three
+            # MANUAL_POINTS_TASK_ID cases are.
             if entry.get("skipped") or entry.get("task_id") in (
-                MANUAL_POINTS_TASK_ID,
                 MILESTONE_BONUS_1_TASK_ID,
                 MILESTONE_BONUS_2_TASK_ID,
                 POINTS_CORRECTION_TASK_ID,
