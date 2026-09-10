@@ -847,7 +847,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # is nothing left for it to correct.
         await self._async_process_milestone_coin_bonus(start_of_week, weekly_progress_goal_points)
         await self._async_process_streak_coin_bonus(start_of_week, weekly_progress_goal_points)
-        await self._async_process_top_scorer_coin_bonus(start_of_week)
+        await self._async_process_top_scorer_coin_bonus(start_of_week, weekly_progress_goal_points)
 
         # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
         # storage.py. Read once per refresh, same pattern as
@@ -2369,9 +2369,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         v0.36: see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES/PROGRESS_THRESHOLD_PERCENTS
         in const.py and MemberSummaryData.screen_time_tick_adjustment_minutes.
         Banded on a progress percent (``last_week_points`` as a percentage of
-        goal_points) against the fixed 0%/50%/100% bands: -2 while at the 0%
-        band (nothing earned that week), -1 once at least half the weekly
-        goal was reached, 0 from the full goal onward -
+        goal_points) against the fixed bands in
+        PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES (v0.55: 0/25/50/75/100, one
+        minute harsher per band the lower the percent): -4 below 25%, -3 from
+        25% up to (not including) 50%, -2 from 50% up to (not including) 75%,
+        -1 from 75% up to (not including) 100%, 0 from the full goal onward -
         PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES has no entry above 100 because
         nothing beyond "leave the blueprint's own increment unchanged" ever
         applies once the goal itself is met. Always 0 (no adjustment) when
@@ -2683,7 +2685,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if weeks_processed:
             await self.streak_bonus_state.async_set(member_id, tier, cursor, streak_count)
 
-    async def _async_process_top_scorer_coin_bonus(self, start_of_week: datetime) -> None:
+    async def _async_process_top_scorer_coin_bonus(
+        self, start_of_week: datetime, weekly_progress_goal_points: int
+    ) -> None:
         """Credit the "Wochensieger-Bonus" for every fully-elapsed calendar week.
 
         See CONF_TOP_SCORER_BONUS_COINS in const.py. Unlike the Meilenstein-/
@@ -2691,17 +2695,27 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         own share of the household-wide weekly goal), this compares
         *absolute* points_week across every eligible member household-wide
         for a week that has actually ended, and pays the single member with
-        strictly the most points - so, unlike those two, it is not gated on
-        CONF_WEEKLY_PROGRESS_GOAL_POINTS being configured at all. No bonus
-        is paid for a week that ends in a tie for first place (including a
-        tie at 0, e.g. nobody completed anything that week) - deliberately
-        simple over splitting/duplicating the bonus, so a bonus payout
-        always has exactly one unambiguous recipient. Also requires at
-        least two eligible members that week; with only one (or zero) there
-        is no one to be "top" relative to, so nothing is paid - same
-        reasoning as why a solo household never sees a competitive
-        leaderboard on the card either (see _progressMembers's isChildUser
-        branch in family-tasks-card.js).
+        strictly the most points. No bonus is paid for a week that ends in a
+        tie for first place (including a tie at 0, e.g. nobody completed
+        anything that week) - deliberately simple over splitting/duplicating
+        the bonus, so a bonus payout always has exactly one unambiguous
+        recipient. Also requires at least two eligible members that week;
+        with only one (or zero) there is no one to be "top" relative to, so
+        nothing is paid - same reasoning as why a solo household never sees
+        a competitive leaderboard on the card either (see _progressMembers's
+        isChildUser branch in family-tasks-card.js).
+
+        v0.55: on explicit user request, the winner must additionally have
+        reached the household's configured weekly point goal
+        (CONF_WEEKLY_PROGRESS_GOAL_POINTS) that same week - reuses that
+        already-existing per-member weekly goal as this bonus's own
+        "Mindestpunktzahl der Woche" rather than introducing a separate,
+        independent threshold. If no weekly goal is configured
+        (weekly_progress_goal_points <= 0), the bonus keeps paying exactly
+        as before this change, without any minimum-points check - there is
+        no goal to measure "reached" against, same reasoning as every other
+        goal-relative feature in this file (see e.g.
+        _screen_time_tick_adjustment_minutes).
 
         Uses the same "catch up on every elapsed week since a persisted
         cursor, oldest first" shape as
@@ -2751,7 +2765,14 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     for member_id, points in week_points.items()
                     if points == max_points
                 ]
-                if max_points > 0 and len(leaders) == 1:
+                # v0.55: additionally require the (unique) leader to have
+                # reached the weekly goal itself - see this method's
+                # docstring. Skipped entirely when no goal is configured.
+                goal_reached = (
+                    weekly_progress_goal_points <= 0
+                    or max_points >= weekly_progress_goal_points
+                )
+                if max_points > 0 and len(leaders) == 1 and goal_reached:
                     winner = leaders[0]
                     await self.coin_ledger.async_add_entry(
                         member_id=winner,

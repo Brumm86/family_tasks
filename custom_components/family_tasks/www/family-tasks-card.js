@@ -1192,6 +1192,15 @@
       this._noteDialogOpen = false;
       this._noteDialogTitle = "";
       this._noteDialogText = "";
+      // v0.55: "Handyzeit-Tick-Malus"-Infofenster, geöffnet per Klick/Tap
+      // auf eine der 25/50/75/100%-Marken im Wochenfortschritt-Balken (siehe
+      // bandMarkers/_openBandInfo in _renderProgressSection) - ersetzt den
+      // bis dahin rein hover-basierten title-Tooltip dieser Marken, gleiche
+      // Touchscreen-Begründung wie beim Notiz-Dialog oben. Household-weit
+      // (nicht pro Mitglied), daher genügt der angeklickte Prozentsatz als
+      // einziger Zustand, kein *MemberId nötig.
+      this._bandInfoDialogOpen = false;
+      this._bandInfoPercent = null;
     }
 
     setConfig(config) {
@@ -1804,7 +1813,19 @@
         // v0.37: a paused member (see CONF_MEMBER_PAUSED) temporarily has no
         // bar here either, same reasoning as participates_in_rewards.
         .filter((entry) => entry.member.paused !== true)
-        .sort((a, b) => a.member.name.localeCompare(b.member.name, "de"));
+        // v0.55: ranked by this week's points (points_week), highest first,
+        // instead of alphabetically - a parent glancing at the section
+        // should see who's currently ahead without having to read every
+        // row. Ties (including 0-0, or before anyone has any hass state at
+        // all) fall back to the previous alphabetical order, so the row
+        // order never appears to jitter randomly between otherwise-equal
+        // members on every render.
+        .sort((a, b) => {
+          const pointsA = Number(this._pointsSensorForMember(a.id)?.attributes?.points_week ?? 0);
+          const pointsB = Number(this._pointsSensorForMember(b.id)?.attributes?.points_week ?? 0);
+          if (pointsB !== pointsA) return pointsB - pointsA;
+          return a.member.name.localeCompare(b.member.name, "de");
+        });
     }
 
     // --- actions -------------------------------------------------------
@@ -2370,6 +2391,23 @@
       this._render();
     }
 
+    // v0.55: opened by clicking one of the 25/50/75/100% Handyzeit-Tick-
+    // Malus markers on a "Wochenfortschritt" bar - see bandMarkers in
+    // _renderProgressSection. Purely local (the band values are fixed,
+    // household-wide constants mirrored from PROGRESS_BAND_TICK_ADJUSTMENT_
+    // MINUTES in const.py), same reasoning as _openTopScorerInfo above.
+    _openBandInfo(percent) {
+      this._bandInfoPercent = Number(percent);
+      this._bandInfoDialogOpen = true;
+      this._render();
+    }
+
+    _closeBandInfo() {
+      this._bandInfoDialogOpen = false;
+      this._bandInfoPercent = null;
+      this._render();
+    }
+
     // --- Favoriten actions (v0.17) ---------------------------------------
 
     _openFavoriteForm(favoriteId) {
@@ -2673,6 +2711,14 @@
             </div>
             ${this._renderStreakInfo()}
           </dialog>` : ""}
+          ${this._bandInfoDialogOpen ? `
+          <dialog class="dialog" data-dialog="band-info">
+            <div class="section-header">
+              <h3>${esc(this._bandInfoPercent)}% des Wochenziels</h3>
+              <button type="button" class="link" data-action="close-band-info">Schließen</button>
+            </div>
+            ${this._renderBandInfo()}
+          </dialog>` : ""}
           ${this._noteDialogOpen ? `
           <dialog class="dialog" data-dialog="note-info">
             <div class="section-header">
@@ -2948,6 +2994,7 @@
         ["top-scorer-info", () => this._topScorerInfoDialogOpen, () => this._closeTopScorerInfo()],
         ["streak-info", () => this._streakInfoDialogOpen, () => this._closeStreakInfo()],
         ["note-info", () => this._noteDialogOpen, () => this._closeNoteDialog()],
+        ["band-info", () => this._bandInfoDialogOpen, () => this._closeBandInfo()],
       ];
       for (const [name, isOpenFlag, close] of specs) {
         const el = this.shadowRoot.querySelector(`dialog[data-dialog="${name}"]`);
@@ -3810,6 +3857,13 @@
       // 1) - ein einzelnes Kind (eigene Ansicht, oder ein Haushalt mit nur
       // einem teilnehmenden Kind) hat naturgemäß nichts, wogegen es
       // "führen" könnte.
+      //
+      // v0.55: die Krone berücksichtigt jetzt zusätzlich dieselbe
+      // Mindestpunktzahl-Bedingung wie die serverseitige Auszahlung (siehe
+      // oben) - ein Mitglied mit den meisten, aber noch nicht das eigene
+      // Wochenziel erreichenden Punkten, gilt hier (noch) nicht als
+      // Wochensieger, sonst würde die Krone einen Bonus versprechen, der am
+      // Wochenende so noch gar nicht ausgezahlt würde.
       const topScorerBonusCoins = this._topScorerBonusCoins();
       let topScorerId = null;
       if (topScorerBonusCoins > 0 && members.length > 1) {
@@ -3824,7 +3878,8 @@
             leaderIds.push(id);
           }
         }
-        topScorerId = maxPoints > 0 && leaderIds.length === 1 ? leaderIds[0] : null;
+        const topScorerGoalReached = goal <= 0 || maxPoints >= goal;
+        topScorerId = maxPoints > 0 && leaderIds.length === 1 && topScorerGoalReached ? leaderIds[0] : null;
       }
 
       // v0.22: jede Zeile öffnet per Klick einen Dialog mit den diese Woche
@@ -3844,21 +3899,24 @@
                 ? Math.min(100, Math.round((weekPoints / (goal * barMaxPercent / 100)) * 100))
                 : 100;
               const goalReached = goal > 0 && weekPoints >= goal;
-              // v0.36: leichte Marken bei 50%/100% zeigen zusätzlich die
-              // Handyzeit-Tick-Bänder (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES
-              // in const.py) - rein informativ, kein eigener Bonus, daher
-              // ohne "reached"-Zustand.
+              // v0.36: leichte Marken bei den Handyzeit-Tick-Bändern
+              // (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py) - rein
+              // informativ, kein eigener Bonus, daher ohne "reached"-
+              // Zustand. v0.55: jetzt bei 25/50/75/100% (statt nur 50/100%,
+              // seit der neuen 25%-Malus-Stufe) und per Klick/Tap statt nur
+              // per Hover-Tooltip bedienbar (title bleibt als zusätzlicher
+              // Hover-Hinweis für Maus-Nutzer erhalten) - siehe
+              // _openBandInfo/_renderBandInfo, gleiches Muster wie die
+              // Handyzeit-/Wochensieger-Info-Dialoge.
               const bandMarkers = goal > 0
-                ? [50, 100].map((percent) => ({
+                ? [25, 50, 75, 100].map((percent) => ({
                     left: (percent / barMaxPercent) * 100,
-                    title:
-                      percent === 100
-                        ? "100% des Wochenziels - Handyzeit-Ticks laufen ab hier mit voller Länge"
-                        : "50% des Wochenziels - Handyzeit-Ticks fallen bis hierhin um 2 Min. kleiner aus, danach um 1 Min.",
+                    percent,
+                    title: `${percent}% des Wochenziels - antippen für Details zum Handyzeit-Tick-Malus`,
                   }))
                 : [];
               const bandMarkersHtml = bandMarkers
-                .map((m) => `<div class="bar-band-marker" style="left:${Math.min(100, m.left)}%" title="${esc(m.title)}"></div>`)
+                .map((m) => `<div class="bar-band-marker" style="left:${Math.min(100, m.left)}%" data-action="open-band-info" data-percent="${m.percent}" role="button" tabindex="0" title="${esc(m.title)}"></div>`)
                 .join("");
               // v0.36: Marken für die beiden festen Meilenstein-Schwellen
               // (150%/200%), als Prozent-Position *innerhalb* des Balkens
@@ -4112,15 +4170,51 @@
     // auf eine Änderung "im Laufe der Woche" entfernt, da der Malus für eine
     // laufende Woche jetzt feststeht (erst beim nächsten Wochenwechsel neu
     // berechnet wird).
+    // v0.55: Inhalt des Handyzeit-Tick-Malus-Infofensters, geöffnet per
+    // Klick/Tap auf eine der 25/50/75/100%-Marken im Wochenfortschritt-
+    // Balken - siehe _openBandInfo/bandMarkers in _renderProgressSection.
+    // Rein erklärend (die eigentliche Berechnung übernimmt weiterhin
+    // FamilyTasksCoordinator._screen_time_tick_adjustment_minutes) - die
+    // Werte hier müssen von Hand synchron zu
+    // PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py gehalten werden,
+    // dieselbe Konvention wie schon bei den bisherigen 50%/100%-Tooltips.
+    _renderBandInfo() {
+      const percent = this._bandInfoPercent;
+      const bands = {
+        25: { from: -4, to: -3 },
+        50: { from: -3, to: -2 },
+        75: { from: -2, to: -1 },
+        100: { from: -1, to: 0 },
+      };
+      const band = bands[percent];
+      if (!band) return "";
+      const text = band.to === 0
+        ? `Ab ${esc(percent)}% des Wochenziels - also sobald es erreicht ist - entfällt der Handyzeit-Tick-Malus vollständig: die Handyzeit-Automation läuft ab hier mit ihrer vollen, unveränderten Länge pro Tick.`
+        : `Ab ${esc(percent)}% des Wochenziels sinkt der Handyzeit-Tick-Malus von ${esc(band.from)} auf ${esc(band.to)} Min. pro Tick.`;
+      return `
+        <p>${text}</p>
+        <p class="muted">Beurteilt wird dabei immer die bereits vollständig abgelaufene Vorwoche, nicht der laufende Fortschritt dieser Woche - der Wert steht deshalb für die gesamte laufende Woche fest und ändert sich erst wieder mit dem nächsten Wochenwechsel.</p>
+      `;
+    }
+
     _renderScreenTimeInfo() {
       const memberId = this._screenTimeInfoMemberId;
       const info = memberId ? this._screenTimeInfoFor(memberId) : null;
       if (!info) return `<p class="muted">Keine Handyzeit-Automation hinterlegt.</p>`;
       const { ticksPerDay, tickMinutes, adjustment, effectiveTickMinutes, dailyMinutes } = info;
+      // v0.55: the malus now has four bands (0/25/50/75%, see
+      // PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py) instead of two,
+      // one minute harsher each step down - "weniger als X% erreicht"
+      // describes whichever band boundary the previous week's progress
+      // fell short of. -adjustment * 25 recovers that boundary (-4 -> 25,
+      // -3 -> 50, -2 -> 75, -1 -> 100) purely from the band shape being a
+      // fixed +1 Min. per 25-percentage-point step - keep this in sync by
+      // hand with PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES if that shape ever
+      // changes.
       const malusLine =
         adjustment < 0
-          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil das Wochenziel in der Vorwoche noch nicht ${adjustment <= -2 ? "" : "zur Hälfte "}erreicht wurde.</p>`
-          : `<p>Aktuell kein Malus - das Wochenziel war in der Vorwoche mindestens zur Hälfte erreicht (oder es liegt noch keine beurteilbare Vorwoche vor).</p>`;
+          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil in der Vorwoche weniger als ${esc(-adjustment * 25)}% des Wochenziels erreicht wurden.</p>`
+          : `<p>Aktuell kein Malus - das Wochenziel war in der Vorwoche vollständig erreicht (oder es liegt noch keine beurteilbare Vorwoche vor).</p>`;
       return `
         <p>${esc(ticksPerDay)} Ticks/Tag × ${esc(tickMinutes)} Min. (in der Handyzeit-Automation hinterlegter Wert)${
           adjustment !== 0
@@ -4144,9 +4238,18 @@
       if (coins <= 0) {
         return `<p class="muted">Kein Wochensieger-Bonus konfiguriert.</p>`;
       }
+      // v0.55: der Sieger muss zusätzlich das Wochenziel erreicht haben
+      // (siehe FamilyTasksCoordinator._async_process_top_scorer_coin_bonus)
+      // - reuses die bestehende, ohnehin schon angezeigte Wochenziel-Zahl
+      // (_weeklyProgressGoal) statt einen eigenen Options-Wert einzuführen.
+      const goal = this._weeklyProgressGoal();
+      const minPointsLine = goal > 0
+        ? `<p class="muted">Zusätzliche Bedingung: die Siegerin/der Sieger muss dabei mindestens das eigene Wochenziel (${esc(goal)} Pkt.) erreicht haben - sonst wird diese Woche kein Bonus vergeben, auch nicht bei einer eindeutigen Führung.</p>`
+        : "";
       return `
         <p>Wer am Ende der Woche (Sonntag Mitternacht) die meisten Punkte gesammelt hat, erhält <strong>${esc(coinsLabel(coins))}</strong>.</p>
         <p class="muted">Es zählt der absolute Punktestand der Woche, nicht der Fortschritt zu einem Wochenziel. Bei Gleichstand - auch wenn niemand diese Woche etwas erledigt hat - wird der Bonus an niemanden vergeben. Ausgezahlt wird erst, nachdem die Woche vollständig abgelaufen ist.</p>
+        ${minPointsLine}
       `;
     }
 
@@ -4159,6 +4262,29 @@
     // dauerhaft der doppelte Bonus jede weitere Woche - kein Deckel mehr
     // wie fälschlich in v0.53 (siehe _async_process_member_streak_tier in
     // coordinator.py).
+    //
+    // v0.55: die Punkte/dieser Dialog zeigen weiterhin nur eine "aktive"
+    // Schwelle auf einmal (siehe _activeStreakTierFor - Nutzerentscheidung,
+    // statt zwei getrennte Anzeigen einzuführen). Sind aber beide Schwellen
+    // (150%/200%) konfiguriert, ergänzt _otherStreakTierNote unten einen
+    // zusätzlichen Absatz, der die jeweils andere, nicht dargestellte
+    // Schwelle samt ihrem eigenen Bonus ausdrücklich benennt - vorher blieb
+    // sie in diesem Dialog komplett unerwähnt, obwohl sie serverseitig
+    // (_async_process_member_streak_tier) unabhängig von der hier gezeigten
+    // Schwelle läuft und bereits als eigenes Flammen-Badge am Balken
+    // sichtbar ist, sobald sie selbst aktiv ist (siehe streakBadgesHtml in
+    // _renderProgressSection, davon unberührt).
+    _otherStreakTierNote(memberId, info, streak) {
+      if (!(streak.bonus150 > 0 && streak.bonus200 > 0)) return "";
+      const otherTier = info.tier === "200" ? "150" : "200";
+      const otherBonus = otherTier === "200" ? streak.bonus200 : streak.bonus150;
+      const otherWeeks = this._streakWeeksFor(memberId)[otherTier === "200" ? "weeks200" : "weeks150"];
+      const statusFragment = otherWeeks > 0
+        ? ` Dort läuft aktuell die ${esc(otherWeeks)}. Woche in Folge.`
+        : ` Dort läuft aktuell keine eigene Serie.`;
+      return `<p class="muted">Zusätzlich, unabhängig davon: für die ${esc(otherTier)}%-Marke gibt es einen eigenen Streak-Bonus von ${esc(coinsLabel(otherBonus))} je Woche (ab ${esc(info.requiredWeeks + 1)} Wochen in Folge dauerhaft doppelt).${statusFragment}</p>`;
+    }
+
     _renderStreakInfo() {
       const memberId = this._streakInfoMemberId;
       if (!memberId) return "";
@@ -4166,8 +4292,13 @@
       if (!info.enabled) {
         return `<p class="muted">Kein Streak-Bonus konfiguriert.</p>`;
       }
+      const streak = this._streakBonus();
+      const otherTierNote = this._otherStreakTierNote(memberId, info, streak);
       if (info.currentWeeks <= 0) {
-        return `<p class="muted">Aktuell läuft keine Serie - ${esc(info.requiredWeeks)} Wochen in Folge mit mindestens ${esc(info.tier)}% des Wochenziels starten eine neue.</p>`;
+        return `
+          <p class="muted">Aktuell läuft keine Serie - ${esc(info.requiredWeeks)} Wochen in Folge mit mindestens ${esc(info.tier)}% des Wochenziels starten eine neue.</p>
+          ${otherTierNote}
+        `;
       }
       const doubled = info.currentWeeks > info.requiredWeeks;
       const reachedBase = info.currentWeeks >= info.requiredWeeks;
@@ -4181,6 +4312,7 @@
         <p>${esc(info.currentWeeks)}. Woche in Folge über der ${esc(info.tier)}%-Marke des Wochenziels.</p>
         <p>Ab ${esc(info.requiredWeeks)} Wochen in Folge gibt es <strong>${esc(coinsLabel(info.bonus))}</strong> je Woche, ab ${esc(info.requiredWeeks + 1)} Wochen in Folge dauerhaft <strong>${esc(coinsLabel(info.bonus * 2))}</strong> je Woche - die Serie kann beliebig lange weiterlaufen, ohne dass der Bonus weiter ansteigt.</p>
         <p class="muted">${statusLine}${currentWeeklyPayout > 0 ? ` Aktuell laufender Wochenbonus: ${esc(coinsLabel(currentWeeklyPayout))}.` : ""}</p>
+        ${otherTierNote}
       `;
     }
 
@@ -4971,13 +5103,20 @@
            eigentliche Information. */
         .bar-milestone { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
                          background: var(--card-background-color, #fff); opacity: 0.9; }
-        /* v0.36: leichte, nicht-interaktive Marken bei 50%/100% des
-           Wochenziels (Handyzeit-Tick-Bänder, siehe bandMarkers in
-           _renderProgressSection) - bewusst unauffälliger als
+        /* v0.36: leichte Marken bei den Handyzeit-Tick-Bändern (siehe
+           bandMarkers in _renderProgressSection) - bewusst unauffälliger als
            .bar-milestone oben, da sie keinen eigenen Bonus markieren,
-           sondern nur informativ die Tick-Anpassungs-Grenzen zeigen. */
-        .bar-band-marker { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px;
-                            background: var(--card-background-color, #fff); opacity: 0.5; }
+           sondern nur informativ die Tick-Anpassungs-Grenzen zeigen.
+           v0.55: jetzt anklickbar/antippbar (öffnet _renderBandInfo) statt
+           nur ein Hover-Tooltip - die sichtbare Linie bleibt bewusst 1px
+           schmal (::after), aber das Element selbst ist deutlich breiter
+           als seine sichtbare Linie, damit auf einem Touchscreen eine
+           realistische Trefferfläche besteht. */
+        .bar-band-marker { position: absolute; top: 0; bottom: 0; width: 16px; margin-left: -8px;
+                            background: none; border: none; padding: 0; cursor: pointer; }
+        .bar-band-marker::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px;
+                                   margin-left: -0.5px; background: var(--card-background-color, #fff); opacity: 0.5; }
+        .bar-band-marker:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         /* v0.49: Münzenbelohnungs-Badge an einer Meilenstein-Schwelle -
            schwebt in .bar-wrap's reserviertem oberem Padding, direkt über der
            bestehenden .bar-milestone-Linie an derselben Position (siehe
@@ -5274,6 +5413,10 @@
           this._openNoteDialog(el.dataset.noteTitle, el.dataset.noteText);
         } else if (action === "close-note-info") {
           this._closeNoteDialog();
+        } else if (action === "open-band-info") {
+          this._openBandInfo(el.dataset.percent);
+        } else if (action === "close-band-info") {
+          this._closeBandInfo();
         } else if (action === "add-subtask") {
           // Works for both the admin task form and a child's own-task form -
           // both can carry a checklist (v0.8) - see _formSpec.

@@ -2,6 +2,19 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.55.0] - 2026-09-10
+
+### Changed
+- **Wochenfortschritt jetzt nach Punkten sortiert**: die Reihenfolge der Kinder in der "Wochenfortschritt"-Liste richtet sich nicht mehr alphabetisch nach dem Namen, sondern absteigend nach den diese Woche gesammelten Punkten (`points_week`) - wer aktuell vorne liegt, steht oben. Bei Punktegleichstand bleibt die alphabetische Reihenfolge als Tie-Break bestehen.
+- **Wochensieger-Bonus erfordert jetzt zusätzlich das Erreichen des Wochenziels**: bisher bekam der alleinige Erstplatzierte (meiste absolute Punkte der Woche) den Bonus unabhängig davon, ob überhaupt nennenswert etwas erledigt wurde. Jetzt muss die Siegerin/der Sieger zusätzlich die eigene "Wöchentliche Zielpunktzahl" erreicht haben - sonst wird diese Woche kein Bonus vergeben, auch nicht bei einer eindeutigen Führung (`FamilyTasksCoordinator._async_process_top_scorer_coin_bonus`, `coordinator.py`). Ist kein Wochenziel konfiguriert (0), bleibt der Bonus wie bisher ungeprüft. Die live im Wochenfortschritt gezeigte Krone (👑) sowie ihr Infodialog berücksichtigen dieselbe Bedingung, damit die Karte nie einen Bonus verspricht, der am Wochenende so gar nicht ausgezahlt würde.
+- **Handyzeit-Tick-Malus um eine 25%-Stufe erweitert**: die bisherige zweistufige Staffel (0%: -2 Min./Tick, 50%: -1 Min./Tick, 100%: kein Malus) hat jetzt vier Stufen in 25-Prozentpunkt-Schritten: unter 25% des Wochenziels -4 Min./Tick, ab 25% -3 Min./Tick, ab 50% -2 Min./Tick, ab 75% -1 Min./Tick, ab 100% kein Malus mehr (`PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES` in `const.py`, `FamilyTasksCoordinator._screen_time_tick_adjustment_minutes`). Beurteilt wird weiterhin ausschließlich die bereits vollständig abgelaufene Vorwoche, wie seit v0.45.1.
+
+### Added
+- **25%/50%/75%/100%-Marken im Wochenfortschritt-Balken jetzt anklickbar/antippbar**: die bisherigen, rein informativen Marken bei 50%/100% (nur per Hover-`title`-Attribut erreichbar, auf einem Touchscreen also faktisch unsichtbar) sind um die neue 25%-Marke ergänzt und öffnen jetzt per Klick/Tap einen kleinen Dialog, der die an dieser Stelle greifende Handyzeit-Tick-Malus-Änderung in Worten erklärt (`_openBandInfo`/`_renderBandInfo`, gleiches Dialog-Muster wie die bestehenden Handyzeit-/Wochensieger-Info-Fenster). Der Hover-Tooltip bleibt für Maus-Nutzer zusätzlich erhalten.
+
+### Fixed
+- **Streak-Bonus-Erläuterung erwähnte nur eine der beiden konfigurierbaren Schwellen**: sind sowohl die 150%- als auch die 200%-Schwelle mit einem eigenen Bonus konfiguriert, laufen beide serverseitig unabhängig voneinander (unverändert seit v0.36) - die Karte zeigte in den drei Streak-Punkten neben dem Namen und deren Infodialog aber immer nur die jeweils "aktivere" Schwelle, ohne die andere überhaupt zu erwähnen. Der Infodialog (`_renderStreakInfo`, `family-tasks-card.js`) nennt jetzt zusätzlich ausdrücklich die andere, nicht dargestellte Schwelle samt ihrem eigenen Bonusbetrag und ihrem aktuellen Serienstand, sobald beide konfiguriert sind. Die Punkte-Anzeige selbst (welche Schwelle sie repräsentieren) ist unverändert - nur der erklärende Text wurde ergänzt.
+
 ## [0.54.0] - 2026-09-10
 
 ### Fixed

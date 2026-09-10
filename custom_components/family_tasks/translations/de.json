@@ -33,7 +33,7 @@
           "streak_150_bonus_coins": "Streak-Bonus-Münzen je Auszahlung bei gehaltener 150%-Marke (jede qualifizierende Woche, verdoppelt sobald die Serie die Mindestwochenzahl überschreitet)",
           "streak_200_bonus_coins": "Streak-Bonus-Münzen je Auszahlung bei gehaltener 200%-Marke (jede qualifizierende Woche, verdoppelt sobald die Serie die Mindestwochenzahl überschreitet)",
           "coin_to_points_rate": "Punkte je im Punkteshop umgetauschter Münze (0 deaktiviert den Umtausch)",
-          "top_scorer_bonus_coins": "Bonus-Münzen für das Kind mit den meisten Punkten der Woche (0 deaktiviert es; bei Gleichstand kein Bonus)",
+          "top_scorer_bonus_coins": "Bonus-Münzen für das Kind mit den meisten Punkten der Woche, aber nur wenn dabei auch die wöchentliche Zielpunktzahl erreicht wurde (0 deaktiviert es; bei Gleichstand kein Bonus, ebenso wenn das Wochenziel verfehlt wird)",
           "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
       }

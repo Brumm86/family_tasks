@@ -33,7 +33,7 @@
           "streak_150_bonus_coins": "Streak-Bonus coins per payout while maintaining 150% (paid every qualifying week; doubled once the streak exceeds the required weeks)",
           "streak_200_bonus_coins": "Streak-Bonus coins per payout while maintaining 200% (paid every qualifying week; doubled once the streak exceeds the required weeks)",
           "coin_to_points_rate": "Points awarded per coin converted in the reward shop (0 disables conversion)",
-          "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week (0 disables it; no bonus on a tie)",
+          "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week, but only if they also reached the weekly point goal (0 disables it; no bonus on a tie, and none if the weekly goal is unmet)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
       }

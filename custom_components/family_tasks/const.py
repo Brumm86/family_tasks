@@ -97,12 +97,15 @@ CONF_SCREEN_TIME_MALUS_START_DATE: Final = "screen_time_malus_start_date"
 # v0.36: fixed weekly-progress-percent checkpoints (percentages of
 # CONF_WEEKLY_PROGRESS_GOAL_POINTS) the whole coin system is built around -
 # replaces the pre-v0.36 Meilensteinbonus/Streak-Bonus, which let a household
-# pick its own percent thresholds, with five checkpoints fixed the same way
-# for everyone. 100% is "reached the weekly goal". Only meaningful while a
+# pick its own percent thresholds, with checkpoints fixed the same way for
+# everyone. 100% is "reached the weekly goal". Only meaningful while a
 # weekly goal > 0 is configured - see CONF_WEEKLY_PROGRESS_GOAL_POINTS below,
 # PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES, and the coin-bonus constants below
-# for what happens at each one.
-PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
+# for what happens at each one. 0/25/50/75/100 are the Handyzeit-Tick-Malus
+# bands (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES); 150/200 are the separate
+# Meilenstein-/Streak-Bonus checkpoints (v0.55 added 25/75 to the malus side
+# only - the bonus checkpoints above 100% are unaffected).
+PROGRESS_THRESHOLD_PERCENTS: Final = [0, 25, 50, 75, 100, 150, 200]
 
 # v0.36: replaces the pre-v0.36 tick-based screen-time automation's fixed
 # per-tick increment with one that responds to how a child is doing against
@@ -110,8 +113,7 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
 # "Bei 0% soll die im Blueprint eingestellte Handyzeit pro Tick um 2 Minuten
 # reduziert werden. Bei 50% soll die Zeit um 1 Minute pro Tick reduziert
 # werden. Im Übrigen soll sie nicht geändert werden." Keyed by the *band* a
-# member's weekly-progress percent falls into: below 50% -> -2, 50% up to
-# (not including) 100% -> -1, 100% and above -> unchanged. See
+# member's weekly-progress percent falls into. See
 # FamilyTasksCoordinator._screen_time_tick_adjustment_minutes, which computes
 # the per-member minutes value exposed as an attribute on
 # FamilyTasksMemberPointsSensor
@@ -130,7 +132,17 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 50, 100, 150, 200]
 # household's own configured CONF_SCREEN_TIME_MALUS_START_DATE above - see
 # that constant's docstring for why this replaced the v0.45.1 per-member
 # heuristic.
-PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -2, 50: -1, 100: 0}
+#
+# v0.55: added a 25% checkpoint below the previous 0/50/100 bands, on
+# explicit user request - below 25% -> -4, 25% up to (not including) 50% ->
+# -3, 50% up to (not including) 75% -> -2, 75% up to (not including) 100% ->
+# -1, 100% and above -> unchanged. Each new band is one minute harsher than
+# the band above it (same "+1 Min. pro Stufe" shape the pre-v0.55 two-band
+# table already had, just carried one step further down). The card's
+# _renderBandInfo (family-tasks-card.js) explains each of these boundaries
+# and must be kept in sync by hand with the values here - see bandMarkers in
+# _renderProgressSection.
+PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -4, 25: -3, 50: -2, 75: -1, 100: 0}
 
 # v0.36: bonus *coins* (see the "Münzen"/coin-shop section below) awarded
 # live, the moment a participating member's weekly points cross the fixed
