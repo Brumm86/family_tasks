@@ -2532,20 +2532,23 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         every fully-elapsed calendar week since that tier's
         StreakBonusStateStore cursor last stopped, oldest first, judging
         each one against the tier's checkpoint and incrementing/resetting a
-        per-tier streak counter. v0.53: the bonus is now paid at most twice
-        per streak - once when the counter first reaches
-        streak_bonus_required_weeks, and a second, final time when it
-        reaches streak_bonus_required_weeks + 1 - not every further week the
-        streak continues. The old "rolling forever" behaviour (v0.36-v0.52)
-        made an indefinitely long streak worth an unbounded number of
-        payouts, one every week; capping it at two matches the three-dot
-        streak display next to a member's name in the card, which also
-        tops out at the same two milestones (see the streak-dots markup in
-        family-tasks-card.js). A streak that keeps going past
-        streak_bonus_required_weeks + 1 earns nothing further until it
-        breaks (a week under the checkpoint resets the counter to 0) and is
-        built back up from scratch. A no-op if goal_points is 0 - both
-        checkpoints are a percentage of the weekly goal.
+        per-tier streak counter. v0.54 (correcting a v0.53 misreading): the
+        bonus keeps being paid every fully-elapsed qualifying week, same as
+        the "rolling forever" behaviour of v0.36-v0.52 - it never stops once
+        a streak is long enough - but it no longer climbs indefinitely. The
+        payout is a flat multiple of bonus_coins depending on how long the
+        streak currently is: exactly 1x once the counter reaches
+        streak_bonus_required_weeks, then a flat 2x for every week from
+        streak_bonus_required_weeks + 1 onward for as long as the streak
+        keeps going - never 3x, 4x, etc. This matches the three-dot streak
+        display next to a member's name in the card, which also tops out at
+        the same two milestones (see the streak-dots markup in
+        family-tasks-card.js): dot 3 lighting up means the member is now in
+        the doubled-bonus tier, not that no further bonus will follow. A
+        streak that drops below the checkpoint resets the counter to 0 and
+        has to be built back up from scratch before either payout resumes.
+        A no-op if goal_points is 0 - both checkpoints are a percentage of
+        the weekly goal.
 
         A brand-new member (or a tier's very first run) starts its cursor at
         "last week" rather than the beginning of time, so turning a bonus on
@@ -2609,10 +2612,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     ) -> None:
         """Catch up one member's Streak-Bonus cursor, for one tier, through every elapsed week.
 
-        v0.53: pays out at most twice per streak (required_weeks and
-        required_weeks + 1 consecutive qualifying weeks), then caps - see
-        the "if streak_count in (...)" check below and the docstring of
-        _async_process_streak_coin_bonus for why.
+        v0.54: pays bonus_coins once required_weeks consecutive qualifying
+        weeks are reached, then bonus_coins * 2 flat for every further
+        consecutive qualifying week - see the payout_multiplier logic below
+        and the docstring of _async_process_streak_coin_bonus for why.
         """
         state = self.streak_bonus_state.get(member_id, tier)
         if state and state.get("processed_through"):
@@ -2636,39 +2639,43 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 streak_count += 1
             else:
                 streak_count = 0
-            # v0.53: paid at most twice per streak - once on first
-            # reaching required_weeks, once more on reaching
-            # required_weeks + 1 - then capped (see the docstring of
-            # _async_process_streak_coin_bonus above for the full
-            # reasoning). Any streak_count beyond required_weeks + 1 simply
-            # matches neither value below, so no further payout happens
-            # until the streak breaks (streak_count resets to 0) and is
-            # built back up.
-            if streak_count in (required_weeks, required_weeks + 1):
-                is_final_payout = streak_count == required_weeks + 1
+            # v0.54 (correcting a v0.53 misreading): paid every qualifying
+            # week from required_weeks onward, not just the first two - see
+            # the docstring of _async_process_streak_coin_bonus above for
+            # the full reasoning. The payout is flat, not climbing further
+            # past required_weeks + 1: exactly bonus_coins at
+            # required_weeks, then bonus_coins * 2 for every week after
+            # that the streak keeps going.
+            if streak_count == required_weeks:
+                payout_multiplier = 1
+            elif streak_count > required_weeks:
+                payout_multiplier = 2
+            else:
+                payout_multiplier = 0
+            if payout_multiplier:
                 await self.coin_ledger.async_add_entry(
                     member_id=member_id,
-                    amount=bonus_coins,
+                    amount=bonus_coins * payout_multiplier,
                     reason=coin_reason,
                     note=(
                         f"Streak-Bonus: {streak_count}. Woche in Folge "
                         f"über der {percent}%-Marke"
                         + (
-                            " (letzte Auszahlung dieser Serie - weitere "
-                            "Wochen in Folge bringen keinen zusätzlichen "
-                            "Bonus mehr)"
-                            if is_final_payout
+                            " (doppelter Bonus ab der "
+                            f"{required_weeks + 1}. Woche in Folge)"
+                            if payout_multiplier == 2
                             else ""
                         )
                     ),
                 )
                 _LOGGER.debug(
-                    "Credited %s Streak-Bonus coin(s) to %s for tier %s, week of %s (streak %s)",
-                    bonus_coins,
+                    "Credited %s Streak-Bonus coin(s) to %s for tier %s, week of %s (streak %s, multiplier %sx)",
+                    bonus_coins * payout_multiplier,
                     member_id,
                     tier,
                     dt_util.as_local(cursor).date().isoformat(),
                     streak_count,
+                    payout_multiplier,
                 )
             cursor += timedelta(days=7)
             weeks_processed += 1

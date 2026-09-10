@@ -288,10 +288,11 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 # CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in
                 # const.py and
                 # FamilyTasksCoordinator._async_process_streak_coin_bonus. A
-                # tier is off exactly when its bonus is 0. v0.53: paid at
-                # most twice per streak (at streak_bonus_required_weeks and
-                # streak_bonus_required_weeks + 1 consecutive weeks), not
-                # every further week - see that method's docstring.
+                # tier is off exactly when its bonus is 0. v0.54: paid every
+                # further qualifying week too, not just the first two - 1x
+                # this amount at streak_bonus_required_weeks consecutive
+                # weeks, then a flat 2x from streak_bonus_required_weeks + 1
+                # onward - see that method's docstring.
                 vol.Optional(
                     CONF_STREAK_BONUS_REQUIRED_WEEKS,
                     default=current.get(

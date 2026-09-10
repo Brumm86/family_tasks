@@ -151,12 +151,13 @@ CONF_MILESTONE_200_BONUS_COINS: Final = "milestone_200_bonus_coins"
 # and StreakBonusStateStore in storage.py (tracks the 150%/200% tiers
 # independently per member since v0.36).
 # CONF_STREAK_BONUS_REQUIRED_WEEKS is shared by both tiers - default 2, i.e.
-# "mehr als eine Woche in Folge". v0.53: the bonus coins above are no longer
-# paid every week a streak continues - see
-# FamilyTasksCoordinator._async_process_member_streak_tier - they're paid
-# exactly twice per streak (at CONF_STREAK_BONUS_REQUIRED_WEEKS and at
-# CONF_STREAK_BONUS_REQUIRED_WEEKS + 1 consecutive qualifying weeks), then
-# capped until the streak breaks and rebuilds.
+# "mehr als eine Woche in Folge". v0.54 (correcting a v0.53 misreading): the
+# bonus coins above are still paid every week a streak continues - see
+# FamilyTasksCoordinator._async_process_member_streak_tier - but the payout
+# no longer climbs further once it doubles: 1x the amount above at exactly
+# CONF_STREAK_BONUS_REQUIRED_WEEKS consecutive qualifying weeks, then a flat
+# 2x for every further consecutive qualifying week, until the streak breaks
+# and has to rebuild from scratch.
 CONF_STREAK_BONUS_REQUIRED_WEEKS: Final = "streak_bonus_required_weeks"
 CONF_STREAK_150_BONUS_COINS: Final = "streak_150_bonus_coins"
 CONF_STREAK_200_BONUS_COINS: Final = "streak_200_bonus_coins"

@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.54.0] - 2026-09-10
+
+### Fixed
+- **Streak-Bonus-Auszahlung korrigiert - v0.53 hatte das gewünschte Verhalten missverstanden**: v0.53 deckelte die Streak-Bonus-Auszahlung fälschlich auf genau zwei Auszahlungen je Serie (bei Erreichen der erforderlichen Wochenzahl und eine Woche später), danach keine weitere Auszahlung mehr, bis die Serie abreißt und neu beginnt. Das war ein Missverständnis der ursprünglichen Anfrage: der Bonus soll weiterhin *jede* Woche ausgezahlt werden, in der die Serie anhält - er soll nur nicht mehr über das Doppelte hinaus ansteigen. Richtig: bei Erreichen der erforderlichen Wochenzahl (`CONF_STREAK_BONUS_REQUIRED_WEEKS`, Standard 2) gibt es den einfachen konfigurierten Bonus; ab einer Woche darüber hinaus gibt es dauerhaft den doppelten Bonus, jede weitere Woche, ohne weitere Steigerung und ohne Ende - erst ein Abreißen der Serie (eine Woche unter der Schwelle) setzt sie zurück (`FamilyTasksCoordinator._async_process_member_streak_tier`, `coordinator.py`). Die drei Streak-Punkte neben dem Namen in der Karte (`family-tasks-card.js`) mussten dafür nicht geändert werden - ihre Rendering-Logik (Punkt 3 leuchtet ab der zweiten Schwelle) war bereits korrekt, nur die begleitenden Kommentare und der Infodialog (`_renderStreakInfo`) beschrieben die alte, gedeckelte Vorstellung und wurden entsprechend korrigiert. Betroffen waren außerdem die Beschreibungstexte der beiden Streak-Bonus-Optionen (`strings.json`/`translations/de.json`) sowie die zugehörigen Code-Kommentare in `const.py`/`config_flow.py`.
+
 ## [0.53.0] - 2026-09-10
 
 ### Added

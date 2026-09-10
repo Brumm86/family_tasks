@@ -3992,18 +3992,21 @@
               const topScorerBadge = id === topScorerId
                 ? `<span class="top-scorer-badge" data-action="open-top-scorer-info" role="button" tabindex="0" title="${esc(`Aktuell die meisten Punkte diese Woche - bleibt das so bis Wochenende, gibt es +${coinsLabel(topScorerBonusCoins)}. Antippen für Details.`)}">👑</span>`
                 : "";
-              // v0.53: drei kleine "Streak-Punkte" neben dem Namen - zeigen
-              // den Fortschritt zur (und die Deckelung der) Streak-Bonus-
-              // Auszahlung für die aktuell höhere laufende Schwelle dieses
-              // Mitglieds. Punkt 1 leuchtet ab einer laufenden Serie (>= 1
-              // abgeschlossene qualifizierende Woche), Punkt 2 ab der
-              // ersten Auszahlung (requiredWeeks), Punkt 3 ab der zweiten,
-              // letzten Auszahlung (requiredWeeks + 1) - danach kann die
-              // Serie beliebig weiterlaufen, alle drei Punkte bleiben aber
-              // einfach auf ihrem Maximum stehen, da kein weiterer Bonus
-              // mehr folgt (siehe _async_process_member_streak_tier in
-              // coordinator.py). Unabhängig von members.length - anders als
-              // die Krone braucht ein Streak keine Konkurrenz.
+              // v0.53/v0.54: drei kleine "Streak-Punkte" neben dem Namen -
+              // zeigen den Fortschritt der Streak-Bonus-Auszahlung für die
+              // aktuell höhere laufende Schwelle dieses Mitglieds. Punkt 1
+              // leuchtet ab einer laufenden Serie (>= 1 abgeschlossene
+              // qualifizierende Woche), Punkt 2 ab der ersten Auszahlung
+              // (requiredWeeks, einfacher Bonus), Punkt 3 ab der zweiten
+              // Schwelle (requiredWeeks + 1, ab der der Bonus dauerhaft
+              // verdoppelt wird - v0.54 korrigiert, dass dies KEINE letzte/
+              // gedeckelte Auszahlung mehr ist: die Serie zahlt ab hier
+              // einfach weiter den doppelten Bonus, jede Woche, ohne
+              // Deckel). Alle drei Punkte bleiben auf ihrem Maximum stehen,
+              // solange die Serie über requiredWeeks + 1 hinaus anhält -
+              // siehe _async_process_member_streak_tier in coordinator.py.
+              // Unabhängig von members.length - anders als die Krone
+              // braucht ein Streak keine Konkurrenz.
               const activeStreak = this._activeStreakTierFor(id);
               const streakDotThresholds = [1, activeStreak.requiredWeeks, activeStreak.requiredWeeks + 1];
               const streakDotsHtml = activeStreak.enabled
@@ -4147,10 +4150,15 @@
       `;
     }
 
-    // v0.53: Inhalt des "Streak-Bonus"-Infofensters, geöffnet per Klick auf
-    // die drei Streak-Punkte neben einem Namen - siehe streakDotsHtml in
+    // v0.54 (korrigiert gegenüber v0.53): Inhalt des "Streak-Bonus"-
+    // Infofensters, geöffnet per Klick auf die drei Streak-Punkte neben
+    // einem Namen - siehe streakDotsHtml in
     // _renderProgressSection/_activeStreakTierFor (dieselbe Tier-Auswahl-
-    // Logik, damit Punkte und Dialog nie auseinanderlaufen).
+    // Logik, damit Punkte und Dialog nie auseinanderlaufen). Beschreibt das
+    // korrigierte Modell: einfacher Bonus ab requiredWeeks, danach
+    // dauerhaft der doppelte Bonus jede weitere Woche - kein Deckel mehr
+    // wie fälschlich in v0.53 (siehe _async_process_member_streak_tier in
+    // coordinator.py).
     _renderStreakInfo() {
       const memberId = this._streakInfoMemberId;
       if (!memberId) return "";
@@ -4161,16 +4169,18 @@
       if (info.currentWeeks <= 0) {
         return `<p class="muted">Aktuell läuft keine Serie - ${esc(info.requiredWeeks)} Wochen in Folge mit mindestens ${esc(info.tier)}% des Wochenziels starten eine neue.</p>`;
       }
-      const payoutsSoFar = info.currentWeeks >= info.requiredWeeks + 1 ? 2 : info.currentWeeks >= info.requiredWeeks ? 1 : 0;
-      const payoutsLabel = payoutsSoFar === 0 ? "noch nichts" : payoutsSoFar === 1 ? "einmal" : "zweimal (Maximum erreicht)";
-      const cappedNote = info.currentWeeks > info.requiredWeeks + 1
-        ? `<p class="muted">Die Serie läuft weiter, bringt ab hier aber keinen weiteren Bonus mehr - er ist auf zwei Auszahlungen je Serie gedeckelt.</p>`
-        : "";
+      const doubled = info.currentWeeks > info.requiredWeeks;
+      const reachedBase = info.currentWeeks >= info.requiredWeeks;
+      const currentWeeklyPayout = doubled ? info.bonus * 2 : reachedBase ? info.bonus : 0;
+      const statusLine = doubled
+        ? `Die Serie hat die ${esc(info.requiredWeeks)} Wochen überschritten - ab jetzt gibt es dauerhaft den doppelten Bonus, jede Woche, solange die Serie anhält.`
+        : reachedBase
+          ? `Die Serie hat gerade die ${esc(info.requiredWeeks)} Wochen erreicht - ab der nächsten Woche in Folge verdoppelt sich der Bonus.`
+          : `Noch ${esc(info.requiredWeeks - info.currentWeeks)} Woche(n) bis zum ersten Bonus.`;
       return `
         <p>${esc(info.currentWeeks)}. Woche in Folge über der ${esc(info.tier)}%-Marke des Wochenziels.</p>
-        <p>Ab ${esc(info.requiredWeeks)} Wochen in Folge gibt es einmalig <strong>${esc(coinsLabel(info.bonus))}</strong>, ab ${esc(info.requiredWeeks + 1)} Wochen in Folge ein zweites (und letztes) Mal - danach ist der Bonus für diese Serie ausgeschöpft.</p>
-        <p class="muted">Bisher in dieser Serie ausgezahlt: ${payoutsLabel}.</p>
-        ${cappedNote}
+        <p>Ab ${esc(info.requiredWeeks)} Wochen in Folge gibt es <strong>${esc(coinsLabel(info.bonus))}</strong> je Woche, ab ${esc(info.requiredWeeks + 1)} Wochen in Folge dauerhaft <strong>${esc(coinsLabel(info.bonus * 2))}</strong> je Woche - die Serie kann beliebig lange weiterlaufen, ohne dass der Bonus weiter ansteigt.</p>
+        <p class="muted">${statusLine}${currentWeeklyPayout > 0 ? ` Aktuell laufender Wochenbonus: ${esc(coinsLabel(currentWeeklyPayout))}.` : ""}</p>
       `;
     }
 
@@ -5003,14 +5013,15 @@
            _renderProgressSection. */
         .top-scorer-badge { margin-left: 2px; font-size: 0.9em; cursor: pointer; }
         .top-scorer-badge:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
-        /* v0.53: drei kleine "Streak-Punkte" neben dem Namen - siehe
+        /* v0.53/v0.54: drei kleine "Streak-Punkte" neben dem Namen - siehe
            streakDotsHtml/_activeStreakTierFor in _renderProgressSection.
            Leer/grau (kein eigenes Modifier, nur die Basisfarbe) solange die
            jeweilige Woche/Schwelle noch nicht erreicht ist; die drei
            erreichten Zustände (.streak-dot-1/-2/-3) werden zunehmend
            kräftiger, damit auf einen Blick sichtbar ist, wie weit die Serie
-           gediehen ist - Punkt 3 markiert zugleich die gedeckelte, letzte
-           Auszahlung. */
+           gediehen ist - Punkt 3 markiert den Eintritt in die dauerhaft
+           verdoppelte Bonus-Stufe (v0.54: keine letzte/gedeckelte
+           Auszahlung mehr, siehe _renderStreakInfo). */
         .streak-dots { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: 1px; cursor: pointer; }
         .streak-dots:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         .streak-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
