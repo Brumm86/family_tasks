@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import FamilyTasksConfigEntry
-from .const import DOMAIN, MANUFACTURER
+from .const import CLAIM_PENALTY_POINTS, CLAIM_RESERVATION_MINUTES, DOMAIN, MANUFACTURER
 from .coordinator import FamilyTasksCoordinator
 from .entity_registry_helpers import async_prune_stale_entities
 
@@ -295,6 +295,15 @@ class FamilyTasksMemberPointsSensor(
             # here purely so the card can read it off this same per-refresh
             # snapshot without separately looking up that entity by id.
             "vacation_mode_active": self.coordinator.data.vacation_mode_active,
+            # v0.56: fixed, non-configurable "Annehmen"-Reservierung rules
+            # (CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in const.py) -
+            # imported directly rather than routed through coordinator.data
+            # since they're plain constants, not per-household config. The
+            # card's new claim confirmation step reads these so its
+            # explanatory text can never drift out of sync with the actual
+            # values async_claim_task/_async_expire_claim enforce.
+            "claim_reservation_minutes": CLAIM_RESERVATION_MINUTES,
+            "claim_penalty_points": CLAIM_PENALTY_POINTS,
         }
 
 

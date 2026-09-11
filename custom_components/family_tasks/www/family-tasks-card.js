@@ -1008,7 +1008,9 @@
       points: 0,
       // v0.44: see the matching comment in emptyTaskForm above.
       coin_value: 0,
-      icon: "",
+      // v0.56: see the matching comment on taskToForm's icon removal
+      // (v0.51) - no "icon" field here any more, same reasoning now applied
+      // to Favoriten too.
       // v0.49: see the matching comment in emptyTaskForm above - carried
       // onto every task created from this favorite.
       note: "",
@@ -1023,7 +1025,6 @@
       name: favorite?.name ?? "",
       points: favorite?.points ?? 0,
       coin_value: favorite?.coin_value ?? 0,
-      icon: favorite?.icon ?? "",
       note: favorite?.note ?? "",
       member_ids: [...(favorite?.member_ids ?? [])],
       // v0.39: see the matching comment in taskToForm above.
@@ -1201,6 +1202,13 @@
       // einziger Zustand, kein *MemberId nötig.
       this._bandInfoDialogOpen = false;
       this._bandInfoPercent = null;
+      // v0.56: welche Aufgabenpool-Aufgabe gerade ihre "Annehmen"-
+      // Bestätigungszeile zeigt - gleiches Muster wie _pendingRedeemId bei
+      // Belohnungen (aufklappbare .confirm-row statt sofortiger Aktion).
+      // Erklärt die Reservierungsdauer und den Punktabzug bei Fristablauf,
+      // bevor "Annehmen" tatsächlich family_tasks.claim_task aufruft - siehe
+      // _selectClaim/_cancelClaim/_confirmClaim.
+      this._pendingClaimId = null;
     }
 
     setConfig(config) {
@@ -1631,6 +1639,24 @@
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
       );
       return Number(sensor?.attributes?.coin_to_points_rate ?? 0);
+    }
+
+    // v0.56: fixed, non-configurable "Annehmen"-Reservierung rules
+    // (CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in const.py) - same
+    // "rides along on every member's points sensor, any one will do"
+    // pattern as _milestoneBonus/_streakBonus above. Backs the new claim
+    // confirmation step's explanatory text (_renderClaimConfirm).
+    _claimReservationInfo() {
+      const empty = { minutes: 60, penaltyPoints: 1 };
+      if (!this._hass) return empty;
+      const sensor = Object.values(this._hass.states).find(
+        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
+      );
+      if (!sensor) return empty;
+      return {
+        minutes: Number(sensor.attributes.claim_reservation_minutes ?? 60),
+        penaltyPoints: Number(sensor.attributes.claim_penalty_points ?? 1),
+      };
     }
 
     // v0.36: household-wide "Streak-Bonus" coin amounts, one per fixed tier
@@ -2264,6 +2290,30 @@
       this._render();
     }
 
+    // v0.56: "Annehmen" (Aufgabenpool-Reservierung) zeigt jetzt zunächst eine
+    // Bestätigungszeile statt die Reservierung sofort auszulösen - gleiches
+    // Muster wie _selectReward/_cancelRedeem/_confirmRedeem oberhalb.
+    // Explizite Nutzeranfrage: "Bei einer Reservierung sollte zunächst ein
+    // Bestätigungsdialog angezeigt werden. Hierbei soll erläutert werden,
+    // binnen welcher Zeit die reservierte Aufgabe zu erledigen ist und dass
+    // im Falle der Nichterledigung binnen dieser Zeit es zu einem
+    // Punktabzug kommt." Siehe _renderClaimConfirm/_claimReservationInfo.
+    _selectClaim(taskId) {
+      this._pendingClaimId = taskId;
+      this._render();
+    }
+
+    _cancelClaim() {
+      this._pendingClaimId = null;
+      this._render();
+    }
+
+    _confirmClaim(taskId) {
+      this._pendingClaimId = null;
+      this._hass.callService("family_tasks", "claim_task", { task_id: taskId });
+      this._render();
+    }
+
     // v0.49: "Punkteshop" - Self-Service-Umtausch eigener Münzen in Punkte,
     // gleiches Muster wie _selectReward/_cancelRedeem/_confirmRedeem oberhalb
     // (aufklappbare Bestätigungszeile statt sofortiger Aktion). Das Backend
@@ -2464,7 +2514,7 @@
         // v0.39: see the matching comment in _saveTask above.
         subtasks: f.subtasks.map((s) => ({ id: s.id, name: s.name.trim() })).filter((s) => s.name),
       };
-      if (f.icon) payload.icon = f.icon.trim();
+      // v0.56: no "icon" field on this form any more - see emptyFavoriteForm.
       // v0.49: see the matching comment in _saveTask above.
       if (this._editingFavoriteId) {
         payload.note = f.note.trim() || null;
@@ -3243,6 +3293,23 @@
         .join("");
     }
 
+    // v0.56: Inhalt der "Annehmen"-Bestätigungszeile (siehe
+    // _selectClaim/_pendingClaimId) - erklärt die Reservierungsdauer und den
+    // Punktabzug bei Fristablauf, bevor die Reservierung tatsächlich
+    // ausgelöst wird. Liest die Werte von _claimReservationInfo statt sie
+    // hier fest zu verdrahten, damit der Text nie von den tatsächlichen
+    // CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS-Werten (const.py)
+    // abweichen kann.
+    _renderClaimConfirm(taskId) {
+      const info = this._claimReservationInfo();
+      return `
+        <div class="confirm-row">
+          <span>Aufgabe für ${esc(info.minutes)} Min. reservieren? In dieser Zeit kann sie niemand sonst annehmen oder erledigen. Wird sie nicht rechtzeitig erledigt, verfällt die Reservierung und es wird${info.penaltyPoints === 1 ? " 1 Punkt" : ` ${esc(info.penaltyPoints)} Punkte`} abgezogen.</span>
+          <button data-action="confirm-claim" data-task-id="${taskId}">Reservieren</button>
+          <button type="button" class="link" data-action="cancel-claim">Abbrechen</button>
+        </div>`;
+    }
+
     // v0.30: extracted out of _renderTaskList (which still uses this for
     // every id it keeps after its own filtering) so _renderTaskPoolSection
     // below can render "Aufgabenpool" rows with exactly the same markup/
@@ -3358,8 +3425,15 @@
           const detail =
             (isConfirmation
               ? `Bestätigung für ${esc(this._memberName(task.confirms.member_id))}`
+              // v0.56: nennt jetzt zusätzlich, wem die Aufgabe zugewiesen
+              // ist (assigneeLabel, wie beim else-Zweig unten) - bisher
+              // zeigte eine Checklistenaufgabe hier ausschließlich den
+              // Erledigt-Stand ("x/y erledigt") ohne jede Angabe des
+              // Zuständigen. Explizite Nutzeranfrage: "Bei
+              // Checklistenaufgaben wird nicht angegeben, wem die Aufgabe
+              // zugewiesen ist."
               : isChecklist
-              ? `${subtasks.filter((s) => s.checked).length}/${subtasks.length} erledigt`
+              ? `${assigneeLabel} · ${subtasks.filter((s) => s.checked).length}/${subtasks.length} erledigt`
               : isBattery
               ? batteryEntities.length
                 ? batteryEntities
@@ -3484,7 +3558,7 @@
                   <span class="muted">${detail}${claimSuffix}</span>
                 </div>
                 <div class="row-actions">
-                  ${canClaim ? iconActionButton("claim-task", "mdi:hand-back-right-outline", "Annehmen", { dataset: `data-task-id="${id}"` }) : ""}
+                  ${canClaim ? iconActionButton("select-claim", "mdi:hand-back-right-outline", "Annehmen", { dataset: `data-task-id="${id}"` }) : ""}
                   ${canAct ? iconActionButton("complete-task", isConfirmation ? "mdi:check-bold" : "mdi:check", isConfirmation ? "Bestätigen" : actingForOther ? "Erledigt (Punkte gehen an dich)" : "Erledigt", { dataset: `data-task-id="${id}"`, extraClass: "success", disabled: disableComplete }) : ""}
                   ${isClaimedByMe ? iconActionButton("release-task", "mdi:undo-variant", "Abbrechen", { dataset: `data-task-id="${id}"` }) : ""}
                   ${showReject && canAct ? iconActionButton("skip-task", "mdi:close", "Ablehnen", { dataset: `data-task-id="${id}"`, extraClass: "danger", disabled: resolved }) : ""}
@@ -3493,6 +3567,7 @@
                   ${iconActionButton("delete-task", "mdi:delete", "Löschen", { dataset: `data-task-id="${id}"`, extraClass: "danger" })}`}
                 </div>
               </div>
+              ${this._pendingClaimId === id ? this._renderClaimConfirm(id) : ""}
               ${rejectionNote ? `<div class="muted" style="color:var(--error-color,#db4437)">⚠ Nicht freigegeben: ${esc(rejectionNote)}</div>` : ""}
               ${subtaskList}
             </div>`;
@@ -3654,7 +3729,7 @@
               return `
                 <div class="row">
                   <div class="row-main">
-                    <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.name, f.note)}</span>
+                    <span class="name">${esc(f.name)}${noteInfoIcon(f.name, f.note)}</span>
                     <span class="muted">${esc(detailParts.join(" · "))}</span>
                   </div>
                   <div class="row-actions">
@@ -3712,7 +3787,7 @@
           return `
             <div class="row">
               <div class="row-main">
-                <span class="name">${f.icon ? `<ha-icon icon="${esc(f.icon)}"></ha-icon> ` : ""}${esc(f.name)}${noteInfoIcon(f.name, f.note)}</span>
+                <span class="name">${esc(f.name)}${noteInfoIcon(f.name, f.note)}</span>
                 <span class="muted">${esc(detailParts.join(" · "))}</span>
               </div>
               <div class="row-actions">
@@ -4233,6 +4308,18 @@
     // siehe _openTopScorerInfo. Der zweite Weg existiert extra dafür, dass
     // die Regel auch bei Gleichstand oder ganz ohne Punkte nachlesbar
     // bleibt, wenn also gerade keine Krone zu sehen ist.
+    //
+    // v0.56: deutlich gekürzt (explizite Nutzeranfrage) - die seit v0.55
+    // bestehende Wochenziel-Bedingung (_weeklyProgressGoal) steht jetzt
+    // direkt im fett gedruckten Hauptsatz statt in einem eigenen,
+    // zusätzlichen Absatz darunter (vorher: "und sein Wochenziel (X Punkte)
+    // erreicht hat" nur als separater "Zusätzliche Bedingung:"-Absatz), das
+    // "und" dabei unterstrichen zur besseren Klarstellung, dass beide
+    // Bedingungen zugleich gelten müssen. Der bisher letzte Absatz (die
+    // frühere eigenständige Wochenziel-Erläuterung) entfällt dadurch
+    // ersatzlos - der verbleibende, weiterhin erhaltene zweite Absatz
+    // erklärt nur noch die Vergleichsbasis (absolute Punkte) und die
+    // Gleichstand-Regel.
     _renderTopScorerInfo() {
       const coins = this._topScorerBonusCoins();
       if (coins <= 0) {
@@ -4243,13 +4330,12 @@
       // - reuses die bestehende, ohnehin schon angezeigte Wochenziel-Zahl
       // (_weeklyProgressGoal) statt einen eigenen Options-Wert einzuführen.
       const goal = this._weeklyProgressGoal();
-      const minPointsLine = goal > 0
-        ? `<p class="muted">Zusätzliche Bedingung: die Siegerin/der Sieger muss dabei mindestens das eigene Wochenziel (${esc(goal)} Pkt.) erreicht haben - sonst wird diese Woche kein Bonus vergeben, auch nicht bei einer eindeutigen Führung.</p>`
-        : "";
+      const mainSentence = goal > 0
+        ? `Wer am Ende der Woche (Sonntag Mitternacht) die meisten Punkte gesammelt hat <u>und</u> sein Wochenziel (${esc(goal)} Punkte) erreicht hat, erhält ${esc(coinsLabel(coins))}`
+        : `Wer am Ende der Woche (Sonntag Mitternacht) die meisten Punkte gesammelt hat, erhält ${esc(coinsLabel(coins))}`;
       return `
-        <p>Wer am Ende der Woche (Sonntag Mitternacht) die meisten Punkte gesammelt hat, erhält <strong>${esc(coinsLabel(coins))}</strong>.</p>
-        <p class="muted">Es zählt der absolute Punktestand der Woche, nicht der Fortschritt zu einem Wochenziel. Bei Gleichstand - auch wenn niemand diese Woche etwas erledigt hat - wird der Bonus an niemanden vergeben. Ausgezahlt wird erst, nachdem die Woche vollständig abgelaufen ist.</p>
-        ${minPointsLine}
+        <p><strong>${mainSentence}.</strong></p>
+        <p class="muted">Es zählt der absolute Punktestand der Woche, nicht der Fortschritt zu einem Wochenziel. Bei Gleichstand - auch wenn niemand diese Woche etwas erledigt hat - wird der Bonus an niemanden vergeben.</p>
       `;
     }
 
@@ -4314,6 +4400,41 @@
         <p class="muted">${statusLine}${currentWeeklyPayout > 0 ? ` Aktuell laufender Wochenbonus: ${esc(coinsLabel(currentWeeklyPayout))}.` : ""}</p>
         ${otherTierNote}
       `;
+    }
+
+    // v0.56: "Münzen-Guthaben" - bisher zeigte die Belohnungs-Sektion nur
+    // "Dein Guthaben" für den gerade angemeldeten Nutzer (und für einen
+    // Eltern-Account, der mit keinem Mitglied verknüpft ist, gar nichts).
+    // Explizite Nutzeranfrage: "Die Anzahl der verfügbaren Münzen sollte für
+    // alle Kinder und für jeden sichtbar in der Belohnungs-Sektion
+    // dargestellt werden." Zeigt jetzt eine Zeile pro aktivem "Kind"-Mitglied
+    // (alphabetisch), unabhängig davon wer gerade angemeldet ist - ein Kind
+    // sieht dadurch jetzt auch das Guthaben seiner Geschwister, nicht nur
+    // sein eigenes. Wiederverwendet dasselbe .list/.row-Muster wie der
+    // übrige Katalog darunter statt eigener Chips, damit sich die Zeile
+    // optisch nahtlos einfügt. Die eigene Zeile ist mit "(du)" markiert,
+    // sofern der aktuelle Nutzer mit einem der angezeigten Mitglieder
+    // verknüpft ist.
+    _renderCoinBalances(currentMemberId) {
+      const ids = Object.keys(this._members)
+        .filter((id) => this._members[id].role === "child" && this._members[id].active !== false)
+        .sort((a, b) => this._members[a].name.localeCompare(this._members[b].name, "de", { sensitivity: "base" }));
+      if (!ids.length) return "";
+      return `
+        <div class="list">${ids
+          .map((id) => {
+            const member = this._members[id];
+            const coins = this._coinsAvailableFor(id);
+            const notParticipating = member.participates_in_rewards === false || member.paused === true;
+            return `
+              <div class="row">
+                <div class="row-main">
+                  <span class="name">${member.icon ? `<ha-icon icon="${esc(member.icon)}"></ha-icon> ` : ""}${esc(member.name)}${id === currentMemberId ? ` <span class="muted">(du)</span>` : ""}</span>
+                  <span class="muted">${coinsLabel(coins)}${notParticipating ? " · nimmt nicht teil" : ""}</span>
+                </div>
+              </div>`;
+          })
+          .join("")}</div>`;
     }
 
     // v0.21: "Belohnungen" ausblendbar - für alle sichtbarer Umschalter,
@@ -4457,7 +4578,8 @@
           <h4>Belohnungen</h4>
           <button class="link" data-action="toggle-hide-rewards">Ausblenden</button>
         </div>
-        ${currentMemberId ? `<p class="muted">Dein Guthaben: ${coinsLabel(availableCoins)}${currentParticipates ? "" : " (nimmt nicht am Belohnungssystem teil)"}</p>` : ""}
+        ${this._renderCoinBalances(currentMemberId)}
+        ${currentMemberId && !currentParticipates ? `<p class="muted">Du nimmst nicht am Belohnungssystem teil.</p>` : ""}
         ${convertWidget}
         ${catalogList}
         ${canManageRewards ? `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>` : ""}
@@ -4535,7 +4657,6 @@
           <div class="grid2">
             <label>Punkte<input type="number" min="0" data-field="points" value="${esc(f.points)}"></label>
             <label>Münzwert (optional)<input type="number" min="0" data-field="coin_value" value="${esc(f.coin_value)}"></label>
-            <label>Icon (optional)<ha-icon-picker data-field="icon" placeholder="mdi:car-wash" value="${esc(f.icon)}"></ha-icon-picker></label>
           </div>
           <label>Fest zugewiesen an (optional, mehrere möglich)</label>
           <div class="chips">${memberCheckboxes}</div>
@@ -5141,12 +5262,18 @@
            in _renderProgressSection), es gibt also keinen "noch nicht
            erreicht"-Zustand, den es von einem "erreicht"-Zustand optisch zu
            unterscheiden gäbe. */
+        /* v0.56: etwas kräftiger als bis dahin (dickerer Rand, warme
+           Hintergrundfüllung statt reiner Kartenfarbe, größere Schrift) -
+           "Die grafischen Marken für den Streak-Bonus sollten etwas besser
+           sichtbar sein", explizite Nutzeranfrage. Der dünne 1px-Rand auf
+           reinem Kartenhintergrund ging bisher leicht im übrigen
+           Balken-Trubel (Meilenstein-Badges, Marken) unter. */
         .bar-streak-badge { position: absolute; bottom: 0; display: inline-flex; align-items: center;
-                             gap: 1px; font-size: 0.65em; font-weight: 600; line-height: 1.4;
-                             color: var(--primary-text-color); background: var(--card-background-color, #fff);
-                             border: 1px solid #ff6f00; border-radius: 8px;
-                             padding: 0 4px; white-space: nowrap; cursor: default; }
-        .bar-streak-badge .flame { font-size: 1.1em; }
+                             gap: 1px; font-size: 0.75em; font-weight: 700; line-height: 1.4;
+                             color: var(--primary-text-color); background: rgba(255, 111, 0, 0.16);
+                             border: 2px solid #ff6f00; border-radius: 8px;
+                             padding: 0 5px; white-space: nowrap; cursor: default; }
+        .bar-streak-badge .flame { font-size: 1.2em; }
         /* v0.52: "Wochensieger"-Krone neben dem Namen in der
            Wochenfortschritt-Zeile - siehe topScorerBadge in
            _renderProgressSection. */
@@ -5161,10 +5288,16 @@
            gediehen ist - Punkt 3 markiert den Eintritt in die dauerhaft
            verdoppelte Bonus-Stufe (v0.54: keine letzte/gedeckelte
            Auszahlung mehr, siehe _renderStreakInfo). */
-        .streak-dots { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: 1px; cursor: pointer; }
+        .streak-dots { display: inline-flex; gap: 3px; margin-left: 4px; vertical-align: 1px; cursor: pointer; }
         .streak-dots:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
-        .streak-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-                      background: var(--disabled-text-color, #bdbdbd); opacity: 0.5; }
+        /* v0.56: etwas größer (7px -> 9px) mit einem dünnen, kartenfarbenen
+           Rand für Kontur gegen jeden Hintergrund/jedes Theme, sowie höhere
+           Grundopazität für den noch nicht erreichten Zustand (0.5 -> 0.65) -
+           gleiche "etwas besser sichtbar"-Anfrage wie beim Flammen-Badge
+           oben. Die drei erreichten Farben selbst bleiben unverändert. */
+        .streak-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                      background: var(--disabled-text-color, #bdbdbd); opacity: 0.65;
+                      border: 1px solid var(--card-background-color, #fff); box-sizing: border-box; }
         .streak-dot-1 { background: #ffcc80; opacity: 1; }
         .streak-dot-2 { background: #ffa726; opacity: 1; }
         .streak-dot-3 { background: #ff6f00; opacity: 1; }
@@ -5265,8 +5398,9 @@
             this._hass.callService("family_tasks", "skip_task", { task_id: taskId });
           }
         }
-        else if (action === "claim-task")
-          this._hass.callService("family_tasks", "claim_task", { task_id: el.dataset.taskId });
+        else if (action === "select-claim") this._selectClaim(el.dataset.taskId);
+        else if (action === "cancel-claim") this._cancelClaim();
+        else if (action === "confirm-claim") this._confirmClaim(el.dataset.taskId);
         else if (action === "release-task")
           this._hass.callService("family_tasks", "release_task", { task_id: el.dataset.taskId });
         else if (action === "new-own-task") { if (this._isChildUser()) this._openOwnTaskForm(); }

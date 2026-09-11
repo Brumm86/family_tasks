@@ -57,6 +57,7 @@ from .storage import (
     TaskStorageCollection,
     TopScorerBonusStateStore,
     TriggerStateStore,
+    UpdateNoticeStateStore,
     VacationModeStateStore,
     async_create_battery_overrides_collection,
     async_create_checklist_state_store,
@@ -72,6 +73,7 @@ from .storage import (
     async_create_tasks_collection,
     async_create_top_scorer_bonus_state_store,
     async_create_trigger_state_store,
+    async_create_update_notice_state_store,
     async_create_vacation_mode_state_store,
     async_member_id_for_context,
     async_setup_websocket_api,
@@ -282,7 +284,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _async_register_services(hass)
-    await _async_register_frontend(hass)
+    await _async_register_frontend(hass, members)
 
     return True
 
@@ -411,7 +413,9 @@ def _async_notify_new_task_assignments(hass: HomeAssistant, members: MemberStora
     return _listener
 
 
-async def _async_register_frontend(hass: HomeAssistant) -> None:
+async def _async_register_frontend(
+    hass: HomeAssistant, members: MemberStorageCollection
+) -> None:
     """Serve the bundled Lovelace card and auto-inject it on every dashboard.
 
     Uses add_extra_js_url so the card is available without the user having
@@ -461,13 +465,22 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     considers modern keep using the dynamic-import path exactly as before,
     and any older/unrecognized browser now gets the identical file via the
     plain-script fallback instead of nothing at all.
+
+    v0.56: on top of the URL-level cache-busting above, also best-effort
+    tells every family member once per actual version change that it's
+    worth fully restarting the Companion App - see
+    _async_notify_frontend_update below for why that's the closest this
+    integration can get to "clearing" a phone's own frontend cache, since
+    there is no API for a Home Assistant integration to reach into a
+    Companion App and force that itself.
     """
     if hass.data.get(f"{DOMAIN}_frontend_registered"):
         return
     hass.data[f"{DOMAIN}_frontend_registered"] = True
 
     integration = await async_get_integration(hass, DOMAIN)
-    cache_buster = f"v={integration.version}"
+    current_version = str(integration.version)
+    cache_buster = f"v={current_version}"
 
     www_dir = Path(__file__).parent / "www"
     await hass.http.async_register_static_paths(
@@ -479,6 +492,84 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     # HA's frontend doesn't classify as "latestJS" would never even attempt
     # to load the card at all, regardless of caching.
     add_extra_js_url(hass, card_url, es5=True)
+
+    await _async_notify_frontend_update(hass, members, current_version)
+
+
+async def _async_notify_frontend_update(
+    hass: HomeAssistant, members: MemberStorageCollection, current_version: str
+) -> None:
+    """Best-effort "please restart the Companion App" notice after an update.
+
+    _async_register_frontend's own "?v=<integration version>" cache-buster
+    (see its docstring above) already forces every browser/Companion-App
+    WebView to fetch the new family-tasks-card.js on the next dashboard load
+    instead of quietly keeping a stale, incompatible one cached - but a Home
+    Assistant custom integration has no API to reach into a phone's
+    Companion App and force *its own* frontend cache to actually revalidate.
+    What v0.48/v0.51 established from real user reports (a Samsung
+    Companion App WebView kept serving a pre-fix resource list until fully
+    restarted, not just backgrounded/reopened) is that a full app restart
+    reliably clears it. This function can't trigger that restart either -
+    nothing can, from server-side - but it can at least tell every family
+    member, automatically, that it's now worth doing.
+
+    Fires at most once per actual version change (see
+    UpdateNoticeStateStore in storage.py) - not on every Home Assistant
+    restart, and not again on a plain config-entry reload (options change)
+    that didn't come with a version bump. The very first time this ever
+    runs (UpdateNoticeStateStore has nothing stored yet - a brand-new
+    install, or an existing household's first restart after upgrading to
+    the version that introduced this feature) only seeds the marker without
+    notifying anyone: a fresh install isn't "updated" from anything, and an
+    existing household only starts getting these notices from their *next*
+    version bump onward. Uses the same two-channel notify_service/
+    persistent_notification delivery as _async_notify_member above, kept as
+    an independent implementation rather than a shared call since that
+    helper's signature/notification_id/event are all task-shaped and don't
+    fit an update notice.
+    """
+    state: UpdateNoticeStateStore = await async_create_update_notice_state_store(hass)
+    is_first_ever_run = state.last_notified_version is None
+    if state.last_notified_version == current_version:
+        return
+    await state.async_set(current_version)
+    if is_first_ever_run:
+        # A brand-new install isn't an "update" - nothing to tell anyone to
+        # restart yet, and members/notify_service may not even be set up
+        # this early. Just seed the marker so the *next* real version bump
+        # is the first one that actually notifies anyone.
+        return
+
+    title = "Family Tasks aktualisiert"
+    message = (
+        f"Family Tasks wurde auf Version {current_version} aktualisiert. Bitte "
+        "die Companion App einmal vollständig neu starten (nicht nur in den "
+        "Hintergrund legen), damit sie die neueste Kartenversion lädt."
+    )
+    for member_id, member in members.data.items():
+        if not member.get("active", True):
+            continue
+        notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
+        if notify_service:
+            try:
+                await hass.services.async_call(
+                    "notify", notify_service, {"title": title, "message": message}, blocking=False
+                )
+                continue
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "Failed to call notify.%s for %s: %s", notify_service, member_id, err
+                )
+        try:
+            persistent_notification.async_create(
+                hass,
+                message,
+                title=title,
+                notification_id=f"{DOMAIN}_update_{current_version}_{member_id}",
+            )
+        except Exception as err:  # noqa: BLE001 - best-effort, must never block setup
+            _LOGGER.warning("Failed to raise persistent notification for %s: %s", member_id, err)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
