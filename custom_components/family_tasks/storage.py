@@ -82,7 +82,6 @@ from .const import (
     STORAGE_KEY_TOP_SCORER_BONUS_STATE,
     STORAGE_KEY_TASKS,
     STORAGE_KEY_TRIGGER_STATE,
-    STORAGE_KEY_UPDATE_NOTICE_STATE,
     STORAGE_KEY_VACATION_MODE,
     STORAGE_KEY_WEEKLY_BONUS_STATE,
     STORAGE_VERSION,
@@ -2984,47 +2983,5 @@ async def async_create_vacation_mode_state_store(
 ) -> VacationModeStateStore:
     """Create and load the Urlaubsmodus state store."""
     store = VacationModeStateStore(hass, default_active)
-    await store.async_load()
-    return store
-
-
-class UpdateNoticeStateStore:
-    """Remembers which integration version every family member was last told
-    about via a "please restart the Companion App" notice.
-
-    Backs _async_notify_frontend_update in __init__.py. See that function's
-    docstring for why this exists: _async_register_frontend's own
-    "?v=<integration version>" cache-buster already forces a fresh fetch of
-    family-tasks-card.js on every version bump, but a custom integration has
-    no way to reach into a phone's Companion App and force its own frontend
-    cache to actually revalidate - a full app restart is what reliably
-    clears it (see the Samsung Companion App findings in v0.48/v0.51). This
-    store just remembers the last version everyone was already notified
-    about, same "runtime state, not a StorageCollection" reasoning as
-    VacationModeStateStore above - there is exactly one value, not a
-    collection of records - so the notice fires exactly once per actual
-    version change instead of on every single Home Assistant restart.
-    """
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        self._store: Store[dict[str, Any]] = Store(
-            hass, STORAGE_VERSION, STORAGE_KEY_UPDATE_NOTICE_STATE, minor_version=STORAGE_VERSION_MINOR
-        )
-        self.last_notified_version: str | None = None
-
-    async def async_load(self) -> None:
-        """Load the last-notified version from disk, if any."""
-        stored = await self._store.async_load()
-        self.last_notified_version = stored["last_notified_version"] if stored else None
-
-    async def async_set(self, version: str) -> None:
-        """Remember that every family member has now been told about ``version``."""
-        self.last_notified_version = version
-        await self._store.async_save({"last_notified_version": version})
-
-
-async def async_create_update_notice_state_store(hass: HomeAssistant) -> UpdateNoticeStateStore:
-    """Create and load the update-notice state store."""
-    store = UpdateNoticeStateStore(hass)
     await store.async_load()
     return store

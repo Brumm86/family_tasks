@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.58.0] - 2026-09-11
+
+### Removed
+- **„Companion App neu starten“-Hinweis nach einem Update wieder entfernt**: die in v0.56 eingeführte automatische Benachrichtigung („Family Tasks wurde auf Version X aktualisiert. Bitte die Companion App einmal vollständig neu starten...“, per `notify.*` bzw. als `persistent_notification`) entfällt auf ausdrücklichen Nutzerwunsch ersatzlos. `_async_notify_frontend_update` (`__init__.py`) sowie die zugehörige `UpdateNoticeStateStore` (`storage.py`/`const.py`) wurden vollständig entfernt, inklusive aller Imports und des Aufrufs aus `_async_register_frontend`. Der seit v0.48 bestehende `?v=<Version>`-Cache-Buster an der Karten-URL sowie dessen `es5=True`-Fallback für ältere Companion-App-WebViews (v0.48) bleiben unverändert bestehen - nur der zusätzliche Neustart-Hinweis fällt weg.
+
 ## [0.57.0] - 2026-09-11
 
 ### Added

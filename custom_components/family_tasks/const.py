@@ -732,12 +732,6 @@ STORAGE_KEY_VACATION_MODE: Final = f"{DOMAIN}.vacation_mode"
 # single coordinator refresh for as long as the occurrence stays pending or
 # overdue.
 STORAGE_KEY_DEADLINE_NOTIFICATION_STATE: Final = f"{DOMAIN}.deadline_notification_state"
-# v0.56: remembers which integration version every family member was last
-# told about via _async_notify_frontend_update (__init__.py) - see
-# UpdateNoticeStateStore in storage.py. Without this, the "please restart the
-# Companion App" notice would re-fire on every single Home Assistant restart,
-# not just after an actual version change.
-STORAGE_KEY_UPDATE_NOTICE_STATE: Final = f"{DOMAIN}.update_notice_state"
 
 MAX_COMPLETION_LOG_ENTRIES: Final = 500
 
