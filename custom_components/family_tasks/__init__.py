@@ -47,6 +47,7 @@ from .storage import (
     ClaimStateStore,
     CoinLedgerStore,
     CompletionLogStore,
+    DeadlineExtensionStateStore,
     DeadlineNotificationStateStore,
     FavoriteStorageCollection,
     MemberStorageCollection,
@@ -63,6 +64,7 @@ from .storage import (
     async_create_checklist_state_store,
     async_create_claim_state_store,
     async_create_coin_ledger_store,
+    async_create_deadline_extension_state_store,
     async_create_deadline_notification_state_store,
     async_create_favorites_collection,
     async_create_members_collection,
@@ -139,6 +141,7 @@ class FamilyTasksRuntimeData:
     coin_ledger: CoinLedgerStore
     deadline_notification_state: DeadlineNotificationStateStore
     top_scorer_bonus_state: TopScorerBonusStateStore
+    deadline_extension_state: DeadlineExtensionStateStore
 
 
 FamilyTasksConfigEntry: TypeAlias = ConfigEntry[FamilyTasksRuntimeData]
@@ -198,6 +201,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     )
     # v0.41: see DeadlineNotificationStateStore in storage.py.
     deadline_notification_state = await async_create_deadline_notification_state_store(hass)
+    # v0.57: see DeadlineExtensionStateStore in storage.py.
+    deadline_extension_state = await async_create_deadline_extension_state_store(hass)
 
     coordinator = FamilyTasksCoordinator(
         hass,
@@ -216,6 +221,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         coin_ledger,
         deadline_notification_state,
         top_scorer_bonus_state,
+        deadline_extension_state,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -236,6 +242,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
         coin_ledger=coin_ledger,
         deadline_notification_state=deadline_notification_state,
         top_scorer_bonus_state=top_scorer_bonus_state,
+        deadline_extension_state=deadline_extension_state,
     )
 
     # Sensor-triggered tasks (recurrence type "trigger") open a new occurrence

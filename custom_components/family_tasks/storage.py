@@ -21,6 +21,7 @@ from voluptuous.humanize import humanize_error
 from homeassistant.components import websocket_api
 from homeassistant.const import CONF_ID
 from homeassistant.core import Context, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import collection
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
@@ -49,6 +50,7 @@ from .const import (
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     EVENT_REWARD_REDEEMED,
+    EXTEND_TASK_DEADLINE_MAX_MINUTES,
     MANUAL_POINTS_TASK_ID,
     MAX_COMPLETION_LOG_ENTRIES,
     MEMBER_ROLE_CHILD,
@@ -70,6 +72,7 @@ from .const import (
     STORAGE_KEY_CLAIM_STATE,
     STORAGE_KEY_COIN_LEDGER,
     STORAGE_KEY_COMPLETIONS,
+    STORAGE_KEY_DEADLINE_EXTENSION_STATE,
     STORAGE_KEY_DEADLINE_NOTIFICATION_STATE,
     STORAGE_KEY_FAVORITES,
     STORAGE_KEY_MEMBERS,
@@ -106,6 +109,7 @@ from .const import (
     WS_API_PREFIX_TASKS,
     WS_API_REWARD_REDEEM,
     WS_API_TASK_CREATE_OWN,
+    WS_API_TASK_EXTEND_DEADLINE,
 )
 
 # --- Validation schemas ------------------------------------------------------
@@ -1088,6 +1092,23 @@ CREATE_OWN_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
 )
 
 
+# v0.57 - see WS_API_TASK_EXTEND_DEADLINE in const.py. "minutes" is how much
+# extra time to grant the task's *currently open* occurrence, on top of
+# whatever deadline it (or an earlier extension this same period) already
+# has - see FamilyTasksCoordinator.async_extend_task_deadline. The range
+# bound is the same "sanity limit against fat-finger input" reasoning as
+# AWARD_POINTS_SCHEMA's own range above, not a meaningful business rule.
+EXTEND_TASK_DEADLINE_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_TASK_EXTEND_DEADLINE,
+        vol.Required("task_id"): str,
+        vol.Required("minutes"): vol.All(
+            int, vol.Range(min=1, max=EXTEND_TASK_DEADLINE_MAX_MINUTES)
+        ),
+    }
+)
+
+
 REDEEM_REWARD_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     {
         vol.Required("type"): WS_API_REWARD_REDEEM,
@@ -1646,6 +1667,68 @@ def async_setup_websocket_api(
 
     websocket_api.async_register_command(
         hass, WS_API_TASK_CREATE_OWN, ws_create_own_task, CREATE_OWN_TASK_SCHEMA
+    )
+
+    @websocket_api.async_response
+    async def ws_extend_task_deadline(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Give a task's currently open occurrence more time before it's overdue.
+
+        Parent-only, same "not a child, regardless of HA admin flag" guard
+        used throughout this module (ws_award_points, ws_instantiate_favorite,
+        reward-redemption "fulfilled", member management) - "Verlängern" is
+        an Eltern action, not something a child can grant themselves. Does
+        not touch the task's own definition at all (due_time/overdue_time/
+        overdue_after_minutes are all untouched) - only this one occurrence's
+        deadline is pushed back, via DeadlineExtensionStateStore, so a
+        recurring task's next occurrence still starts fresh against its
+        normal schedule. See FamilyTasksCoordinator.async_extend_task_deadline
+        in coordinator.py, which does the actual work.
+
+        Same "resolved lazily off the config entry's runtime_data" trick as
+        ws_award_points above - the coordinator itself isn't a parameter of
+        async_setup_websocket_api, only ``entry`` is.
+        """
+        role = _member_role_for_user(hass, members, connection.user)
+        if role == MEMBER_ROLE_CHILD:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Mitglieder mit der Rolle 'Kind' dürfen die Frist einer "
+                "Aufgabe nicht verlängern.",
+            )
+            return
+
+        runtime_data = getattr(entry, "runtime_data", None)
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is None:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_UNKNOWN_ERROR, "Koordinator nicht verfügbar."
+            )
+            return
+
+        try:
+            new_deadline = await coordinator.async_extend_task_deadline(
+                msg["task_id"], msg["minutes"]
+            )
+        except HomeAssistantError as err:
+            connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, str(err))
+            return
+
+        if new_deadline is None:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_INVALID_FORMAT,
+                "Für diese Aufgabe ist aktuell nichts fällig, das verlängert "
+                "werden könnte.",
+            )
+            return
+
+        connection.send_result(msg["id"], {"deadline_at": new_deadline.isoformat()})
+
+    websocket_api.async_register_command(
+        hass, WS_API_TASK_EXTEND_DEADLINE, ws_extend_task_deadline, EXTEND_TASK_DEADLINE_SCHEMA
     )
 
     @websocket_api.async_response
@@ -2395,6 +2478,68 @@ class ClaimStateStore:
 async def async_create_claim_state_store(hass: HomeAssistant) -> ClaimStateStore:
     """Create and load the task-claim state store."""
     store = ClaimStateStore(hass)
+    await store.async_load()
+    return store
+
+
+class DeadlineExtensionStateStore:
+    """Tracks a parent-granted deadline extension for a task's open occurrence.
+
+    See EXTEND_TASK_DEADLINE_MAX_MINUTES in const.py and
+    FamilyTasksCoordinator.async_extend_task_deadline in coordinator.py: a
+    parent can push back the moment a task's *current* occurrence counts as
+    "Überfällig" (see deadline_at/_deadline_at in coordinator.py) without
+    touching the task's own due_time/overdue_time/overdue_after_minutes
+    definition at all. Not a StorageCollection: runtime state written only
+    by async_extend_task_deadline, never edited directly by the user - same
+    pattern as ClaimStateStore right above, including its "keyed on task_id
+    only, a stored entry whose period_key no longer matches the task's
+    current period is stale and treated the same as no extension at all"
+    behavior - a recurring task's next occurrence starts completely fresh,
+    unaffected by an extension granted for an earlier one.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store: Store[dict[str, dict[str, Any]]] = Store(
+            hass,
+            STORAGE_VERSION,
+            STORAGE_KEY_DEADLINE_EXTENSION_STATE,
+            minor_version=STORAGE_VERSION_MINOR,
+        )
+        # task_id -> {"period_key": str, "until": iso str}
+        self._state: dict[str, dict[str, Any]] = {}
+
+    async def async_load(self) -> None:
+        """Load open deadline extensions from disk."""
+        self._state = await self._store.async_load() or {}
+
+    def get(self, task_id: str, period_key: str) -> dict[str, Any] | None:
+        """Return the active extension for a task's current period, if any."""
+        entry = self._state.get(task_id)
+        if not entry or entry.get("period_key") != period_key:
+            return None
+        return entry
+
+    async def async_extend(
+        self, task_id: str, period_key: str, *, until: datetime
+    ) -> dict[str, Any]:
+        """Record (or overwrite) how far a task's current occurrence is extended."""
+        entry = {"period_key": period_key, "until": until.isoformat()}
+        self._state[task_id] = entry
+        await self._store.async_save(self._state)
+        return entry
+
+    async def async_clear(self, task_id: str) -> None:
+        """Drop a task's active extension - completed, or the period rolled over."""
+        if self._state.pop(task_id, None) is not None:
+            await self._store.async_save(self._state)
+
+
+async def async_create_deadline_extension_state_store(
+    hass: HomeAssistant,
+) -> DeadlineExtensionStateStore:
+    """Create and load the task deadline-extension state store."""
+    store = DeadlineExtensionStateStore(hass)
     await store.async_load()
     return store
 

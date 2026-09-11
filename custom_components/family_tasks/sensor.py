@@ -88,6 +88,11 @@ class FamilyTasksTaskStatusSensor(
             # card as "Zu erledigen bis HH:MM" - see TaskStatusData.
             # deadline_at in coordinator.py.
             "deadline_at": task.deadline_at.isoformat() if task.deadline_at else None,
+            # v0.57: whether a parent extended (DeadlineExtensionStateStore)
+            # the deadline above beyond the task's own unmodified due_time/
+            # overdue_time/overdue_after_minutes computation - see
+            # TaskStatusData.deadline_extended in coordinator.py.
+            "deadline_extended": task.deadline_extended,
             # v0.27: "Annehmen" reservation state - see ClaimStateStore in
             # storage.py / TaskStatusData.claimed_by_member_id/
             # claim_expires_at/claimable in coordinator.py. While

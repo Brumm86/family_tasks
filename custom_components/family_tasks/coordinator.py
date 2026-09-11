@@ -105,6 +105,7 @@ from .storage import (
     ClaimStateStore,
     CoinLedgerStore,
     CompletionLogStore,
+    DeadlineExtensionStateStore,
     DeadlineNotificationStateStore,
     MemberStorageCollection,
     MilestoneBonusStateStore,
@@ -152,6 +153,15 @@ class TaskStatusData:
     # due_at itself is None (recurrence "trigger"/"confirmation" with no open
     # occurrence yet).
     deadline_at: datetime | None = None
+    # v0.57: whether deadline_at above reflects a parent's "Verlängern"
+    # grant (DeadlineExtensionStateStore) rather than the task's own
+    # unmodified due_time/overdue_time/overdue_after_minutes computation -
+    # see FamilyTasksCoordinator.async_extend_task_deadline. Purely
+    # informational (deadline_at itself already carries the extended value,
+    # every overdue/pause/notification check reads that directly) - lets the
+    # card show e.g. "Frist verlängert" next to the deadline without having
+    # to guess from the timestamp alone.
+    deadline_extended: bool = False
     # v0.27: "Annehmen" reservation state - see ClaimStateStore in storage.py
     # and FamilyTasksCoordinator.async_claim_task/_async_expire_claim. While
     # claimed_by_member_id is set, eligible_member_ids above is narrowed down
@@ -718,6 +728,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         coin_ledger: CoinLedgerStore,
         deadline_notification_state: DeadlineNotificationStateStore,
         top_scorer_bonus_state: TopScorerBonusStateStore,
+        deadline_extension_state: DeadlineExtensionStateStore,
     ) -> None:
         super().__init__(
             hass,
@@ -748,6 +759,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # v0.52: see TopScorerBonusStateStore in storage.py - idempotency
         # cursor for _async_process_top_scorer_coin_bonus below.
         self.top_scorer_bonus_state = top_scorer_bonus_state
+        # v0.57: see DeadlineExtensionStateStore in storage.py - a parent's
+        # "Verlängern" grants for a task's currently open occurrence, read
+        # in _async_update_data below to push back deadline_at, and written
+        # by async_extend_task_deadline.
+        self.deadline_extension_state = deadline_extension_state
 
     async def _async_update_data(self) -> FamilyTasksData:
         now = dt_util.utcnow()
@@ -1043,6 +1059,23 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
             deadline_at = _deadline_at(due_at, period_start, task)
 
+            # v0.57: a parent's "Verlängern" grant for this exact occurrence
+            # (DeadlineExtensionStateStore, keyed on task_id + period_key,
+            # same staleness handling as claim_state right below - an entry
+            # left over from an earlier period is simply ignored) pushes the
+            # deadline back further still. Every downstream check in this
+            # method (TASK_STATUS_OVERDUE below, the mandatory-task
+            # screen-time pause further down, deadline_at itself as exposed
+            # to the card) reads deadline_at, so overriding it once here is
+            # enough - nothing needs to special-case an extension separately.
+            deadline_extended = False
+            extension_entry = self.deadline_extension_state.get(task_id, period_key)
+            if extension_entry is not None:
+                extended_until = dt_util.parse_datetime(extension_entry["until"])
+                if extended_until is not None and extended_until > deadline_at:
+                    deadline_at = extended_until
+                    deadline_extended = True
+
             last_entry = self.completions.get_last_entry(task_id, period_key)
             if last_entry is not None:
                 status = TASK_STATUS_DONE
@@ -1285,6 +1318,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 period_key=period_key,
                 due_at=due_at,
                 deadline_at=deadline_at,
+                deadline_extended=deadline_extended,
                 assigned_member_id=assigned_member_id,
                 assigned_member_ids=assigned_member_ids,
                 eligible_member_ids=eligible_member_ids,
@@ -1663,6 +1697,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 # still-present claim here defensively the same way, but
                 # this is the normal path).
                 await self.claim_state.async_clear(task_id)
+                # v0.57: same reasoning for a "Verlängern" extension, if
+                # any - the child met their (possibly extended) deadline, so
+                # there is nothing left for the extension to protect against
+                # for this period.
+                await self.deadline_extension_state.async_clear(task_id)
                 await self._async_request_confirmation(
                     task, task_id, period_key, acting_member_id
                 )
@@ -1682,6 +1721,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # the next refresh, so a stale "reserved" state can't briefly show
         # for anyone reading coordinator data before that refresh happens.
         await self.claim_state.async_clear(task_id)
+        # v0.57: same for a "Verlängern" extension, if any - the occurrence
+        # is done, so there is nothing left for it to protect.
+        await self.deadline_extension_state.async_clear(task_id)
 
         await self._async_advance_rotation(task_id, task, rotation, member_ids, index)
         if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
@@ -2033,9 +2075,22 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     async def async_release_task(self, task_id: str, member_id: str | None) -> None:
         """Give back an active "Annehmen" reservation before it expires, no penalty.
 
-        Only the claimant themself may release their own claim - anyone else
-        "releasing" it would defeat the point of reserving it in the first
-        place. See async_claim_task above.
+        Normally only the claimant themself may release their own claim -
+        anyone else "releasing" it would defeat the point of reserving it in
+        the first place. See async_claim_task above.
+
+        v0.57: a parent (any member whose own role isn't "child" - same
+        "override" reasoning already used throughout this module, e.g.
+        completing a child's task) may release *any* member's active claim
+        this way too - "Eltern sollen die Möglichkeit erhalten, von Kindern
+        vorgenommene Reservierungen zu beenden", explicit user request. Same
+        no-penalty release as the claimant's own: no CLAIM_PENALTY_POINTS is
+        deducted (this only happens on a genuine timeout, see
+        _async_expire_claim below), and the occurrence simply reopens - for
+        an Aufgabenpool task, that means it shows up in the "Aufgabenpool"
+        section again exactly like it was never claimed, since claiming it
+        is the only thing that ever moved it out of there in the first
+        place (see is_pool_task/claimed_by_member_id in _async_update_data).
         """
         if task_id not in self.tasks.data:
             raise HomeAssistantError(f"Unknown task_id '{task_id}'")
@@ -2048,7 +2103,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         claim_entry = self.claim_state.get(task_id, period_key)
         if claim_entry is None:
             return
-        if member_id is None or claim_entry["member_id"] != member_id:
+        is_owner = member_id is not None and claim_entry["member_id"] == member_id
+        is_parent_override = (
+            member_id is not None and self._member_role(member_id) == MEMBER_ROLE_PARENT
+        )
+        if not is_owner and not is_parent_override:
             _LOGGER.debug(
                 "Task %s's claim belongs to %s, not %s - ignoring release",
                 task_id,
@@ -2059,6 +2118,67 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
 
         await self.claim_state.async_clear(task_id)
         await self.async_request_refresh()
+
+    async def async_extend_task_deadline(self, task_id: str, minutes: int) -> datetime | None:
+        """Push back a task's currently open occurrence's deadline by ``minutes``.
+
+        v0.57 - "Eltern sollen die Möglichkeit haben, die für die
+        Erledigung von Aufgaben zur Verfuegung stehende Zeit zu verlängern",
+        explicit user request, with the explicit constraint that this must
+        never touch the task's own recurring definition - only the single
+        occurrence that's currently due gets more time; the next occurrence
+        starts fresh against the task's normal due_time/overdue_time/
+        overdue_after_minutes again. Implemented as a period-scoped
+        DeadlineExtensionStateStore entry (see storage.py), read back in
+        _async_update_data to override deadline_at for this same period -
+        exactly the same "runtime state, not a task-definition edit" pattern
+        ClaimStateStore already uses for "Annehmen".
+
+        Stacks with an extension already granted this period (each call
+        adds ``minutes`` on top of whatever deadline is currently in effect,
+        not the task's original one) rather than overwriting it - a parent
+        clicking "Verlängern" twice grants two extensions' worth of time,
+        not just the second one. Reads the *last completed refresh's*
+        deadline_at (self.data, same staleness every other action method
+        here already tolerates - see async_complete_task's early-completion
+        guard) as the base to extend from, since recomputing due_at/
+        deadline_at from scratch here would duplicate _async_update_data's
+        own per-recurrence-type logic for no benefit.
+
+        Returns the new deadline, or None if there is currently no open
+        occurrence for this task to extend (the card only ever offers
+        "Verlängern" while one exists - pending or overdue - so this is a
+        defensive guard, not an expected outcome in practice).
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            return None
+
+        current_status = self.data.tasks.get(task_id) if self.data else None
+        if (
+            current_status is None
+            or current_status.period_key != period_key
+            or current_status.deadline_at is None
+        ):
+            return None
+
+        base_deadline = current_status.deadline_at
+        existing_entry = self.deadline_extension_state.get(task_id, period_key)
+        if existing_entry is not None:
+            existing_until = dt_util.parse_datetime(existing_entry["until"])
+            if existing_until is not None and existing_until > base_deadline:
+                base_deadline = existing_until
+
+        new_deadline = base_deadline + timedelta(minutes=minutes)
+        await self.deadline_extension_state.async_extend(
+            task_id, period_key, until=new_deadline
+        )
+        await self.async_request_refresh()
+        return new_deadline
 
     async def _async_expire_claim(self, task_id: str, task: dict, member_id: str) -> None:
         """A claim's CLAIM_RESERVATION_MINUTES ran out before completion.

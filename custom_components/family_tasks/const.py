@@ -640,6 +640,21 @@ CLAIM_PENALTY_POINTS: Final = 1
 # coordinator.py. Logged the same way as CLAIM_PENALTY_POINTS above.
 CONFIRMATION_REJECTION_PENALTY_POINTS: Final = 1
 
+# --- Task deadline extension (v0.57) ----------------------------------------
+#
+# Lets a parent give a task's currently open occurrence more time before it
+# counts as "Überfällig" ("Verlängern") - see
+# FamilyTasksCoordinator.async_extend_task_deadline in coordinator.py and
+# DeadlineExtensionStateStore in storage.py. Deliberately period-scoped, not
+# a change to the task definition itself: it only pushes back *this*
+# occurrence's deadline_at, so a recurring task's next occurrence still
+# starts fresh against its own configured due_time/overdue_time/
+# overdue_after_minutes, completely unaffected by an extension granted for
+# an earlier one. Sanity limit only (obvious fat-finger input, e.g. a stray
+# extra digit), not a meaningful business rule - mirrors the reasoning next
+# to AWARD_POINTS_SCHEMA's own range bound in storage.py.
+EXTEND_TASK_DEADLINE_MAX_MINUTES: Final = 10080  # 7 days
+
 # --- Storage ----------------------------------------------------------------
 
 STORAGE_VERSION: Final = 1
@@ -695,6 +710,10 @@ STORAGE_KEY_FAVORITES: Final = f"{DOMAIN}.favorites"
 # reservation open - see ClaimStateStore in storage.py and the "Task
 # claiming / reservation" section above.
 STORAGE_KEY_CLAIM_STATE: Final = f"{DOMAIN}.claim_state"
+# v0.57: which task occurrence currently has a parent-granted deadline
+# extension, and until when - see DeadlineExtensionStateStore in storage.py
+# and the "Task deadline extension" section above.
+STORAGE_KEY_DEADLINE_EXTENSION_STATE: Final = f"{DOMAIN}.deadline_extension_state"
 # v0.32: per-member Streak-Bonus cursor/counter - see StreakBonusStateStore
 # in storage.py and CONF_STREAK_BONUS_ENABLED above.
 STORAGE_KEY_STREAK_BONUS_STATE: Final = f"{DOMAIN}.streak_bonus_state"
@@ -731,6 +750,10 @@ WS_API_PREFIX_BATTERY_OVERRIDES: Final = f"{DOMAIN}/battery_override"
 # to themselves only (points forced to 0), without needing an administrator
 # account. See ws_create_own_task in storage.py.
 WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
+# v0.57: parent-only command giving a task's currently open occurrence more
+# time before it's overdue - see the "Task deadline extension" section above
+# and ws_extend_task_deadline in storage.py.
+WS_API_TASK_EXTEND_DEADLINE: Final = f"{WS_API_PREFIX_TASKS}/extend_deadline"
 
 # v0.22: read-only command backing the Bestenliste's per-member "which tasks
 # did they complete this week" drill-down (clicking a leaderboard row opens a

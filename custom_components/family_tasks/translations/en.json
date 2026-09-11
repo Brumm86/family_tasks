@@ -147,7 +147,7 @@
     },
     "release_task": {
       "name": "Release task",
-      "description": "Gives back a task claimed via 'Claim task' before its reservation expires, with no point penalty. Only the claimant themself may do this.",
+      "description": "Gives back a task claimed via 'Claim task' before its reservation expires, with no point penalty. The claimant themself may always do this; a parent may also release any member's claim this way.",
       "fields": {
         "task_id": {
           "name": "Task ID",

@@ -2,6 +2,15 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.57.0] - 2026-09-11
+
+### Added
+- **Eltern können eine Kind-Reservierung beenden**: an jeder von einem Kind über "Annehmen" (`claim_task`) reservierten Aufgabe zeigt die Karte Eltern jetzt zusätzlich einen "Reservierung beenden"-Button (`family-tasks-card.js`). Beendet die Reservierung ohne Punktabzug für das Kind - die Aufgabe steht danach wieder offen, bei einer Aufgabenpool-Aufgabe wieder sichtbar im "Aufgabenpool", exakt wie vor der Reservierung. Ruft denselben `family_tasks.release_task`-Service wie das bestehende "Abbrechen" auf; `FamilyTasksCoordinator.async_release_task` erlaubt jetzt zusätzlich jedem Nicht-Kind-Mitglied (nicht nur der reservierenden Person selbst) das Freigeben.
+- **Frist einer fälligen Aufgabe verlängerbar ("Verlängern")**: neuer Button an jeder pendenten/überfälligen Aufgabe (Eltern-only), öffnet ein Dialogfeld mit Stunden-/Minuten-Eingabe (`_selectExtend`/`_renderExtendForm`, `family-tasks-card.js`). Verschiebt ausschließlich die aktuell fällige Einzel-Aufgabe nach hinten - die wiederkehrende Aufgabendefinition selbst (`due_time`/`overdue_time`/`overdue_after_minutes`) bleibt unangetastet, die nächste Fälligkeit folgt wieder dem normalen Zeitplan. Neu: `DeadlineExtensionStateStore` (periodenbezogen, gleiches Verfallsverhalten wie der bestehende `ClaimStateStore`) sowie `FamilyTasksCoordinator.async_extend_task_deadline`, das mehrfache Verlängerungen derselben Fälligkeit aufaddiert statt zu ersetzen. Neues, Eltern-only Websocket-Kommando `family_tasks/task/extend_deadline` (`ws_extend_task_deadline`, `storage.py`) statt eines Services, da die Aktion unabhängig vom technischen Aufrufer immer von einem Elternteil ausgeht. Neue `deadline_extended`-`extra_state_attribute` auf dem Aufgaben-Statussensor (`sensor.py`) zeigt der Karte, ob die angezeigte Frist verlängert wurde.
+
+### Changed
+- **Schwellenwert-Marken im Fortschrittsbalken deutlich besser sichtbar**: die Meilenstein- und Handyzeit-Band-Marken (`.bar-milestone`/`.bar-band-marker::after`) blieben trotz v0.56 auf dem hellen, noch nicht ausgefüllten Balkenabschnitt praktisch unsichtbar - eine feste helle Linie auf hellem Grund ergibt kaum Kontrast. Nutzt jetzt `mix-blend-mode: difference` statt einer festen Farbe (plus `isolation: isolate` auf `.bar-track`, damit der Effekt nur innerhalb des Balkens wirkt): die Linie kehrt sich abhängig vom jeweils darunterliegenden Abschnitt automatisch um und bleibt dadurch unabhängig von Fortschritt, Meilenstein-/Zielfarbe und Theme (hell/dunkel) immer klar erkennbar. Rein optisch, keine Verhaltensänderung.
+
 ## [0.56.0] - 2026-09-11
 
 ### Added

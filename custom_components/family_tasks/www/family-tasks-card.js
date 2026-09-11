@@ -1209,6 +1209,16 @@
       // bevor "Annehmen" tatsächlich family_tasks.claim_task aufruft - siehe
       // _selectClaim/_cancelClaim/_confirmClaim.
       this._pendingClaimId = null;
+      // v0.57: "Frist verlängern" - welche Aufgabe gerade ihre Verlängerungs-
+      // Bestätigungszeile zeigt, und die zuletzt eingegebenen Stunden/
+      // Minuten - gleiches Muster wie _pendingClaimId oberhalb, nur mit
+      // zwei Zahlenfeldern statt eines reinen Bestätigungstexts (siehe
+      // _pendingAwardPoints für das gleiche Zahlenfeld-in-.confirm-row-
+      // Muster). Siehe _selectExtend/_cancelExtend/_confirmExtend/
+      // _renderExtendForm.
+      this._pendingExtendId = null;
+      this._pendingExtendHours = 1;
+      this._pendingExtendMinutes = 0;
     }
 
     setConfig(config) {
@@ -2314,6 +2324,45 @@
       this._render();
     }
 
+    // v0.57: "Frist verlängern" - gleiches aufklappbares-.confirm-row-Muster
+    // wie _selectClaim/_selectAwardPoints oberhalb, mit zwei Zahlenfeldern
+    // (Stunden/Minuten) statt eines reinen Bestätigungstexts. Explizite
+    // Nutzeranfrage: "Hierfür dürfte sich ein kleiner Button anbieten, der
+    // ein weiteres Dialogfeld öffnet, in welchem die Verlängerung in Stunden
+    // und Minuten ausgewählt werden kann." Ruft family_tasks/task/
+    // extend_deadline auf (WS-Kommando, kein Service - siehe
+    // ws_extend_task_deadline in storage.py) statt eines Services, da die
+    // Aktion unabhängig davon ist, wer sie technisch auslöst (immer ein
+    // Elternteil) - anders als complete_task/claim_task/release_task, die
+    // absichtlich den auslösenden Nutzer selbst ermitteln.
+    _selectExtend(taskId) {
+      this._pendingExtendId = taskId;
+      this._pendingExtendHours = 1;
+      this._pendingExtendMinutes = 0;
+      this._render();
+    }
+
+    _cancelExtend() {
+      this._pendingExtendId = null;
+      this._render();
+    }
+
+    async _confirmExtend(taskId) {
+      const hours = Math.max(0, Math.trunc(Number(this._pendingExtendHours)) || 0);
+      const minutes = Math.max(0, Math.trunc(Number(this._pendingExtendMinutes)) || 0);
+      const totalMinutes = hours * 60 + minutes;
+      if (!totalMinutes) return;
+      await this._callWS({
+        type: "family_tasks/task/extend_deadline",
+        task_id: taskId,
+        minutes: totalMinutes,
+      });
+      this._pendingExtendId = null;
+      this._pendingExtendHours = 1;
+      this._pendingExtendMinutes = 0;
+      this._render();
+    }
+
     // v0.49: "Punkteshop" - Self-Service-Umtausch eigener Münzen in Punkte,
     // gleiches Muster wie _selectReward/_cancelRedeem/_confirmRedeem oberhalb
     // (aufklappbare Bestätigungszeile statt sofortiger Aktion). Das Backend
@@ -3310,6 +3359,29 @@
         </div>`;
     }
 
+    // v0.57: Inhalt der "Frist verlängern"-Bestätigungszeile (siehe
+    // _selectExtend/_pendingExtendId) - zwei Zahlenfelder (Stunden/Minuten)
+    // statt eines reinen Bestätigungstexts, gleiches Grundmuster wie die
+    // "Punkte vergeben"-Zeile (_renderMembersList/award-points-value).
+    _renderExtendForm(taskId) {
+      const hours = this._pendingExtendHours ?? 1;
+      const minutes = this._pendingExtendMinutes ?? 0;
+      const totalMinutes = Math.max(0, Math.trunc(Number(hours)) || 0) * 60
+        + Math.max(0, Math.trunc(Number(minutes)) || 0);
+      return `
+        <div class="confirm-row">
+          <span>Wie viel mehr Zeit soll diese Aufgabe bekommen? Nur diese fällige Aufgabe wird verschoben, die wiederkehrende Aufgabe selbst bleibt unverändert.</span>
+          <label>Stunden
+            <input type="number" step="1" min="0" data-action="extend-hours" data-task-id="${taskId}" value="${esc(hours)}">
+          </label>
+          <label>Minuten
+            <input type="number" step="1" min="0" max="59" data-action="extend-minutes" data-task-id="${taskId}" value="${esc(minutes)}">
+          </label>
+          <button data-action="confirm-extend" data-task-id="${taskId}" ${totalMinutes ? "" : "disabled"}>Verlängern</button>
+          <button type="button" class="link" data-action="cancel-extend">Abbrechen</button>
+        </div>`;
+    }
+
     // v0.30: extracted out of _renderTaskList (which still uses this for
     // every id it keeps after its own filtering) so _renderTaskPoolSection
     // below can render "Aufgabenpool" rows with exactly the same markup/
@@ -3407,10 +3479,23 @@
           // there's still something to do (pending/overdue; a done/
           // confirmation occurrence has nothing left to be "due" by).
           const deadlineAt = statusState?.attributes?.deadline_at;
-          const deadlineSuffix =
-            !isConfirmation && deadlineAt && (status === "pending" || status === "overdue")
-              ? ` · Zu erledigen bis ${esc(formatDeadline(deadlineAt))}`
-              : "";
+          const isDueNow = !isConfirmation && deadlineAt && (status === "pending" || status === "overdue");
+          // v0.57: whether a parent already extended ("Verlängern") this
+          // exact occurrence's deadline - see TaskStatusData.deadline_extended
+          // in coordinator.py. deadline_at above already carries the
+          // extended value either way, this only adds the "(verlängert)"
+          // hint so it's clear at a glance why the time is later than the
+          // task's own configured Fälligkeit/Überfällig-ab would suggest.
+          const deadlineExtended = !!statusState?.attributes?.deadline_extended;
+          const deadlineSuffix = isDueNow
+            ? ` · Zu erledigen bis ${esc(formatDeadline(deadlineAt))}${deadlineExtended ? " (verlängert)" : ""}`
+            : "";
+          // v0.57: "Frist verlängern" - see _selectExtend/_renderExtendForm.
+          // Parent-only (same isParentUser gate as every other parent-
+          // override action here), and only while there's actually an open
+          // deadline to push back - same condition as deadlineSuffix/
+          // isDueNow above.
+          const canExtendDeadline = isParentUser && isDueNow;
           // v0.38: a "trigger" (sensor-based) task used to show only the
           // bound sensor's live value here ("Sensor: 18.4 °C") instead of
           // the point value every other task's detail line ends with -
@@ -3561,6 +3646,8 @@
                   ${canClaim ? iconActionButton("select-claim", "mdi:hand-back-right-outline", "Annehmen", { dataset: `data-task-id="${id}"` }) : ""}
                   ${canAct ? iconActionButton("complete-task", isConfirmation ? "mdi:check-bold" : "mdi:check", isConfirmation ? "Bestätigen" : actingForOther ? "Erledigt (Punkte gehen an dich)" : "Erledigt", { dataset: `data-task-id="${id}"`, extraClass: "success", disabled: disableComplete }) : ""}
                   ${isClaimedByMe ? iconActionButton("release-task", "mdi:undo-variant", "Abbrechen", { dataset: `data-task-id="${id}"` }) : ""}
+                  ${isClaimedByOther && isParentUser ? iconActionButton("release-task", "mdi:cancel", "Reservierung beenden", { dataset: `data-task-id="${id}"` }) : ""}
+                  ${canExtendDeadline ? iconActionButton("select-extend", "mdi:clock-plus-outline", "Frist verlängern", { dataset: `data-task-id="${id}"` }) : ""}
                   ${showReject && canAct ? iconActionButton("skip-task", "mdi:close", "Ablehnen", { dataset: `data-task-id="${id}"`, extraClass: "danger", disabled: resolved }) : ""}
                   ${isConfirmation || !isAdmin ? "" : `
                   ${iconActionButton("edit-task", "mdi:pencil", "Bearbeiten", { dataset: `data-task-id="${id}"` })}
@@ -3568,6 +3655,7 @@
                 </div>
               </div>
               ${this._pendingClaimId === id ? this._renderClaimConfirm(id) : ""}
+              ${this._pendingExtendId === id ? this._renderExtendForm(id) : ""}
               ${rejectionNote ? `<div class="muted" style="color:var(--error-color,#db4437)">⚠ Nicht freigegeben: ${esc(rejectionNote)}</div>` : ""}
               ${subtaskList}
             </div>`;
@@ -5200,8 +5288,15 @@
            border-box keeps the track's total height at 6px including the
            border, so nothing else needs adjusting (.bar-fill's height:100%
            still exactly fills the space inside it). */
+        /* v0.57: isolation:isolate gives the track its own local stacking/
+           compositing context so the marker lines' mix-blend-mode:difference
+           below (.bar-milestone, .bar-band-marker::after) only blends
+           against what's actually inside the bar (the light track
+           background, or .bar-fill's colour once it reaches that far),
+           never against anything behind the whole card. */
         .bar-track { position: relative; height: 6px; border-radius: 3px; background: var(--secondary-background-color, #f2f2f2);
-                     border: 1px solid var(--divider-color, #e0e0e0); box-sizing: border-box; overflow: hidden; }
+                     border: 1px solid var(--divider-color, #e0e0e0); box-sizing: border-box; overflow: hidden;
+                     isolation: isolate; }
         .bar-fill { height: 100%; border-radius: 3px; background: var(--primary-color); }
         /* v0.29: Wochenziel erreicht (siehe _renderProgressSection,
            goalReached) - eigene Farbe, damit auf einen Blick klar ist,
@@ -5222,8 +5317,19 @@
            künftig gewünscht; aktuell optisch identisch, die Farbe des
            Balkens selbst (bar-fill.milestone-*-reached oben) trägt die
            eigentliche Information. */
-        .bar-milestone { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
-                         background: var(--card-background-color, #fff); opacity: 0.9; }
+        /* v0.57: "Die Schwellenwerte auf dem Fortschrittsbalken sind
+           weiterhin nur sehr schwer sichtbar" (explizite Nutzerrückmeldung,
+           nach v0.56 immer noch offen) - eine feste helle Linie war auf dem
+           ebenfalls hellen, unausgefüllten Balkenabschnitt praktisch
+           unsichtbar. mix-blend-mode:difference macht die Linie stattdessen
+           IMMER sichtbar, unabhängig davon, worüber sie gerade liegt (heller
+           Track, farbiger .bar-fill, egal welche Meilenstein-/Zielfarbe) -
+           auf einem hellen Hintergrund ergibt Weiß-minus-hell ein dunkler
+           Strich, auf einem farbigen/dunklen Hintergrund entsprechend hell,
+           ganz ohne pro Hintergrundfarbe eine eigene Linienfarbe pflegen zu
+           müssen. Funktioniert in beiden Themes gleichermaßen. */
+        .bar-milestone { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px;
+                         background: #fff; opacity: 1; mix-blend-mode: difference; }
         /* v0.36: leichte Marken bei den Handyzeit-Tick-Bändern (siehe
            bandMarkers in _renderProgressSection) - bewusst unauffälliger als
            .bar-milestone oben, da sie keinen eigenen Bonus markieren,
@@ -5235,8 +5341,11 @@
            realistische Trefferfläche besteht. */
         .bar-band-marker { position: absolute; top: 0; bottom: 0; width: 16px; margin-left: -8px;
                             background: none; border: none; padding: 0; cursor: pointer; }
-        .bar-band-marker::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px;
-                                   margin-left: -0.5px; background: var(--card-background-color, #fff); opacity: 0.5; }
+        /* v0.57: same mix-blend-mode:difference visibility fix as
+           .bar-milestone above, plus a bit thicker (1px -> 2px) - see that
+           rule's comment. */
+        .bar-band-marker::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+                                   margin-left: -1px; background: #fff; opacity: 1; mix-blend-mode: difference; }
         .bar-band-marker:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         /* v0.49: Münzenbelohnungs-Badge an einer Meilenstein-Schwelle -
            schwebt in .bar-wrap's reserviertem oberem Padding, direkt über der
@@ -5402,7 +5511,25 @@
         else if (action === "cancel-claim") this._cancelClaim();
         else if (action === "confirm-claim") this._confirmClaim(el.dataset.taskId);
         else if (action === "release-task")
+          // v0.57: same service call for a parent ending someone else's
+          // reservation as for the claimant giving back their own - no
+          // task_id-side distinction needed, the backend (async_release_task
+          // in coordinator.py) now itself allows a parent's own resolved
+          // member_id to override whoever the claim actually belongs to.
           this._hass.callService("family_tasks", "release_task", { task_id: el.dataset.taskId });
+        else if (action === "select-extend") {
+          // Defense-in-depth, same reasoning as edit-task/delete-task above -
+          // the backend enforces this too regardless (see
+          // ws_extend_task_deadline in storage.py). Same isParentUser check
+          // as everywhere else in this file (no reusable helper method for
+          // it - each call site inlines isAdmin && !isChildUser).
+          if (this._isAdmin() && !this._isChildUser()) this._selectExtend(el.dataset.taskId);
+        } else if (action === "cancel-extend") {
+          this._cancelExtend();
+        } else if (action === "confirm-extend") {
+          if (this._isAdmin() && !this._isChildUser())
+            this._confirmExtend(el.dataset.taskId)?.catch(() => {});
+        }
         else if (action === "new-own-task") { if (this._isChildUser()) this._openOwnTaskForm(); }
         else if (action === "cancel-own-task-form") this._closeOwnTaskForm();
         else if (action === "new-member") { if (this._isAdmin() && !this._isChildUser()) this._openMemberForm(null); }
@@ -5650,6 +5777,21 @@
         const awardNoteEl = ev.target.closest('[data-action="award-points-note"]');
         if (awardNoteEl) {
           this._pendingAwardNote = awardNoteEl.value;
+          this._render();
+          return;
+        }
+
+        // v0.57: "Frist verlängern"-Bestätigungszeile - gleiches Muster wie
+        // award-points-value oberhalb, nur zwei Zahlenfelder statt eines.
+        const extendHoursEl = ev.target.closest('[data-action="extend-hours"]');
+        if (extendHoursEl) {
+          this._pendingExtendHours = Math.max(0, Math.trunc(Number(extendHoursEl.value)) || 0);
+          this._render();
+          return;
+        }
+        const extendMinutesEl = ev.target.closest('[data-action="extend-minutes"]');
+        if (extendMinutesEl) {
+          this._pendingExtendMinutes = Math.max(0, Math.trunc(Number(extendMinutesEl.value)) || 0);
           this._render();
           return;
         }
