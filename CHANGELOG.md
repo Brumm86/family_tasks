@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.59.0] - 2026-09-13
+
+### Fixed
+- **Handyzeit-Blueprint: Korrektur bei aufgebrauchter Restzeit durch „immer erlaubte" Apps**: Google Family Link rechnet die Nutzung von Apps, die für ein Kind als „immer erlaubt" markiert sind, trotzdem auf das gesamte Tageslimit an. Die bisherige Tick-Logik im Referenz-Blueprint (`blueprints/handyzeit_verwaltung.yaml`) addierte bei jedem automatischen Zeit-Tick den konfigurierten Minutenwert blind auf das zuletzt selbst gesetzte Limit - dadurch konnte ein Kind neue Handyzeit "bekommen", die durch bereits angefallene Zusatznutzung sofort wieder ausgeschöpft war und das Gerät gesperrt blieb. Neuer optionaler Blueprint-Eingang `screen_time_remaining_sensor`: zeigt der dort hinterlegte Google-Family-Link-"Screen Time Remaining"-Sensor bei einem automatischen Tick eine Restzeit von 0 Minuten, wird das neue Limit stattdessen auf dessen `used_minutes`-Attribut (die tatsächlich verrechnete, ungedeckelte Nutzung) zuzüglich des Tick-Zuwachses gesetzt. Wirkt nur auf automatische Ticks, nicht auf manuelle Buttons oder Belohnungs-Einlösungen; berücksichtigt weiterhin die bestehende Wochenfortschritt-Tick-Anpassung. Leer lassen (Standard), um das bisherige Verhalten beizubehalten. Reine YAML-Änderung, keine Anpassung an der Python-Integration oder der Karte nötig.
+
 ## [0.58.0] - 2026-09-11
 
 ### Removed

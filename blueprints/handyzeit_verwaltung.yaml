@@ -26,6 +26,15 @@ blueprint:
     laufende - ein Rückstand wirkt sich also erst in der Folgewoche aus),
     fällt jeder Tick um 2 Minuten kleiner aus, ab 50% um 1 Minute, ab 100%
     unverändert.
+
+    Optional (neu, v0.59) lässt sich außerdem eine Korrektur für einen
+    bekannten Google-Family-Link-Fehler aktivieren: siehe "family_tasks:
+    Korrektur bei aufgebrauchter Restzeit" unten - zeigt die Restzeit eines
+    Kindes bei einem automatischen Tick bereits 0 Minuten (weil Google die
+    Nutzung "immer erlaubter" Apps trotzdem auf das Tageslimit anrechnet),
+    wird das neue Limit auf die tatsächlich verbrauchte Zeit zuzüglich des
+    Tick-Zuwachses gesetzt, statt blind auf das zuletzt gesetzte Limit
+    aufzuschlagen.
   domain: automation
   input:
     child_name:
@@ -207,6 +216,38 @@ blueprint:
         entity:
           domain: sensor
 
+    screen_time_remaining_sensor:
+      name: "family_tasks: Korrektur bei aufgebrauchter Restzeit - Nutzungs-Sensor (optional, v0.59)"
+      description: >-
+        Der von der Google-Family-Link-Integration je Gerät zusätzlich zum
+        oben hinterlegten Tageslimit-Sensor bereitgestellte "...Screen Time
+        Remaining"-Sensor desselben Kindes/Geräts - trägt neben seinem
+        eigenen Zustand (verbleibende Minuten, auf 0 gedeckelt) das Attribut
+        "used_minutes": die von Google tatsächlich gegen das Tageslimit
+        verrechnete Nutzung, ungedeckelt und unabhängig vom zuletzt
+        gesetzten Limit. Hintergrund: Google Family Link zählt die Nutzung
+        "immer erlaubter" (von der Sperre ausgenommener) Apps weiterhin auf
+        dieses Gesamtguthaben an - eine reine "letztes Limit + Erhöhung pro
+        Tick"-Rechnung (das bisherige Verhalten) hinkt der tatsächlichen
+        Nutzung dadurch systematisch hinterher, sobald ein Kind solche Apps
+        nutzt. Trägt dieses Feld einen Wert und zeigt der Sensor beim
+        automatischen Zeit-Tick (Trigger "plus_tick") eine Restzeit von 0
+        Minuten oder weniger, wird das neue Limit stattdessen auf die
+        tatsächlich verbrauchte Zeit (Attribut "used_minutes") zuzüglich des
+        Tick-Zuwachses (samt einer eventuellen Wochenfortschritt-Anpassung
+        oben) gesetzt - so hat das Kind garantiert den vollen, oben
+        konfigurierten Tick zur Verfügung. Wirkt sich ausschließlich auf
+        automatische Zeit-Ticks aus (nicht auf die manuellen Buttons oder
+        Belohnungs-Einlösungen) und nur dann, wenn die Restzeit tatsächlich
+        bei 0 liegt - solange noch reguläre Restzeit übrig ist, läuft der
+        Tick unverändert wie bisher ("letztes Limit + Zuwachs"). Leer lassen
+        (Standard), um das alte Verhalten beizubehalten, z. B. falls Google
+        diesen Fehler eines Tages selbst behebt.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
 triggers:
   - id: reset
     trigger: time
@@ -235,6 +276,7 @@ actions:
       screen_time_grant_active_entity: !input screen_time_grant_active_entity
       increment_minutes: !input increment_minutes
       screen_time_tick_adjustment_source_entity: !input screen_time_tick_adjustment_source_entity
+      screen_time_remaining_sensor: !input screen_time_remaining_sensor
 
   # Frühe Ausstiege, bevor überhaupt eine neue Handyzeit berechnet wird -
   # derselbe "stop"-Stil wie in der ursprünglichen Automation.
@@ -290,7 +332,13 @@ actions:
         {% elif trigger.id == 'plus_tick' %}
           {% set adjustment = (state_attr(screen_time_tick_adjustment_source_entity, 'screen_time_tick_adjustment_minutes') | int(0)) if (screen_time_tick_adjustment_source_entity | default('') != '') else 0 %}
           {% set tick_increment = [(increment_minutes | int) + adjustment, 0] | max %}
-          {{ current + tick_increment }}
+          {% set remaining_now = (states(screen_time_remaining_sensor) | float(1)) if (screen_time_remaining_sensor | default('') != '') else 1 %}
+          {% if (screen_time_remaining_sensor | default('') != '') and remaining_now <= 0 %}
+            {% set used_now = state_attr(screen_time_remaining_sensor, 'used_minutes') | int(current) %}
+            {{ used_now + tick_increment }}
+          {% else %}
+            {{ current + tick_increment }}
+          {% endif %}
         {% elif trigger.id == 'buttons' and trigger.entity_id == plus_button_entity %}
           {{ current + (increment_minutes | int) }}
         {% elif trigger.id == 'buttons' and trigger.entity_id == minus_button_entity %}
