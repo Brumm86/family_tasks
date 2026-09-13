@@ -2,6 +2,14 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.60.0] - 2026-09-13
+
+### Added
+- **Voraussichtliche Handyzeit für die kommende Woche im Wochenfortschritt**: das seit v0.45 bestehende "📱 X Min. Handyzeit heute"-Abzeichen zeigt jetzt zusätzlich in Klammern eine Hochrechnung für die kommende Woche, z. B. "📱 36 Min. Handyzeit heute (voraussichtlich 54 Min. kommende Woche)". Nutzt dieselbe Tick-Malus-Bandbreite wie der bestehende Wert, nur angewandt auf den bisherigen Fortschritt der noch laufenden Woche statt der bereits abgeschlossenen Vorwoche - beantwortet also "wenn sich diese Woche nichts mehr ändert, wie viel Handyzeit gibt es ab nächster Woche pro Tag?". Neue serverseitige Felder `screen_time_tick_adjustment_minutes_next_week`/`screen_time_daily_minutes_next_week` (`MemberSummaryData` in `coordinator.py`, gespiegelt als Attribut auf `FamilyTasksMemberPointsSensor` in `sensor.py`) - derselbe Malus-Startdatum-Schutz wie beim bestehenden Wert (Punkt 46), nur um eine Woche versetzt geprüft. Anders als der feststehende "heute"-Wert bewegt sich diese Hochrechnung noch, bis die laufende Woche vorbei ist. Klick auf das Abzeichen öffnet weiterhin denselben Dialog, der jetzt einen zweiten, gleich aufgebauten Rechenblock für die kommende Woche enthält.
+
+### Fixed
+- **Falsche Prozentangabe im Handyzeit-Malus-Erklärtext**: der Satz "weil in der Vorwoche weniger als X% des Wochenziels erreicht wurden" im Handyzeit-Infofenster (seit v0.45) nannte die falsche Schwelle - z. B. "weniger als 100%" beim härtesten -4-Min.-Malus, obwohl der Code-Kommentar direkt daneben schon immer "-4 -> 25%" als beabsichtigtes Verhalten dokumentierte. Beim Hinzufügen des identischen Rechenblocks für die neue Wochenvorhersage aufgefallen (ein präziser jsdom-Test auf den genauen Satzwortlaut deckte es auf) und für beide Blöcke korrigiert.
+
 ## [0.59.0] - 2026-09-13
 
 ### Fixed

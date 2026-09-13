@@ -436,6 +436,15 @@
  *   week's progress (not the still-running current week - see
  *   FamilyTasksCoordinator._screen_time_tick_adjustment_minutes in
  *   coordinator.py), so this value is fixed for the whole current week.
+ * v0.60: the same badge now also shows, in parentheses, a live
+ * "(voraussichtlich X Min. kommende Woche)" projection - the malus banding
+ * fn applied to *this* week's own still-running progress instead, i.e. what
+ * next week's Handyzeit would be if nothing changes for the rest of this
+ * week (see screen_time_tick_adjustment_minutes_next_week/
+ * screen_time_daily_minutes_next_week in coordinator.py/sensor.py). Unlike
+ * the "heute" value it keeps moving as more points are earned this week.
+ * The dialog gained a second, identically-structured calculation block for
+ * it, separated by a divider.
  */
 (() => {
   const WEEKDAY_LABELS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -1818,12 +1827,23 @@
       const tickMinutes = Number(sensor.attributes.screen_time_tick_minutes ?? 0);
       const adjustment = Number(sensor.attributes.screen_time_tick_adjustment_minutes ?? 0);
       const effectiveTickMinutes = Math.max(tickMinutes + adjustment, 0);
+      // v0.60: forward-looking counterpart, judged on this week's own
+      // still-running progress instead of last week's already-final total -
+      // see screen_time_tick_adjustment_minutes_next_week/
+      // screen_time_daily_minutes_next_week in sensor.py/coordinator.py.
+      const adjustmentNextWeek = Number(
+        sensor.attributes.screen_time_tick_adjustment_minutes_next_week ?? 0
+      );
+      const effectiveTickMinutesNextWeek = Math.max(tickMinutes + adjustmentNextWeek, 0);
       return {
         ticksPerDay,
         tickMinutes,
         adjustment,
         effectiveTickMinutes,
         dailyMinutes: Number(sensor.attributes.screen_time_daily_minutes ?? 0),
+        adjustmentNextWeek,
+        effectiveTickMinutesNextWeek,
+        dailyMinutesNextWeek: Number(sensor.attributes.screen_time_daily_minutes_next_week ?? 0),
       };
     }
 
@@ -2789,7 +2809,7 @@
           ${this._screenTimeInfoDialogOpen ? `
           <dialog class="dialog" data-dialog="screen-time-info">
             <div class="section-header">
-              <h3>${esc(this._memberName(this._screenTimeInfoMemberId))}: Handyzeit heute</h3>
+              <h3>${esc(this._memberName(this._screenTimeInfoMemberId))}: Handyzeit</h3>
               <button type="button" class="link" data-action="close-screen-time-info">Schließen</button>
             </div>
             ${this._renderScreenTimeInfo()}
@@ -4200,8 +4220,15 @@
               // CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY
               // yet) hides it entirely rather than showing a guessed number.
               const screenTimeInfo = this._screenTimeInfoFor(id);
+              // v0.60: "(voraussichtlich X Min. kommende Woche)" - a live
+              // projection of next week's daily estimate, based on this
+              // week's progress so far (screenTimeInfo.dailyMinutesNextWeek,
+              // same tick-malus banding as dailyMinutes just judged on the
+              // still-running week - see _screenTimeInfoFor). Moves as more
+              // points are earned this week; becomes the new, fixed
+              // dailyMinutes once the week rolls over.
               const screenTimeBadge = screenTimeInfo
-                ? `<div class="screen-time-badge" data-action="open-screen-time-info" data-member-id="${id}" role="button" tabindex="0" title="Berechnung anzeigen">📱 ${esc(screenTimeInfo.dailyMinutes)} Min. Handyzeit heute</div>`
+                ? `<div class="screen-time-badge" data-action="open-screen-time-info" data-member-id="${id}" role="button" tabindex="0" title="Berechnung anzeigen">📱 ${esc(screenTimeInfo.dailyMinutes)} Min. Handyzeit heute (voraussichtlich ${esc(screenTimeInfo.dailyMinutesNextWeek)} Min. kommende Woche)</div>`
                 : "";
               // v0.52: "Wochensieger"-Krone neben dem Namen - siehe die
               // topScorerId-Berechnung oben (vor progressList).
@@ -4364,20 +4391,46 @@
       const memberId = this._screenTimeInfoMemberId;
       const info = memberId ? this._screenTimeInfoFor(memberId) : null;
       if (!info) return `<p class="muted">Keine Handyzeit-Automation hinterlegt.</p>`;
-      const { ticksPerDay, tickMinutes, adjustment, effectiveTickMinutes, dailyMinutes } = info;
+      const {
+        ticksPerDay,
+        tickMinutes,
+        adjustment,
+        effectiveTickMinutes,
+        dailyMinutes,
+        adjustmentNextWeek,
+        effectiveTickMinutesNextWeek,
+        dailyMinutesNextWeek,
+      } = info;
       // v0.55: the malus now has four bands (0/25/50/75%, see
       // PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py) instead of two,
       // one minute harsher each step down - "weniger als X% erreicht"
       // describes whichever band boundary the previous week's progress
-      // fell short of. -adjustment * 25 recovers that boundary (-4 -> 25,
-      // -3 -> 50, -2 -> 75, -1 -> 100) purely from the band shape being a
-      // fixed +1 Min. per 25-percentage-point step - keep this in sync by
-      // hand with PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES if that shape ever
-      // changes.
+      // fell short of. 25 * (5 + adjustment) recovers that boundary
+      // (-4 -> 25, -3 -> 50, -2 -> 75, -1 -> 100) purely from the band
+      // shape being a fixed +1 Min. per 25-percentage-point step - keep
+      // this in sync by hand with PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES if
+      // that shape ever changes.
+      //
+      // v0.60: fixed a bug in this formula while adding the next-week
+      // projection below (same calculation, so it had to be got right
+      // twice) - it was previously `-adjustment * 25`, which is inverted
+      // from the mapping this very comment already documented (e.g. it
+      // showed "weniger als 100%" for the harshest -4 band, which should
+      // say "weniger als 25%" - the boundary that band actually fell short
+      // of). Never caught by a render test before now because no prior
+      // jsdom smoke test asserted this exact sentence's wording.
+      const malusBoundaryPercent = (adj) => 25 * (5 + adj);
       const malusLine =
         adjustment < 0
-          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil in der Vorwoche weniger als ${esc(-adjustment * 25)}% des Wochenziels erreicht wurden.</p>`
+          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil in der Vorwoche weniger als ${esc(malusBoundaryPercent(adjustment))}% des Wochenziels erreicht wurden.</p>`
           : `<p>Aktuell kein Malus - das Wochenziel war in der Vorwoche vollständig erreicht (oder es liegt noch keine beurteilbare Vorwoche vor).</p>`;
+      // v0.60: same boundary-recovery trick as malusLine above, just for
+      // the projected adjustment (banded on this week's still-running
+      // progress instead of last week's final one).
+      const nextWeekMalusLine =
+        adjustmentNextWeek < 0
+          ? `<p>Voraussichtlicher Malus ab kommender Woche: <strong>${esc(adjustmentNextWeek)} Min. pro Tick</strong>, weil bisher weniger als ${esc(malusBoundaryPercent(adjustmentNextWeek))}% des Wochenziels erreicht wurden.</p>`
+          : `<p>Voraussichtlich kein Malus ab kommender Woche - das Wochenziel ist schon jetzt vollständig erreicht (oder es liegt noch keine beurteilbare Woche vor).</p>`;
       return `
         <p>${esc(ticksPerDay)} Ticks/Tag × ${esc(tickMinutes)} Min. (in der Handyzeit-Automation hinterlegter Wert)${
           adjustment !== 0
@@ -4387,6 +4440,15 @@
         <p class="points"><strong>${esc(dailyMinutes)} Minuten Handyzeit heute</strong></p>
         ${malusLine}
         <p class="muted">Schätzung auf Basis des Wochenfortschritts der Vorwoche - dieser Wert steht für die gesamte laufende Woche fest und ändert sich erst wieder mit dem nächsten Wochenwechsel. Die tatsächliche Gewährung übernimmt weiterhin die Handyzeit-Automation.</p>
+        <hr class="section-divider">
+        <p>${esc(ticksPerDay)} Ticks/Tag × ${esc(tickMinutes)} Min.${
+          adjustmentNextWeek !== 0
+            ? ` ${adjustmentNextWeek > 0 ? "+" : "-"} ${esc(Math.abs(adjustmentNextWeek))} Min. Malus = ${esc(effectiveTickMinutesNextWeek)} Min. je Tick`
+            : ""
+        }</p>
+        <p class="points"><strong>${esc(dailyMinutesNextWeek)} Minuten Handyzeit kommende Woche (voraussichtlich)</strong></p>
+        ${nextWeekMalusLine}
+        <p class="muted">Hochrechnung auf Basis des bisherigen Wochenfortschritts dieser Woche - ändert sich noch, bis die Woche vorbei ist, und wird erst mit dem Wochenwechsel zum endgültigen, dann feststehenden Wert für die kommende Woche.</p>
       `;
     }
 

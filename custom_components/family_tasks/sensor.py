@@ -224,6 +224,16 @@ class FamilyTasksMemberPointsSensor(
             "screen_time_tick_minutes": self.coordinator.data.screen_time_tick_minutes,
             "screen_time_ticks_per_day": self.coordinator.data.screen_time_ticks_per_day,
             "screen_time_daily_minutes": member.screen_time_daily_minutes,
+            # v0.60: forward-looking projection of the two attributes right
+            # above, judged on this member's still-running current-week
+            # progress instead of the already-final previous week - see
+            # MemberSummaryData.screen_time_tick_adjustment_minutes_next_week/
+            # screen_time_daily_minutes_next_week in coordinator.py. Drives
+            # the card's "(voraussichtlich X Min. kommende Woche)" addition
+            # next to the existing Handyzeit-heute badge, and its own
+            # calculation lines in the same info dialog.
+            "screen_time_tick_adjustment_minutes_next_week": member.screen_time_tick_adjustment_minutes_next_week,
+            "screen_time_daily_minutes_next_week": member.screen_time_daily_minutes_next_week,
             # v0.36: household-wide Meilensteinbonus coin amounts, identical
             # on every member's points sensor - see
             # FamilyTasksData.milestone_150_bonus_coins/... in coordinator.py

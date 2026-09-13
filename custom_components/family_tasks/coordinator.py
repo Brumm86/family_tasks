@@ -346,6 +346,31 @@ class MemberSummaryData:
     # value no longer moves within a week as more points are earned; it only
     # changes at the next calendar-week rollover.
     screen_time_daily_minutes: int = 0
+    # v0.60: a forward-looking counterpart to screen_time_daily_minutes
+    # above - what the per-tick malus (and therefore the daily Handyzeit
+    # estimate) would be for the *coming* week if the currently still-
+    # running week ended right now. Computed with the exact same
+    # _screen_time_tick_adjustment_minutes banding function, just fed this
+    # week's own (still incomplete) points_week instead of last week's
+    # already-final total - i.e. it answers "if nothing changes for the
+    # rest of this week, what will next week's Handyzeit-Tick-Malus be?".
+    # Gated on screen_time_malus_start_date the same way
+    # screen_time_tick_adjustment_minutes is, just one week later: this
+    # week (start_of_week) is the week that will become "last week" once
+    # the malus for the coming week is judged, so it's start_of_week (not
+    # last_week_start) that has to be on/after the configured start date.
+    # A live projection, not a fixed value - unlike
+    # screen_time_daily_minutes/_adjustment_minutes it keeps moving as more
+    # points are earned this week, right up until the week rolls over, at
+    # which point it becomes the new (now fixed) screen_time_daily_minutes.
+    screen_time_tick_adjustment_minutes_next_week: int = 0
+    # v0.60: see screen_time_tick_adjustment_minutes_next_week above -
+    # screen_time_ticks_per_day * max(screen_time_tick_minutes +
+    # screen_time_tick_adjustment_minutes_next_week, 0), same formula as
+    # screen_time_daily_minutes just fed the projected adjustment. 0
+    # whenever screen_time_daily_minutes itself would be 0 (feature
+    # unconfigured), same as that field.
+    screen_time_daily_minutes_next_week: int = 0
     # v0.32: current consecutive-week bonus streak length, one counter per
     # fixed coin-bonus tier (v0.36: was a single counter tied to the
     # then-configurable CONF_STREAK_BONUS_THRESHOLD_POINTS; now there are two
@@ -1401,6 +1426,26 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             screen_time_daily_minutes = screen_time_ticks_per_day * max(
                 screen_time_tick_minutes + screen_time_tick_adjustment, 0
             )
+            # v0.60: same banding function, but judged on this week's own
+            # still-running points_week instead of last week's already-final
+            # total - a live projection of what the malus (and therefore the
+            # daily Handyzeit estimate) will be for the coming week if this
+            # week ended right now. See
+            # MemberSummaryData.screen_time_tick_adjustment_minutes_next_week
+            # for why the gate below uses start_of_week rather than
+            # last_week_start.
+            if (
+                screen_time_malus_start_date is not None
+                and dt_util.as_local(start_of_week).date() >= screen_time_malus_start_date
+            ):
+                screen_time_tick_adjustment_next_week = self._screen_time_tick_adjustment_minutes(
+                    points_week, weekly_progress_goal_points
+                )
+            else:
+                screen_time_tick_adjustment_next_week = 0
+            screen_time_daily_minutes_next_week = screen_time_ticks_per_day * max(
+                screen_time_tick_minutes + screen_time_tick_adjustment_next_week, 0
+            )
             member_summaries[member_id] = MemberSummaryData(
                 member_id=member_id,
                 name=member["name"],
@@ -1414,6 +1459,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 screen_time_grant_active=member_id not in screen_time_paused_members,
                 screen_time_tick_adjustment_minutes=screen_time_tick_adjustment,
                 screen_time_daily_minutes=screen_time_daily_minutes,
+                screen_time_tick_adjustment_minutes_next_week=screen_time_tick_adjustment_next_week,
+                screen_time_daily_minutes_next_week=screen_time_daily_minutes_next_week,
                 streak_weeks_150=(self.streak_bonus_state.get(member_id, "150") or {}).get(
                     "streak_count", 0
                 ),
