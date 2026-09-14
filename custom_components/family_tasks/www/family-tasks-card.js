@@ -1118,12 +1118,6 @@
       // Belohnung (v0.24), z. B. das gewünschte Mittagessen - siehe
       // _selectReward/_confirmRedeem.
       this._pendingRedeemNote = "";
-      // v0.49: "Punkteshop" - ob die "Münzen in Punkte umtauschen"-Zeile
-      // gerade aufgeklappt ist, und wie viele Münzen der aktuelle Nutzer
-      // eingetragen hat - gleiches Muster wie _pendingRedeemId/
-      // _pendingInvestCoins oberhalb.
-      this._convertCoinsOpen = false;
-      this._pendingConvertCoins = 1;
       // Ob bereits erledigte Einlösungen in "Bisherige Einlösungen"
       // ausgeblendet sind - siehe setConfig für die Default-an/persistierte
       // First-Run-Regel, gleiches Muster wie die übrigen Karten-Toggles.
@@ -1648,18 +1642,6 @@
       };
     }
 
-    // v0.49: "Punkteshop" - household-wide coins->points conversion rate
-    // (CONF_COIN_TO_POINTS_RATE in const.py), same "rides along on every
-    // member's points sensor" pattern as _milestoneBonus/_streakBonus above.
-    // 0 means the feature is off.
-    _coinToPointsRate() {
-      if (!this._hass) return 0;
-      const sensor = Object.values(this._hass.states).find(
-        (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
-      );
-      return Number(sensor?.attributes?.coin_to_points_rate ?? 0);
-    }
-
     // v0.56: fixed, non-configurable "Annehmen"-Reservierung rules
     // (CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in const.py) - same
     // "rides along on every member's points sensor, any one will do"
@@ -1739,7 +1721,7 @@
     // v0.52: "Wochensieger-Bonus" - household-wide bonus coin amount for the
     // member with the most points_week once a calendar week ends (see
     // CONF_TOP_SCORER_BONUS_COINS in const.py) - same "rides along on every
-    // member's points sensor" pattern as _streakBonus/_coinToPointsRate
+    // member's points sensor" pattern as _streakBonus
     // above. 0 means the feature is off, hiding the live leader crown
     // entirely - see the topScorerId computation in _renderProgressSection.
     _topScorerBonusCoins() {
@@ -2380,31 +2362,6 @@
       this._pendingExtendId = null;
       this._pendingExtendHours = 1;
       this._pendingExtendMinutes = 0;
-      this._render();
-    }
-
-    // v0.49: "Punkteshop" - Self-Service-Umtausch eigener Münzen in Punkte,
-    // gleiches Muster wie _selectReward/_cancelRedeem/_confirmRedeem oberhalb
-    // (aufklappbare Bestätigungszeile statt sofortiger Aktion). Das Backend
-    // (ws_convert_coins_to_points in storage.py) prüft Teilnahme/Guthaben/
-    // Kurs unabhängig noch einmal nach - der clientseitige "disabled"-Zustand
-    // hier sorgt nur dafür, dass es gar nicht erst angeboten wird.
-    _toggleConvertCoins() {
-      this._convertCoinsOpen = !this._convertCoinsOpen;
-      if (this._convertCoinsOpen) this._pendingConvertCoins = 1;
-      this._render();
-    }
-
-    _cancelConvertCoins() {
-      this._convertCoinsOpen = false;
-      this._render();
-    }
-
-    async _confirmConvertCoins() {
-      const coins = Math.max(1, Number(this._pendingConvertCoins) || 1);
-      await this._callWS({ type: "family_tasks/coin/convert_to_points", coins });
-      this._convertCoinsOpen = false;
-      this._pendingConvertCoins = 1;
       this._render();
     }
 
@@ -4608,29 +4565,6 @@
         !!currentMember && currentMember.participates_in_rewards !== false && currentMember.paused !== true;
       const availableCoins = currentMemberId ? this._coinsAvailableFor(currentMemberId) : 0;
 
-      // v0.49: "Punkteshop" - Self-Service-Umtausch eigener Münzen in
-      // Punkte, zum festen Kurs CONF_COIN_TO_POINTS_RATE (0 = Funktion aus,
-      // siehe _coinToPointsRate). Gleiche Teilnahmebedingung wie "Auswählen"
-      // bei einer Katalog-Belohnung (currentParticipates).
-      const coinToPointsRate = this._coinToPointsRate();
-      const convertCoins = Math.max(1, Number(this._pendingConvertCoins) || 1);
-      const convertValid =
-        coinToPointsRate > 0 && currentParticipates && convertCoins >= 1 && convertCoins <= availableCoins;
-      const convertWidget =
-        currentMemberId && currentParticipates && coinToPointsRate > 0
-          ? this._convertCoinsOpen
-            ? `
-                <div class="confirm-row">
-                  <label>Münzen umtauschen
-                    <input type="number" min="1" max="${availableCoins}" data-action="convert-coins-amount" value="${esc(this._pendingConvertCoins ?? 1)}">
-                  </label>
-                  <span class="muted">→ ${pointsLabel(convertCoins * coinToPointsRate)}</span>
-                  <button data-action="confirm-convert-coins" ${convertValid ? "" : "disabled"}>Umtauschen</button>
-                  <button type="button" class="link" data-action="cancel-convert-coins">Abbrechen</button>
-                </div>`
-            : `<button type="button" class="link" data-action="toggle-convert-coins" ${availableCoins < 1 ? "disabled" : ""}>Münzen in Punkte umtauschen (1 Münze = ${esc(coinToPointsRate)} Pkt.)</button>`
-          : "";
-
       const rewardIds = Object.keys(this._rewards).sort(
         (a, b) => (this._rewards[a].coin_cost ?? 0) - (this._rewards[b].coin_cost ?? 0)
       );
@@ -4730,7 +4664,6 @@
         </div>
         ${this._renderCoinBalances(currentMemberId)}
         ${currentMemberId && !currentParticipates ? `<p class="muted">Du nimmst nicht am Belohnungssystem teil.</p>` : ""}
-        ${convertWidget}
         ${catalogList}
         ${canManageRewards ? `<button class="add" data-action="new-reward">+ Belohnung hinzufügen</button>` : ""}
         <div class="section-header">
@@ -5655,12 +5588,6 @@
           this._cancelRedeem();
         } else if (action === "confirm-redeem") {
           this._confirmRedeem(el.dataset.rewardId)?.catch(() => {});
-        } else if (action === "toggle-convert-coins") {
-          this._toggleConvertCoins();
-        } else if (action === "cancel-convert-coins") {
-          this._cancelConvertCoins();
-        } else if (action === "confirm-convert-coins") {
-          this._confirmConvertCoins()?.catch(() => {});
         } else if (action === "new-reward") {
           // Defense-in-depth, same reasoning as the edit/delete gating above -
           // the backend enforces this too regardless (see
@@ -5803,16 +5730,6 @@
         const investEl = ev.target.closest('[data-action="invest-points"]');
         if (investEl) {
           this._pendingInvestCoins = Math.max(1, Number(investEl.value) || 1);
-          this._render();
-          return;
-        }
-
-        // v0.49: "Münzen in Punkte umtauschen"-Bestätigungszeile im
-        // Belohnungen-Abschnitt (Punkteshop) - gleiches Muster wie
-        // invest-points direkt oberhalb.
-        const convertCoinsEl = ev.target.closest('[data-action="convert-coins-amount"]');
-        if (convertCoinsEl) {
-          this._pendingConvertCoins = Math.max(1, Number(convertCoinsEl.value) || 1);
           this._render();
           return;
         }

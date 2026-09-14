@@ -28,10 +28,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    COIN_CONVERSION_TASK_ID,
-    COIN_REASON_CONVERTED_TO_POINTS,
     COIN_REASON_REDEMPTION,
-    CONF_COIN_TO_POINTS_RATE,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_NOTIFY_SERVICE,
     CONF_MEMBER_PAUSED,
@@ -46,7 +43,6 @@ from .const import (
     CONF_TASK_NOTE,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
-    DEFAULT_COIN_TO_POINTS_RATE,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     EVENT_REWARD_REDEEMED,
@@ -94,7 +90,6 @@ from .const import (
     TASK_TRIGGER_STATE,
     VACATION_BEHAVIOR_SHOW,
     VACATION_BEHAVIORS,
-    WS_API_COIN_CONVERT,
     WS_API_FAVORITE_CLAIM,
     WS_API_FAVORITE_INSTANTIATE,
     WS_API_FAVORITE_LIST_CLAIMABLE,
@@ -1143,17 +1138,6 @@ AWARD_POINTS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     }
 )
 
-
-# v0.49 - see WS_API_COIN_CONVERT in const.py. "coins" is how many Münzen to
-# debit; the resulting Punkte are computed server-side from
-# CONF_COIN_TO_POINTS_RATE, never supplied by the caller.
-CONVERT_COINS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
-    {
-        vol.Required("type"): WS_API_COIN_CONVERT,
-        vol.Required("coins"): vol.All(int, vol.Range(min=1)),
-    }
-)
-
 # v0.49 - see WS_API_FAVORITE_CLAIM in const.py.
 CLAIM_FAVORITE_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     {
@@ -1543,95 +1527,6 @@ def async_setup_websocket_api(
         connection.send_result(msg["id"], entry_item)
 
     websocket_api.async_register_command(hass, WS_API_POINTS_AWARD, ws_award_points, AWARD_POINTS_SCHEMA)
-
-    @websocket_api.async_response
-    async def ws_convert_coins_to_points(
-        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
-    ) -> None:
-        """"Punkteshop": let a participating member trade their own Münzen for Punkte.
-
-        Self-service, no admin permission required - same resolution/
-        participation checks as ws_redeem_reward above (the caller must
-        resolve via their linked person entity to a member who participates
-        in the reward system and isn't currently paused). The rate
-        (CONF_COIN_TO_POINTS_RATE) is read fresh from the config entry's
-        options every time, same "no restart needed" pattern
-        CONF_SCREEN_TIME_MINUTES_PER_POINT already uses just above. A rate of
-        0 (the default, feature disabled) rejects every conversion outright -
-        the card itself already hides the whole UI in that case, this is just
-        the server-side half of that same gate.
-
-        The debit (Münzen) and credit (Punkte) are two separate, independent
-        log entries - a CoinLedgerStore entry (COIN_REASON_CONVERTED_TO_POINTS)
-        and a normal CompletionLogStore entry under the COIN_CONVERSION_TASK_ID
-        sentinel (mirrors ws_award_points' MANUAL_POINTS_TASK_ID) - written in
-        that order so a failure crediting the points side never happens after
-        coins were already silently kept; if the debit itself fails validation
-        nothing is written at all.
-        """
-        member_id = _member_id_for_user(hass, members, connection.user)
-        member = members.data.get(member_id) if member_id else None
-        if member is None:
-            connection.send_error(
-                msg["id"],
-                websocket_api.ERR_UNAUTHORIZED,
-                "Kein mit diesem Konto verknüpftes Familienmitglied.",
-            )
-            return
-
-        if not member.get(CONF_MEMBER_REWARDS_OPT_IN, True) or member.get(CONF_MEMBER_PAUSED, False):
-            connection.send_error(
-                msg["id"],
-                websocket_api.ERR_UNAUTHORIZED,
-                "Dieses Familienmitglied nimmt aktuell nicht am Belohnungssystem teil.",
-            )
-            return
-
-        options = entry.options if entry is not None else {}
-        rate = options.get(CONF_COIN_TO_POINTS_RATE, DEFAULT_COIN_TO_POINTS_RATE)
-        if not rate:
-            connection.send_error(
-                msg["id"],
-                websocket_api.ERR_NOT_SUPPORTED,
-                "Der Umtausch von Münzen in Punkte ist nicht aktiviert.",
-            )
-            return
-
-        coins = msg["coins"]
-        available = coin_ledger.balance(member_id)
-        if available < coins:
-            connection.send_error(
-                msg["id"],
-                websocket_api.ERR_INVALID_FORMAT,
-                "Nicht genug Münzen für diesen Umtausch.",
-            )
-            return
-
-        points = coins * rate
-        await coin_ledger.async_add_entry(
-            member_id=member_id,
-            amount=-coins,
-            reason=COIN_REASON_CONVERTED_TO_POINTS,
-            note=f"{coins} Münzen → {points} Punkte",
-        )
-        entry_item = await completions.async_add_entry(
-            task_id=COIN_CONVERSION_TASK_ID,
-            period_key=dt_util.utcnow().date().isoformat(),
-            member_id=member_id,
-            points_awarded=points,
-            task_name=f"{coins} Münzen umgetauscht",
-        )
-
-        runtime_data = getattr(entry, "runtime_data", None) if entry is not None else None
-        coordinator = getattr(runtime_data, "coordinator", None)
-        if coordinator is not None:
-            await coordinator.async_request_refresh()
-
-        connection.send_result(msg["id"], entry_item)
-
-    websocket_api.async_register_command(
-        hass, WS_API_COIN_CONVERT, ws_convert_coins_to_points, CONVERT_COINS_SCHEMA
-    )
 
     @websocket_api.async_response
     async def ws_create_own_task(

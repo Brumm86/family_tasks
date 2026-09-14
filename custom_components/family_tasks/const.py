@@ -246,18 +246,6 @@ STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 # above for the only thing that does since v0.44.
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
 
-# v0.49: sentinel task_id for the Punkte side of a member's own coins->points
-# conversion (WS_API_COIN_CONVERT/ws_convert_coins_to_points in storage.py) -
-# mirrors MANUAL_POINTS_TASK_ID above (same "not a real task" reasoning,
-# excluded from the per-member weekly completion history for the same
-# reason) but kept as its own distinct sentinel rather than reused, since a
-# conversion is self-service (any participating member may trigger it for
-# themselves) while MANUAL_POINTS_TASK_ID stays exclusively a parent-only
-# action (ws_award_points) - keeping them apart means the completion log
-# never confuses the two. Counts normally toward points_total/points_week/
-# points_month, same as MANUAL_POINTS_TASK_ID does.
-COIN_CONVERSION_TASK_ID: Final = "__coin_conversion__"
-
 # v0.29: household-wide weekly point goal backing each child's
 # "Wochenfortschritt" progress bar (replaces the flat Bestenliste ranking -
 # see family-tasks-card.js) and the fixed PROGRESS_THRESHOLD_PERCENTS
@@ -788,36 +776,6 @@ WS_API_MEMBER_WEEKLY_COMPLETIONS: Final = f"{WS_API_PREFIX_MEMBERS}/weekly_compl
 WS_API_PREFIX_REWARDS: Final = f"{DOMAIN}/reward"
 WS_API_PREFIX_REWARD_REDEMPTIONS: Final = f"{DOMAIN}/reward_redemption"
 WS_API_REWARD_REDEEM: Final = f"{WS_API_PREFIX_REWARD_REDEMPTIONS}/redeem"
-
-# v0.49: "Punkteshop" - lets a participating member trade their own Münzen
-# for Punkte on demand, the reverse direction of a completed task's own
-# "Münzwert" (coin_value, see COIN_REASON_TASK_COMPLETION above). Self-
-# service, same permission model as WS_API_REWARD_REDEEM (resolved via the
-# caller's linked person entity, no admin account needed, blocked while
-# CONF_MEMBER_REWARDS_OPT_IN is off or CONF_MEMBER_PAUSED is set) - see
-# ws_convert_coins_to_points in storage.py. Any amount, not fixed "package"
-# sizes; the rate is CONF_COIN_TO_POINTS_RATE below.
-WS_API_PREFIX_COINS: Final = f"{DOMAIN}/coin"
-WS_API_COIN_CONVERT: Final = f"{WS_API_PREFIX_COINS}/convert_to_points"
-
-# v0.49: household-wide conversion rate for the Punkteshop coins->points
-# trade above - how many Punkte one converted Münze is worth. Read fresh
-# from the config entry's options at conversion time, same
-# "no restart needed" pattern as CONF_SCREEN_TIME_MINUTES_PER_POINT. 0 (the
-# default) disables the whole feature - the card hides the conversion UI
-# entirely, same "0 means off" convention as every other coin-bonus rate in
-# this section.
-CONF_COIN_TO_POINTS_RATE: Final = "coin_to_points_rate"
-DEFAULT_COIN_TO_POINTS_RATE: Final = 0
-
-# A member's own coins->points conversion debit (negative amount) - see
-# ws_convert_coins_to_points in storage.py and CONF_COIN_TO_POINTS_RATE
-# above. The credited Punkte side of the same trade is a normal completions
-# entry under COIN_CONVERSION_TASK_ID (see the "Child tasks / parent
-# confirmation" sentinels above) instead - this ledger only ever holds the
-# Münzen side of the exchange, same as COIN_REASON_REDEMPTION only ever
-# holding a reward's debit.
-COIN_REASON_CONVERTED_TO_POINTS: Final = "converted_to_points"
 
 # Optional per-reward field (v0.11): how many minutes of extra screen time
 # this catalog item is worth, purely informational as far as this integration

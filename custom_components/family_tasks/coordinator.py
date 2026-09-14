@@ -35,7 +35,6 @@ from .const import (
     COIN_REASON_TOP_SCORER,
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
-    CONF_COIN_TO_POINTS_RATE,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_DEFAULT_ROTATION_STRATEGY,
     CONF_MEMBER_NOTIFY_SERVICE,
@@ -58,7 +57,6 @@ from .const import (
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
-    DEFAULT_COIN_TO_POINTS_RATE,
     DEFAULT_MILESTONE_150_BONUS_COINS,
     DEFAULT_MILESTONE_200_BONUS_COINS,
     DEFAULT_OVERDUE_AFTER_MINUTES,
@@ -464,13 +462,6 @@ class FamilyTasksData:
     # awarding is FamilyTasksCoordinator._async_process_top_scorer_coin_bonus,
     # which reads the option itself rather than this snapshot.
     top_scorer_bonus_coins: int = DEFAULT_TOP_SCORER_BONUS_COINS
-    # v0.49: "Punkteshop" - household-wide coins->points conversion rate (see
-    # CONF_COIN_TO_POINTS_RATE in const.py) - rides along here for the same
-    # "no dedicated entity for a plain options value" reason
-    # default_rotation_strategy/weekly_progress_goal_points above do. 0 means
-    # the conversion feature is off; the card then hides the whole "Münzen in
-    # Punkte umtauschen" control.
-    coin_to_points_rate: int = DEFAULT_COIN_TO_POINTS_RATE
     # v0.32: whether the household-wide Urlaubsmodus switch
     # (switch.FamilyTasksVacationModeSwitch) is currently on - rides along
     # here (not a dedicated attribute on the switch's own entity state, which
@@ -1485,7 +1476,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         streak_150_bonus_coins = DEFAULT_STREAK_150_BONUS_COINS
         streak_200_bonus_coins = DEFAULT_STREAK_200_BONUS_COINS
         streak_bonus_required_weeks = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
-        coin_to_points_rate = DEFAULT_COIN_TO_POINTS_RATE
         top_scorer_bonus_coins = DEFAULT_TOP_SCORER_BONUS_COINS
         if self.config_entry:
             options = self.config_entry.options
@@ -1506,9 +1496,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             )
             streak_bonus_required_weeks = options.get(
                 CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
-            )
-            coin_to_points_rate = options.get(
-                CONF_COIN_TO_POINTS_RATE, DEFAULT_COIN_TO_POINTS_RATE
             )
             top_scorer_bonus_coins = options.get(
                 CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
@@ -1542,7 +1529,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             streak_150_bonus_coins=streak_150_bonus_coins,
             streak_200_bonus_coins=streak_200_bonus_coins,
             streak_bonus_required_weeks=streak_bonus_required_weeks,
-            coin_to_points_rate=coin_to_points_rate,
             top_scorer_bonus_coins=top_scorer_bonus_coins,
             vacation_mode_active=vacation_mode_active,
             pool_tasks_open=pool_tasks_open,

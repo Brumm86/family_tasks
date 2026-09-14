@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.61.0] - 2026-09-14
+
+### Removed
+- **Münzen-in-Punkte-Umtausch im Punkteshop entfernt**: die in v0.49 eingeführte Möglichkeit, eigene Münzen selbstständig zu einem konfigurierbaren Kurs in Punkte umzutauschen (Integrationsoption "Punkte je im Punkteshop umgetauschter Münze", Umtausch-Widget in der Belohnungs-Sektion), entfällt auf ausdrücklichen Nutzerwunsch ersatzlos. `CONF_COIN_TO_POINTS_RATE`/`DEFAULT_COIN_TO_POINTS_RATE`, der Websocket-Befehl `family_tasks/coin/convert_to_points` (`ws_convert_coins_to_points`, `storage.py`) sowie die zugehörigen Sentinel-Konstanten (`WS_API_COIN_CONVERT`, `COIN_REASON_CONVERTED_TO_POINTS`, `COIN_CONVERSION_TASK_ID`) wurden vollständig entfernt, ebenso das Umtausch-Widget samt Kurs-Option im Eltern-Options-Flow und der zugehörige Options-Flow-Label-Eintrag in `strings.json`/`translations/de.json`. Bereits vor diesem Update umgetauschte Punkte-/Münzen-Einträge im Verlauf bleiben unverändert bestehen.
+
 ## [0.60.0] - 2026-09-13
 
 ### Added
