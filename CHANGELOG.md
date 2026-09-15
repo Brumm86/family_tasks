@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.62.0] - 2026-09-15
+
+### Fixed
+- **Karte gelegentlich mit "Custom element doesn't exist" auf einzelnen Geräten (u. a. dem A17 der Tochter)**: `family-tasks-card.js` wird per `add_extra_js_url()` geladen, unabhängig vom Haupt-Frontend-Bundle - lief die eigene, sehr kleine Datei zufällig fertig, bevor HAs eigener App-Einstiegspunkt seine gescopte `customElements`-Registry installiert (ein Polyfill, das `window.customElements` komplett ersetzt), landete unser `customElements.define("family-tasks-card", ...)` in der davor gültigen, danach verwaisten Registry - Lovelace fragt aber immer die jeweils aktuelle ab und meldete die Karte dauerhaft als nicht existent, obwohl ihr Code fehlerfrei durchgelaufen war (daher auch keine Konsolen-/Logcat-Fehler in den bisherigen Untersuchungen). Bekanntes, bislang ungelöstes Verhalten des HA-Frontends selbst (home-assistant/frontend#53890), reproduziert für eine andere Custom Card unter identischem Registrierungsweg in aex351/home-assistant-neerslag-card#58 - keine Ursache in dieser Integration. Da eine zusätzliche manuelle Lovelace-Ressource laut diesen Issues nichts an der Lade-Reihenfolge ändert, wartet die Karte jetzt stattdessen darauf, dass HAs eigenes Wurzelelement `<home-assistant>` definiert ist (zuverlässiges Signal, dass App-Bundle und ein eventuelles Polyfill fertig geladen haben), und registriert sich bei Bedarf gegen die dann aktuelle Registry erneut - durch dieselbe `!customElements.get(...)`-Prüfung wie beim ursprünglichen Aufruf gegen eine doppelte, fehlerauslösende Definition abgesichert.
+
 ## [0.61.0] - 2026-09-14
 
 ### Removed

@@ -5972,6 +5972,49 @@
     customElements.define("family-tasks-card", FamilyTasksCard);
   }
 
+  // Home Assistant frontend race condition workaround
+  // (home-assistant/frontend#53890, aex351/home-assistant-neerslag-card#58):
+  // this file is loaded via add_extra_js_url() (see __init__.py), which HA
+  // dynamically imports/executes independently of - and sometimes *before*
+  // - its own main app bundle. That bundle's entrypoint installs a scoped
+  // custom-element registry that replaces `window.customElements` wholesale
+  // (a polyfill enabling per-dashboard-strategy isolation). If our
+  // customElements.define() above ran before that swap, it registered
+  // "family-tasks-card" into the native registry the browser started with -
+  // which then becomes a different, orphaned registry once HA's own code
+  // swaps `window.customElements` out from under us. The element still
+  // exists and works (document.createElement still finds it), but Lovelace
+  // - which only ever queries whatever `window.customElements` currently
+  // points at - reports "Custom element doesn't exist" and never recovers
+  // on its own, because nothing re-runs our define() call afterwards.
+  //
+  // This can't be detected synchronously (the swap, if it happens at all,
+  // happens some indeterminate time after this script runs - reproducible
+  // roughly proportional to *how fast* this small file loads relative to
+  // HA's multi-MB main bundle, so it's most visible on slower/cheaper
+  // devices, not just slow networks - see the A17 investigation notes).
+  // Instead we wait for a reliable "the main bundle has definitely finished
+  // installing everything, including that polyfill if present" signal: HA's
+  // own root element, <home-assistant>, becoming defined on whichever
+  // registry is current *then*. If our card is missing from that registry
+  // at that point despite the define() call above, we re-run it - now
+  // against the registry Lovelace will actually query. The `!customElements
+  // .get(...)` guard (both here and above) is what keeps this from ever
+  // calling define() twice against the *same* registry, which would throw.
+  if (typeof customElements !== "undefined" && customElements.whenDefined) {
+    customElements
+      .whenDefined("home-assistant")
+      .then(() => {
+        if (!customElements.get("family-tasks-card")) {
+          customElements.define("family-tasks-card", FamilyTasksCard);
+        }
+      })
+      .catch(() => {
+        // <home-assistant> never got defined (e.g. this file loaded outside
+        // a normal HA frontend context) - nothing to recover from here.
+      });
+  }
+
   window.customCards = window.customCards || [];
   window.customCards.push({
     type: "family-tasks-card",
