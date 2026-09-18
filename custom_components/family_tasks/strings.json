@@ -29,9 +29,8 @@
           "weekly_progress_goal_points": "Weekly point goal (progress bar)",
           "milestone_150_bonus_coins": "Meilensteinbonus coins at 150% of weekly goal",
           "milestone_200_bonus_coins": "Meilensteinbonus coins at 200% of weekly goal",
-          "streak_bonus_required_weeks": "Consecutive weeks required for a Streak-Bonus",
-          "streak_150_bonus_coins": "Streak-Bonus coins per payout while maintaining 150% (paid every qualifying week; doubled once the streak exceeds the required weeks)",
-          "streak_200_bonus_coins": "Streak-Bonus coins per payout while maintaining 200% (paid every qualifying week; doubled once the streak exceeds the required weeks)",
+          "streak_bonus_2_weeks_coins": "Streak-Bonus coins for reaching the 200% weekly goal 2 weeks in a row",
+          "streak_bonus_3_weeks_coins": "Streak-Bonus coins for reaching the 200% weekly goal 3 weeks in a row (paid every further qualifying week too)",
           "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week, but only if they also reached the weekly point goal (0 disables it; no bonus on a tie, and none if the weekly goal is unmet)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }

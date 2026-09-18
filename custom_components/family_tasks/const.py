@@ -101,11 +101,15 @@ CONF_SCREEN_TIME_MALUS_START_DATE: Final = "screen_time_malus_start_date"
 # everyone. 100% is "reached the weekly goal". Only meaningful while a
 # weekly goal > 0 is configured - see CONF_WEEKLY_PROGRESS_GOAL_POINTS below,
 # PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES, and the coin-bonus constants below
-# for what happens at each one. 0/25/50/75/100 are the Handyzeit-Tick-Malus
-# bands (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES); 150/200 are the separate
-# Meilenstein-/Streak-Bonus checkpoints (v0.55 added 25/75 to the malus side
-# only - the bonus checkpoints above 100% are unaffected).
-PROGRESS_THRESHOLD_PERCENTS: Final = [0, 25, 50, 75, 100, 150, 200]
+# for what happens at each one. 0/10/25/50/75/100 are the Handyzeit-Tick-
+# Malus bands (PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES); 150/200 are the
+# separate Meilenstein-/Streak-Bonus checkpoints (v0.55 added 25/75, v0.63
+# added 10, to the malus side only - the bonus checkpoints above 100% are
+# unaffected). v0.63 also simplified the Streak-Bonus itself down to a
+# single tier at the 200% checkpoint - see CONF_STREAK_BONUS_2_WEEKS_COINS/
+# CONF_STREAK_BONUS_3_WEEKS_COINS below; 150% remains a Meilensteinbonus-only
+# checkpoint from here on.
+PROGRESS_THRESHOLD_PERCENTS: Final = [0, 10, 25, 50, 75, 100, 150, 200]
 
 # v0.36: replaces the pre-v0.36 tick-based screen-time automation's fixed
 # per-tick increment with one that responds to how a child is doing against
@@ -142,7 +146,16 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 25, 50, 75, 100, 150, 200]
 # _renderBandInfo (family-tasks-card.js) explains each of these boundaries
 # and must be kept in sync by hand with the values here - see bandMarkers in
 # _renderProgressSection.
-PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -4, 25: -3, 50: -2, 75: -1, 100: 0}
+#
+# v0.63: added two more checkpoints below the previous 0% band, on explicit
+# user request - below 10% -> -6, 10% up to (not including) 25% -> -5; the
+# previous flat "below 25% -> -4" band is replaced by these two finer steps
+# (the old 0-24% band's -4 no longer exists as such). 25/50/75/100 above are
+# unchanged. The band shape is no longer an even "+1 Min. per 25-percentage-
+# point step" below 25% - the card's malusBoundaryPercent helper
+# (family-tasks-card.js) does a real lookup against a JS mirror of this dict
+# rather than assuming even spacing; keep both in sync by hand.
+PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -6, 10: -5, 25: -3, 50: -2, 75: -1, 100: 0}
 
 # v0.36: bonus *coins* (see the "Münzen"/coin-shop section below) awarded
 # live, the moment a participating member's weekly points cross the fixed
@@ -155,24 +168,35 @@ PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -4, 25: -3, 50: -2, 75: -1, 1
 CONF_MILESTONE_150_BONUS_COINS: Final = "milestone_150_bonus_coins"
 CONF_MILESTONE_200_BONUS_COINS: Final = "milestone_200_bonus_coins"
 
-# v0.36: extra bonus coins for *maintaining* the 150%/200% checkpoint above
-# in more than one consecutive calendar week - on top of (not instead of) the
-# per-week Meilenstein coin bonus above, same idea as the pre-v0.36
+# v0.36: extra bonus coins for *maintaining* the weekly-progress checkpoint
+# above in more than one consecutive calendar week - on top of (not instead
+# of) the per-week Meilenstein coin bonus above, same idea as the pre-v0.36
 # Streak-Bonus paid on top of the weekly goal itself. Judged once a week has
 # actually ended - see FamilyTasksCoordinator._async_process_streak_coin_bonus
-# and StreakBonusStateStore in storage.py (tracks the 150%/200% tiers
-# independently per member since v0.36).
-# CONF_STREAK_BONUS_REQUIRED_WEEKS is shared by both tiers - default 2, i.e.
-# "mehr als eine Woche in Folge". v0.54 (correcting a v0.53 misreading): the
-# bonus coins above are still paid every week a streak continues - see
-# FamilyTasksCoordinator._async_process_member_streak_tier - but the payout
-# no longer climbs further once it doubles: 1x the amount above at exactly
-# CONF_STREAK_BONUS_REQUIRED_WEEKS consecutive qualifying weeks, then a flat
-# 2x for every further consecutive qualifying week, until the streak breaks
-# and has to rebuild from scratch.
-CONF_STREAK_BONUS_REQUIRED_WEEKS: Final = "streak_bonus_required_weeks"
-CONF_STREAK_150_BONUS_COINS: Final = "streak_150_bonus_coins"
-CONF_STREAK_200_BONUS_COINS: Final = "streak_200_bonus_coins"
+# and StreakBonusStateStore in storage.py.
+#
+# v0.63: simplified on explicit user request. Previously there were two
+# independent tiers (150%/200%, tracked separately) and a single
+# configurable CONF_STREAK_BONUS_REQUIRED_WEEKS controlling both a variable
+# "first payout" week and a flat-doubled amount from required_weeks + 1
+# onward (v0.53/v0.54, see git history). Now there is only the 200%
+# checkpoint, and the two milestones are fixed at exactly 2 and 3
+# consecutive qualifying weeks - each with its own independently
+# configurable coin amount: CONF_STREAK_BONUS_2_WEEKS_COINS is paid the week
+# a streak first reaches 2 consecutive qualifying weeks,
+# CONF_STREAK_BONUS_3_WEEKS_COINS from the 3rd consecutive qualifying week
+# onward, repeated every further week for as long as the streak continues
+# (same "keeps paying, never climbs further" shape as before, just with an
+# independently settable amount instead of a fixed 2x multiplier). See
+# FamilyTasksCoordinator._async_process_member_streak_tier. The old 150%
+# tier (CONF_STREAK_150_BONUS_COINS) and CONF_STREAK_BONUS_REQUIRED_WEEKS are
+# removed entirely - StreakBonusStateStore still tracks state per member per
+# tier string, but only the "200" tier is used going forward; a household's
+# stored "150" tier state (if any) is simply never read again, same
+# "unrecognized old data left alone" reasoning storage.py already documents
+# for other stores.
+CONF_STREAK_BONUS_2_WEEKS_COINS: Final = "streak_bonus_2_weeks_coins"
+CONF_STREAK_BONUS_3_WEEKS_COINS: Final = "streak_bonus_3_weeks_coins"
 
 # v0.52: "Wochensieger-Bonus" - extra bonus coins for the single household
 # member with the most points in a fully-elapsed calendar week (absolute
@@ -196,7 +220,10 @@ CONF_TOP_SCORER_BONUS_COINS: Final = "top_scorer_bonus_coins"
 # MILESTONE_BONUS_1_TASK_ID/STREAK_BONUS_TASK_ID below used to need.
 COIN_REASON_MILESTONE_150: Final = "milestone_150"
 COIN_REASON_MILESTONE_200: Final = "milestone_200"
-COIN_REASON_STREAK_150: Final = "streak_150"
+# v0.63: only the 200% tier remains (see CONF_STREAK_BONUS_2_WEEKS_COINS/
+# CONF_STREAK_BONUS_3_WEEKS_COINS above) - both the 2-weeks and 3-weeks
+# payout share this one reason value, same as before v0.63 already used one
+# reason per tier regardless of the (then 1x/2x) multiplier.
 COIN_REASON_STREAK_200: Final = "streak_200"
 # v0.52: see CONF_TOP_SCORER_BONUS_COINS above.
 COIN_REASON_TOP_SCORER: Final = "top_scorer"
@@ -293,9 +320,8 @@ DEFAULT_SCREEN_TIME_TICKS_PER_DAY: Final = 0
 DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS: Final = 0
 DEFAULT_MILESTONE_150_BONUS_COINS: Final = 0
 DEFAULT_MILESTONE_200_BONUS_COINS: Final = 0
-DEFAULT_STREAK_BONUS_REQUIRED_WEEKS: Final = 2
-DEFAULT_STREAK_150_BONUS_COINS: Final = 0
-DEFAULT_STREAK_200_BONUS_COINS: Final = 0
+DEFAULT_STREAK_BONUS_2_WEEKS_COINS: Final = 0
+DEFAULT_STREAK_BONUS_3_WEEKS_COINS: Final = 0
 DEFAULT_TOP_SCORER_BONUS_COINS: Final = 0
 DEFAULT_VACATION_MODE: Final = False
 

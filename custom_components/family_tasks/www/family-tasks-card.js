@@ -586,6 +586,19 @@
     child: "Kind (Aufgaben brauchen Eltern-Bestätigung)",
   };
 
+  // Hand-kept JS mirror of PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in
+  // const.py (see that constant's docstring for the full history) - the
+  // Handyzeit-Tick-Malus bands, keyed by the lower-bound percent of the
+  // weekly goal a member's previous week needed to reach. v0.63: no longer
+  // evenly spaced (10/25-point steps below 25%, 25-point steps above), so
+  // bandMarkers/_renderBandInfo/malusBoundaryPercent below all do a real
+  // lookup against this table instead of assuming a fixed step size. Keep
+  // this in sync by hand whenever the backend constant changes.
+  const SCREEN_TIME_MALUS_BANDS = { 0: -6, 10: -5, 25: -3, 50: -2, 75: -1, 100: 0 };
+  const SCREEN_TIME_MALUS_BAND_PERCENTS = Object.keys(SCREEN_TIME_MALUS_BANDS)
+    .map(Number)
+    .sort((a, b) => a - b);
+
   // v0.29: curated fallback icon list for every "Icon (optional)" field
   // (Aufgabe/Favorit/Mitglied/Belohnung, see _hydrateIconPickers below) -
   // most people don't have Material Design Icon names memorized, so typing
@@ -1660,62 +1673,49 @@
       };
     }
 
-    // v0.36: household-wide "Streak-Bonus" coin amounts, one per fixed tier
-    // - same "rides along on every member's points sensor" pattern as
-    // _milestoneBonus above. Replaces the pre-v0.36 single
-    // configurable-threshold, points-based version entirely.
+    // v0.36: household-wide "Streak-Bonus" coin amounts - same "rides
+    // along on every member's points sensor" pattern as _milestoneBonus
+    // above. v0.63: simplified on explicit user request to a single tier at
+    // the fixed 200% weekly-progress checkpoint, with two independently
+    // configurable amounts for two fixed milestones (2/3 consecutive
+    // qualifying weeks) instead of one amount plus a configurable
+    // required-weeks/doubling rule - see CONF_STREAK_BONUS_2_WEEKS_COINS/
+    // CONF_STREAK_BONUS_3_WEEKS_COINS in const.py.
     _streakBonus() {
-      const empty = { requiredWeeks: 2, bonus150: 0, bonus200: 0 };
+      const empty = { bonus2Weeks: 0, bonus3Weeks: 0 };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
       );
       if (!sensor) return empty;
       return {
-        requiredWeeks: Number(sensor.attributes.streak_bonus_required_weeks ?? 2),
-        bonus150: Number(sensor.attributes.streak_150_bonus_coins ?? 0),
-        bonus200: Number(sensor.attributes.streak_200_bonus_coins ?? 0),
+        bonus2Weeks: Number(sensor.attributes.streak_bonus_2_weeks_coins ?? 0),
+        bonus3Weeks: Number(sensor.attributes.streak_bonus_3_weeks_coins ?? 0),
       };
     }
 
-    // v0.36: a member's current consecutive-week streak length, one per
-    // fixed tier - see MemberSummaryData.streak_weeks_150/streak_weeks_200
-    // in coordinator.py.
+    // v0.36: a member's current consecutive-week streak length against the
+    // 200% checkpoint - see MemberSummaryData.streak_weeks_200 in
+    // coordinator.py. v0.63: the old independent 150% tier is gone, so this
+    // is now a single number instead of a {weeks150, weeks200} pair.
     _streakWeeksFor(memberId) {
       const sensor = this._pointsSensorForMember(memberId);
-      return {
-        weeks150: Number(sensor?.attributes?.streak_weeks_150 ?? 0),
-        weeks200: Number(sensor?.attributes?.streak_weeks_200 ?? 0),
-      };
+      return Number(sensor?.attributes?.streak_weeks_200 ?? 0);
     }
 
-    // v0.53: picks which Streak-Bonus tier (150%/200%) to represent for one
-    // member with a single set of "streak dots"/info dialog - the higher
-    // currently-running tier if one is running (weeks200 > 0 wins, since
-    // reaching 200% implies 150% was already held too), otherwise whichever
-    // tier is actually configured (preferring 200%, the "bigger" one), so a
-    // member with no streak running yet still gets a sensible tier to show
-    // as all-gray/empty rather than nothing at all. Shared by the dots
-    // (_renderProgressSection) and their info dialog (_renderStreakInfo) so
-    // both always agree on which tier/numbers they're describing.
+    // v0.53: bundles a member's current streak state for the "streak dots"/
+    // info dialog. v0.63: only the 200% tier remains, so there is no more
+    // tier-picking - just the current streak length and whichever of the
+    // two fixed-milestone amounts currently applies (bonus3Weeks from the
+    // 3rd consecutive qualifying week onward, bonus2Weeks before that).
+    // Shared by the dots (_renderProgressSection) and their info dialog
+    // (_renderStreakInfo) so both always agree.
     _activeStreakTierFor(memberId) {
       const streak = this._streakBonus();
-      const weeks = this._streakWeeksFor(memberId);
-      const enabled = streak.bonus150 > 0 || streak.bonus200 > 0;
-      const tier = weeks.weeks200 > 0
-        ? "200"
-        : weeks.weeks150 > 0
-          ? "150"
-          : streak.bonus200 > 0
-            ? "200"
-            : "150";
-      return {
-        enabled,
-        tier,
-        requiredWeeks: streak.requiredWeeks,
-        currentWeeks: tier === "200" ? weeks.weeks200 : weeks.weeks150,
-        bonus: tier === "200" ? streak.bonus200 : streak.bonus150,
-      };
+      const currentWeeks = this._streakWeeksFor(memberId);
+      const enabled = streak.bonus2Weeks > 0 || streak.bonus3Weeks > 0;
+      const bonus = currentWeeks >= 3 ? streak.bonus3Weeks : streak.bonus2Weeks;
+      return { enabled, currentWeeks, bonus };
     }
 
     // v0.52: "Wochensieger-Bonus" - household-wide bonus coin amount for the
@@ -1830,20 +1830,18 @@
     }
 
     // v0.29: members shown in the "Wochenfortschritt" section - replaces the
-    // old _rankedMembers() leaderboard list. A "child" user only ever sees
-    // their own bar; anyone else (parent/admin, or an unlinked account) sees
-    // one bar per active "child" member of the household, so a parent can
-    // check both kids' progress at a glance without either kid seeing the
-    // other's as a competitive ranking (the whole point of replacing the
-    // Bestenliste). Still filtered to participates_in_rewards, same as the
-    // old ranking - a member opted out of the reward system has no
-    // spendable balance for this bar to lead toward.
-    _progressMembers(isChildUser, currentMemberId) {
-      const ids = isChildUser
-        ? currentMemberId
-          ? [currentMemberId]
-          : []
-        : Object.keys(this._members).filter((id) => this._members[id].role === "child");
+    // old _rankedMembers() leaderboard list. Originally a "child" user only
+    // ever saw their own bar, so siblings couldn't see each other's progress
+    // as a competitive ranking (the whole point of replacing the
+    // Bestenliste). v0.63: on explicit user request, every household user -
+    // child, parent, admin, or an unlinked account - now sees one bar per
+    // active "child" member of the household, so kids can check each
+    // other's progress too, not just their own. Still filtered to
+    // participates_in_rewards, same as the old ranking - a member opted out
+    // of the reward system has no spendable balance for this bar to lead
+    // toward.
+    _progressMembers() {
+      const ids = Object.keys(this._members).filter((id) => this._members[id].role === "child");
       return ids
         .map((id) => ({ id, member: this._members[id] }))
         .filter((entry) => entry.member && entry.member.active !== false)
@@ -3932,7 +3930,7 @@
       const canManageRewards = isAdmin && !isChildUser;
       const currentMemberId = this._currentMemberId();
       return `
-        ${this._renderProgressSection(isAdmin, isChildUser, currentMemberId)}
+        ${this._renderProgressSection(isAdmin, isChildUser)}
         <hr class="section-divider">
         ${this._renderRewardsSection(canManageRewards, currentMemberId)}
       `;
@@ -3942,16 +3940,17 @@
     // wöchentlichen Fortschrittsbalken pro Kind - kein Wettbewerb zwischen
     // Geschwistern mehr, sondern jedes Kind gegen sein eigenes Wochenziel
     // (CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py, siehe
-    // _weeklyProgressGoal). Ein "Kind"-Konto sieht ausschließlich den eigenen
-    // Balken; Eltern sehen die Balken aller Kinder (_progressMembers), damit
-    // beide im Blick behalten werden können. Anders als beim v0.21-
-    // "Bestenliste"-Umschalter ist das Ausblenden hier Eltern-only (siehe
-    // canToggle unten) - ein Kind bekommt keinen eigenen Schalter dafür,
-    // sieht aber weiterhin, was zuletzt auf diesem Gerät eingestellt wurde.
-    // Startet standardmäßig sichtbar (siehe setConfig) - anders als der
-    // v0.11-Kompakt-Default der übrigen Abschnitte, da ein Kind sonst beim
-    // allerersten Laden gar nicht sähe, wie weit es diese Woche schon ist.
-    _renderProgressSection(isAdmin, isChildUser, currentMemberId) {
+    // _weeklyProgressGoal). v0.63: jedes Konto - Kind, Eltern, Admin - sieht
+    // die Balken aller Kinder (_progressMembers); vor v0.63 sah ein
+    // "Kind"-Konto ausschließlich den eigenen Balken. Anders als beim
+    // v0.21-"Bestenliste"-Umschalter ist das Ausblenden hier Eltern-only
+    // (siehe canToggle unten) - ein Kind bekommt keinen eigenen Schalter
+    // dafür, sieht aber weiterhin, was zuletzt auf diesem Gerät eingestellt
+    // wurde. Startet standardmäßig sichtbar (siehe setConfig) - anders als
+    // der v0.11-Kompakt-Default der übrigen Abschnitte, da ein Kind sonst
+    // beim allerersten Laden gar nicht sähe, wie weit es diese Woche schon
+    // ist.
+    _renderProgressSection(isAdmin, isChildUser) {
       const canToggle = isAdmin && !isChildUser;
       if (this._hideProgress) {
         return canToggle
@@ -3960,7 +3959,7 @@
       }
 
       const goal = this._weeklyProgressGoal();
-      const members = this._progressMembers(isChildUser, currentMemberId);
+      const members = this._progressMembers();
       // v0.36: Meilensteinbonus - siehe _milestoneBonus. Die beiden
       // Schwellen sind jetzt fest bei 150%/200% des Wochenziels
       // (PROGRESS_THRESHOLD_PERCENTS in const.py), nicht mehr
@@ -4047,9 +4046,11 @@
               // per Hover-Tooltip bedienbar (title bleibt als zusätzlicher
               // Hover-Hinweis für Maus-Nutzer erhalten) - siehe
               // _openBandInfo/_renderBandInfo, gleiches Muster wie die
-              // Handyzeit-/Wochensieger-Info-Dialoge.
+              // Handyzeit-/Wochensieger-Info-Dialoge. v0.63: um die neue
+              // 10%-Marke ergänzt (0% selbst bekommt weiterhin keine eigene
+              // Marke - deckungsgleich mit dem Balkenanfang).
               const bandMarkers = goal > 0
-                ? [25, 50, 75, 100].map((percent) => ({
+                ? [10, 25, 50, 75, 100].map((percent) => ({
                     left: (percent / barMaxPercent) * 100,
                     percent,
                     title: `${percent}% des Wochenziels - antippen für Details zum Handyzeit-Tick-Malus`,
@@ -4127,30 +4128,19 @@
               //
               // v0.52: statt als Text ("🔥 X Wochen (150%)") unter der
               // Zeile wird der Streak-Bonus jetzt als eigenes Flammen-Badge
-              // direkt am Balken dargestellt (streakBadgesHtml unten) - an
-              // denselben 150%/200%-Positionen wie die Meilenstein-
-              // Münzbadges oben, nur unterhalb des Balkens statt oberhalb,
-              // damit sich beide nicht überlappen. Details (wievielte Woche
-              // in Folge, Bonushöhe) stehen weiterhin im title-Tooltip des
-              // Badges, ganz wie beim Meilenstein-Badge.
-              const streakWeeks = this._streakWeeksFor(id);
-              const streakBadgesHtml = [
-                streak.bonus150 > 0 && streakWeeks.weeks150 > 0
-                  ? { percent: 150, weeks: streakWeeks.weeks150, bonus: streak.bonus150 }
-                  : null,
-                streak.bonus200 > 0 && streakWeeks.weeks200 > 0
-                  ? { percent: 200, weeks: streakWeeks.weeks200, bonus: streak.bonus200 }
-                  : null,
-              ]
-                .filter(Boolean)
-                .map((tier) => {
-                  const edgeAligned = tier.percent === 200;
-                  const style = edgeAligned
-                    ? `right:0`
-                    : `left:${Math.min(100, (tier.percent / barMaxPercent) * 100)}%;transform:translateX(-50%)`;
-                  return `<div class="bar-streak-badge" style="${style}" title="${esc(`${tier.weeks}. Woche in Folge über ${tier.percent}% des Wochenziels → +${coinsLabel(tier.bonus)}/Woche`)}"><span class="flame">🔥</span>${esc(tier.weeks)}</div>`;
-                })
-                .join("");
+              // direkt am Balken dargestellt - an der 200%-Position wie die
+              // Meilenstein-Münzbadges oben, nur unterhalb des Balkens statt
+              // oberhalb, damit sich beide nicht überlappen. Details
+              // (wievielte Woche in Folge, Bonushöhe) stehen weiterhin im
+              // title-Tooltip des Badges, ganz wie beim Meilenstein-Badge.
+              // v0.63: nur noch die eine 200%-Marke (die alte unabhängige
+              // 150%-Marke ist entfallen), Bonushöhe abhängig davon, ob die
+              // laufende Serie schon die 3-Wochen-Marke erreicht hat.
+              const streakWeeksNow = this._streakWeeksFor(id);
+              const streakBonusNow = streakWeeksNow >= 3 ? streak.bonus3Weeks : streak.bonus2Weeks;
+              const streakBadgesHtml = streakBonusNow > 0 && streakWeeksNow > 0
+                ? `<div class="bar-streak-badge" style="right:0" title="${esc(`${streakWeeksNow}. Woche in Folge über 200% des Wochenziels → +${coinsLabel(streakBonusNow)}/Woche`)}"><span class="flame">🔥</span>${esc(streakWeeksNow)}</div>`
+                : "";
               // v0.37: no longer shows the Münzen balance here - coins now
               // persist independently of the calendar week (see
               // WeeklyCoinConversionStateStore/coins_available in
@@ -4198,22 +4188,20 @@
                 ? `<span class="top-scorer-badge" data-action="open-top-scorer-info" role="button" tabindex="0" title="${esc(`Aktuell die meisten Punkte diese Woche - bleibt das so bis Wochenende, gibt es +${coinsLabel(topScorerBonusCoins)}. Antippen für Details.`)}">👑</span>`
                 : "";
               // v0.53/v0.54: drei kleine "Streak-Punkte" neben dem Namen -
-              // zeigen den Fortschritt der Streak-Bonus-Auszahlung für die
-              // aktuell höhere laufende Schwelle dieses Mitglieds. Punkt 1
-              // leuchtet ab einer laufenden Serie (>= 1 abgeschlossene
-              // qualifizierende Woche), Punkt 2 ab der ersten Auszahlung
-              // (requiredWeeks, einfacher Bonus), Punkt 3 ab der zweiten
-              // Schwelle (requiredWeeks + 1, ab der der Bonus dauerhaft
-              // verdoppelt wird - v0.54 korrigiert, dass dies KEINE letzte/
-              // gedeckelte Auszahlung mehr ist: die Serie zahlt ab hier
-              // einfach weiter den doppelten Bonus, jede Woche, ohne
-              // Deckel). Alle drei Punkte bleiben auf ihrem Maximum stehen,
-              // solange die Serie über requiredWeeks + 1 hinaus anhält -
-              // siehe _async_process_member_streak_tier in coordinator.py.
-              // Unabhängig von members.length - anders als die Krone
-              // braucht ein Streak keine Konkurrenz.
+              // zeigen den Fortschritt der Streak-Bonus-Auszahlung gegen die
+              // 200%-Marke. Punkt 1 leuchtet ab einer laufenden Serie (>= 1
+              // abgeschlossene qualifizierende Woche), Punkt 2 ab der ersten
+              // Auszahlung (2 Wochen in Folge), Punkt 3 ab der zweiten,
+              // seither dauerhaft wiederholten Auszahlung (3 Wochen in
+              // Folge - v0.63: beide Beträge jetzt unabhängig konfigurierbar
+              // statt der alten required_weeks-/Verdopplungs-Logik, siehe
+              // _async_process_member_streak_tier in coordinator.py). Alle
+              // drei Punkte bleiben auf ihrem Maximum stehen, solange die
+              // Serie über 3 Wochen hinaus anhält. Unabhängig von
+              // members.length - anders als die Krone braucht ein Streak
+              // keine Konkurrenz.
               const activeStreak = this._activeStreakTierFor(id);
-              const streakDotThresholds = [1, activeStreak.requiredWeeks, activeStreak.requiredWeeks + 1];
+              const streakDotThresholds = [1, 2, 3];
               const streakDotsHtml = activeStreak.enabled
                 ? `<span class="streak-dots" data-action="open-streak-info" data-member-id="${id}" role="button" tabindex="0" title="Streak-Bonus - Details antippen">${streakDotThresholds
                     .map((threshold, index) => `<span class="streak-dot${activeStreak.currentWeeks >= threshold ? ` streak-dot-${index + 1}` : ""}"></span>`)
@@ -4327,13 +4315,17 @@
     // dieselbe Konvention wie schon bei den bisherigen 50%/100%-Tooltips.
     _renderBandInfo() {
       const percent = this._bandInfoPercent;
-      const bands = {
-        25: { from: -4, to: -3 },
-        50: { from: -3, to: -2 },
-        75: { from: -2, to: -1 },
-        100: { from: -1, to: 0 },
-      };
-      const band = bands[percent];
+      // v0.63: derived from SCREEN_TIME_MALUS_BANDS instead of a hand-
+      // written table, now that the bands are no longer evenly spaced -
+      // each marker's "from" is the previous band's adjustment, "to" is
+      // this band's own.
+      const idx = SCREEN_TIME_MALUS_BAND_PERCENTS.indexOf(Number(percent));
+      const band = idx > 0
+        ? {
+            from: SCREEN_TIME_MALUS_BANDS[SCREEN_TIME_MALUS_BAND_PERCENTS[idx - 1]],
+            to: SCREEN_TIME_MALUS_BANDS[SCREEN_TIME_MALUS_BAND_PERCENTS[idx]],
+          }
+        : null;
       if (!band) return "";
       const text = band.to === 0
         ? `Ab ${esc(percent)}% des Wochenziels - also sobald es erreicht ist - entfällt der Handyzeit-Tick-Malus vollständig: die Handyzeit-Automation läuft ab hier mit ihrer vollen, unveränderten Länge pro Tick.`
@@ -4358,25 +4350,35 @@
         effectiveTickMinutesNextWeek,
         dailyMinutesNextWeek,
       } = info;
-      // v0.55: the malus now has four bands (0/25/50/75%, see
-      // PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py) instead of two,
-      // one minute harsher each step down - "weniger als X% erreicht"
-      // describes whichever band boundary the previous week's progress
-      // fell short of. 25 * (5 + adjustment) recovers that boundary
-      // (-4 -> 25, -3 -> 50, -2 -> 75, -1 -> 100) purely from the band
-      // shape being a fixed +1 Min. per 25-percentage-point step - keep
-      // this in sync by hand with PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES if
-      // that shape ever changes.
+      // v0.55: "weniger als X% erreicht" describes whichever band boundary
+      // the previous week's progress fell short of - X is the percent of
+      // the *next* (less severe) band above the one the given adjustment
+      // belongs to.
       //
-      // v0.60: fixed a bug in this formula while adding the next-week
-      // projection below (same calculation, so it had to be got right
-      // twice) - it was previously `-adjustment * 25`, which is inverted
-      // from the mapping this very comment already documented (e.g. it
-      // showed "weniger als 100%" for the harshest -4 band, which should
-      // say "weniger als 25%" - the boundary that band actually fell short
-      // of). Never caught by a render test before now because no prior
-      // jsdom smoke test asserted this exact sentence's wording.
-      const malusBoundaryPercent = (adj) => 25 * (5 + adj);
+      // v0.60: fixed a bug in the original formula-based version of this
+      // helper while adding the next-week projection below (same
+      // calculation, so it had to be got right twice) - it was previously
+      // `-adjustment * 25`, inverted from the mapping this comment already
+      // documented (e.g. it showed "weniger als 100%" for the harshest -4
+      // band, which should say "weniger als 25%"). Never caught by a
+      // render test before then because no prior jsdom smoke test asserted
+      // this exact sentence's wording.
+      //
+      // v0.63: the bands are no longer evenly spaced (10/25-point steps
+      // below 25%, 25-point steps above - see SCREEN_TIME_MALUS_BANDS
+      // above), so the old "25 * (5 + adjustment)" arithmetic shortcut no
+      // longer holds. Replaced by a real lookup: find which band's
+      // adjustment matches, then return the percent of the band right
+      // after it (the boundary not yet reached) - null if adjustment is
+      // already the least severe band (nothing above it to name).
+      const malusBoundaryPercent = (adj) => {
+        const idx = SCREEN_TIME_MALUS_BAND_PERCENTS.findIndex(
+          (percent) => SCREEN_TIME_MALUS_BANDS[percent] === adj
+        );
+        return idx >= 0 && idx + 1 < SCREEN_TIME_MALUS_BAND_PERCENTS.length
+          ? SCREEN_TIME_MALUS_BAND_PERCENTS[idx + 1]
+          : null;
+      };
       const malusLine =
         adjustment < 0
           ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil in der Vorwoche weniger als ${esc(malusBoundaryPercent(adjustment))}% des Wochenziels erreicht wurden.</p>`
@@ -4449,35 +4451,14 @@
     // v0.54 (korrigiert gegenüber v0.53): Inhalt des "Streak-Bonus"-
     // Infofensters, geöffnet per Klick auf die drei Streak-Punkte neben
     // einem Namen - siehe streakDotsHtml in
-    // _renderProgressSection/_activeStreakTierFor (dieselbe Tier-Auswahl-
-    // Logik, damit Punkte und Dialog nie auseinanderlaufen). Beschreibt das
-    // korrigierte Modell: einfacher Bonus ab requiredWeeks, danach
-    // dauerhaft der doppelte Bonus jede weitere Woche - kein Deckel mehr
-    // wie fälschlich in v0.53 (siehe _async_process_member_streak_tier in
-    // coordinator.py).
+    // _renderProgressSection/_activeStreakTierFor (dieselbe Logik, damit
+    // Punkte und Dialog nie auseinanderlaufen).
     //
-    // v0.55: die Punkte/dieser Dialog zeigen weiterhin nur eine "aktive"
-    // Schwelle auf einmal (siehe _activeStreakTierFor - Nutzerentscheidung,
-    // statt zwei getrennte Anzeigen einzuführen). Sind aber beide Schwellen
-    // (150%/200%) konfiguriert, ergänzt _otherStreakTierNote unten einen
-    // zusätzlichen Absatz, der die jeweils andere, nicht dargestellte
-    // Schwelle samt ihrem eigenen Bonus ausdrücklich benennt - vorher blieb
-    // sie in diesem Dialog komplett unerwähnt, obwohl sie serverseitig
-    // (_async_process_member_streak_tier) unabhängig von der hier gezeigten
-    // Schwelle läuft und bereits als eigenes Flammen-Badge am Balken
-    // sichtbar ist, sobald sie selbst aktiv ist (siehe streakBadgesHtml in
-    // _renderProgressSection, davon unberührt).
-    _otherStreakTierNote(memberId, info, streak) {
-      if (!(streak.bonus150 > 0 && streak.bonus200 > 0)) return "";
-      const otherTier = info.tier === "200" ? "150" : "200";
-      const otherBonus = otherTier === "200" ? streak.bonus200 : streak.bonus150;
-      const otherWeeks = this._streakWeeksFor(memberId)[otherTier === "200" ? "weeks200" : "weeks150"];
-      const statusFragment = otherWeeks > 0
-        ? ` Dort läuft aktuell die ${esc(otherWeeks)}. Woche in Folge.`
-        : ` Dort läuft aktuell keine eigene Serie.`;
-      return `<p class="muted">Zusätzlich, unabhängig davon: für die ${esc(otherTier)}%-Marke gibt es einen eigenen Streak-Bonus von ${esc(coinsLabel(otherBonus))} je Woche (ab ${esc(info.requiredWeeks + 1)} Wochen in Folge dauerhaft doppelt).${statusFragment}</p>`;
-    }
-
+    // v0.63: vereinfacht auf Nutzerwunsch - nur noch die eine 200%-Marke
+    // (die alte unabhängige 150%-Marke samt _otherStreakTierNote-Absatz ist
+    // entfallen) mit zwei fest bei 2 bzw. 3 Wochen in Folge liegenden,
+    // unabhängig konfigurierbaren Bonusbeträgen statt der alten
+    // required_weeks-/Verdopplungs-Logik.
     _renderStreakInfo() {
       const memberId = this._streakInfoMemberId;
       if (!memberId) return "";
@@ -4486,26 +4467,20 @@
         return `<p class="muted">Kein Streak-Bonus konfiguriert.</p>`;
       }
       const streak = this._streakBonus();
-      const otherTierNote = this._otherStreakTierNote(memberId, info, streak);
       if (info.currentWeeks <= 0) {
-        return `
-          <p class="muted">Aktuell läuft keine Serie - ${esc(info.requiredWeeks)} Wochen in Folge mit mindestens ${esc(info.tier)}% des Wochenziels starten eine neue.</p>
-          ${otherTierNote}
-        `;
+        return `<p class="muted">Aktuell läuft keine Serie - 2 Wochen in Folge mit mindestens 200% des Wochenziels starten eine neue.</p>`;
       }
-      const doubled = info.currentWeeks > info.requiredWeeks;
-      const reachedBase = info.currentWeeks >= info.requiredWeeks;
-      const currentWeeklyPayout = doubled ? info.bonus * 2 : reachedBase ? info.bonus : 0;
-      const statusLine = doubled
-        ? `Die Serie hat die ${esc(info.requiredWeeks)} Wochen überschritten - ab jetzt gibt es dauerhaft den doppelten Bonus, jede Woche, solange die Serie anhält.`
-        : reachedBase
-          ? `Die Serie hat gerade die ${esc(info.requiredWeeks)} Wochen erreicht - ab der nächsten Woche in Folge verdoppelt sich der Bonus.`
-          : `Noch ${esc(info.requiredWeeks - info.currentWeeks)} Woche(n) bis zum ersten Bonus.`;
+      const reached3Weeks = info.currentWeeks >= 3;
+      const reached2Weeks = info.currentWeeks >= 2;
+      const statusLine = reached3Weeks
+        ? `Die Serie hat die 3 Wochen erreicht - ab jetzt gibt es dauerhaft den 3-Wochen-Bonus, jede Woche, solange die Serie anhält.`
+        : reached2Weeks
+          ? `Die Serie hat gerade die 2 Wochen erreicht - ab der nächsten Woche in Folge gibt es den höheren 3-Wochen-Bonus.`
+          : `Noch ${esc(2 - info.currentWeeks)} Woche(n) bis zum ersten Bonus.`;
       return `
-        <p>${esc(info.currentWeeks)}. Woche in Folge über der ${esc(info.tier)}%-Marke des Wochenziels.</p>
-        <p>Ab ${esc(info.requiredWeeks)} Wochen in Folge gibt es <strong>${esc(coinsLabel(info.bonus))}</strong> je Woche, ab ${esc(info.requiredWeeks + 1)} Wochen in Folge dauerhaft <strong>${esc(coinsLabel(info.bonus * 2))}</strong> je Woche - die Serie kann beliebig lange weiterlaufen, ohne dass der Bonus weiter ansteigt.</p>
-        <p class="muted">${statusLine}${currentWeeklyPayout > 0 ? ` Aktuell laufender Wochenbonus: ${esc(coinsLabel(currentWeeklyPayout))}.` : ""}</p>
-        ${otherTierNote}
+        <p>${esc(info.currentWeeks)}. Woche in Folge über der 200%-Marke des Wochenziels.</p>
+        <p>Ab 2 Wochen in Folge gibt es <strong>${esc(coinsLabel(streak.bonus2Weeks))}</strong> je Woche, ab 3 Wochen in Folge dauerhaft <strong>${esc(coinsLabel(streak.bonus3Weeks))}</strong> je Woche - die Serie kann beliebig lange weiterlaufen.</p>
+        <p class="muted">${statusLine}${info.bonus > 0 ? ` Aktuell laufender Wochenbonus: ${esc(coinsLabel(info.bonus))}.` : ""}</p>
       `;
     }
 

@@ -29,7 +29,6 @@ from .const import (
     CLAIM_RESERVATION_MINUTES,
     COIN_REASON_MILESTONE_150,
     COIN_REASON_MILESTONE_200,
-    COIN_REASON_STREAK_150,
     COIN_REASON_STREAK_200,
     COIN_REASON_TASK_COMPLETION,
     COIN_REASON_TOP_SCORER,
@@ -45,9 +44,8 @@ from .const import (
     CONF_SCREEN_TIME_MALUS_START_DATE,
     CONF_SCREEN_TIME_TICK_MINUTES,
     CONF_SCREEN_TIME_TICKS_PER_DAY,
-    CONF_STREAK_150_BONUS_COINS,
-    CONF_STREAK_200_BONUS_COINS,
-    CONF_STREAK_BONUS_REQUIRED_WEEKS,
+    CONF_STREAK_BONUS_2_WEEKS_COINS,
+    CONF_STREAK_BONUS_3_WEEKS_COINS,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_TOP_SCORER_BONUS_COINS,
     CONF_TASK_REQUIRES_CONFIRMATION,
@@ -63,9 +61,8 @@ from .const import (
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_TICK_MINUTES,
     DEFAULT_SCREEN_TIME_TICKS_PER_DAY,
-    DEFAULT_STREAK_150_BONUS_COINS,
-    DEFAULT_STREAK_200_BONUS_COINS,
-    DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+    DEFAULT_STREAK_BONUS_2_WEEKS_COINS,
+    DEFAULT_STREAK_BONUS_3_WEEKS_COINS,
     DEFAULT_TOP_SCORER_BONUS_COINS,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
@@ -369,16 +366,15 @@ class MemberSummaryData:
     # whenever screen_time_daily_minutes itself would be 0 (feature
     # unconfigured), same as that field.
     screen_time_daily_minutes_next_week: int = 0
-    # v0.32: current consecutive-week bonus streak length, one counter per
-    # fixed coin-bonus tier (v0.36: was a single counter tied to the
-    # then-configurable CONF_STREAK_BONUS_THRESHOLD_POINTS; now there are two
-    # independent streaks, one for maintaining the 150% weekly-progress
-    # checkpoint and one for the 200% checkpoint - see
-    # CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in const.py and
-    # FamilyTasksCoordinator._async_process_streak_coin_bonus). 0 whenever the
-    # relevant tier's bonus is unconfigured (bonus coins <= 0) or the member
-    # hasn't reached that checkpoint in their most recently judged week.
-    streak_weeks_150: int = 0
+    # v0.32: current consecutive-week bonus streak length against the 200%
+    # weekly-progress checkpoint (v0.36: was a single counter tied to the
+    # then-configurable CONF_STREAK_BONUS_THRESHOLD_POINTS; v0.36-v0.62 also
+    # tracked an independent 150% tier here, removed in v0.63's Streak-Bonus
+    # simplification - see CONF_STREAK_BONUS_2_WEEKS_COINS/
+    # CONF_STREAK_BONUS_3_WEEKS_COINS in const.py and
+    # FamilyTasksCoordinator._async_process_streak_coin_bonus). 0 whenever
+    # the bonus is unconfigured (both amounts <= 0) or the member hasn't
+    # reached the checkpoint in their most recently judged week.
     streak_weeks_200: int = 0
 
 
@@ -411,8 +407,9 @@ class FamilyTasksData:
     # works out to this week (round(weekly_progress_goal_points * percent /
     # 100), the exact same computation
     # FamilyTasksCoordinator._async_process_milestone_coin_bonus itself
-    # awards against, and also the per-week target the streak-bonus tiers
-    # below judge against - see streak_150_bonus_coins/streak_200_bonus_coins)
+    # awards against, and also the per-week target the Streak-Bonus judges
+    # against (v0.63: only against the 200% one now - see
+    # streak_bonus_2_weeks_coins/streak_bonus_3_weeks_coins below)
     # - computed once, here, in Python and exposed so the card can show/label
     # the markers with these numbers directly instead of recomputing
     # percent -> points itself in JS. Python's round() (banker's rounding)
@@ -438,21 +435,23 @@ class FamilyTasksData:
     # card then renders each bar as a plain "points earned this week" tally
     # with no target to reach.
     weekly_progress_goal_points: int = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
-    # v0.36: household-wide Streak-Bonus coin amounts, one per fixed tier
-    # (see CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS/
-    # CONF_STREAK_BONUS_REQUIRED_WEEKS in const.py) - rides along here for
-    # the same "no dedicated entity for a plain options value" reason the
-    # milestone/weekly-goal settings above do. Replaces v0.32's single
-    # configurable-threshold streak_bonus_enabled/...threshold_points/
-    # ...points fields entirely: "maintaining" a fixed checkpoint (150% or
-    # 200%, milestone_150_threshold_points/milestone_200_threshold_points
-    # above) for more than streak_bonus_required_weeks consecutive weeks now
-    # earns its own coin bonus each further week the streak holds - see
-    # FamilyTasksCoordinator._async_process_streak_coin_bonus. A tier is off
-    # exactly when its bonus is <= 0.
-    streak_150_bonus_coins: int = DEFAULT_STREAK_150_BONUS_COINS
-    streak_200_bonus_coins: int = DEFAULT_STREAK_200_BONUS_COINS
-    streak_bonus_required_weeks: int = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+    # v0.36: household-wide Streak-Bonus coin amounts - rides along here
+    # for the same "no dedicated entity for a plain options value" reason
+    # the milestone/weekly-goal settings above do.
+    #
+    # v0.63: simplified to a single tier at the fixed 200% weekly-progress
+    # checkpoint with two fixed-week milestones (see
+    # CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS in
+    # const.py) - streak_bonus_2_weeks_coins is paid the week a member's
+    # streak first reaches 2 consecutive qualifying weeks at the 200%
+    # checkpoint, streak_bonus_3_weeks_coins from the 3rd consecutive
+    # qualifying week onward, repeated every further week the streak holds -
+    # see FamilyTasksCoordinator._async_process_streak_coin_bonus. Off
+    # exactly when both are <= 0. Replaces the old independent 150%/200%
+    # tiers and the configurable CONF_STREAK_BONUS_REQUIRED_WEEKS (see git
+    # history for the v0.36-v0.54 evolution of this feature).
+    streak_bonus_2_weeks_coins: int = DEFAULT_STREAK_BONUS_2_WEEKS_COINS
+    streak_bonus_3_weeks_coins: int = DEFAULT_STREAK_BONUS_3_WEEKS_COINS
     # v0.52: "Wochensieger-Bonus" coin amount (see
     # CONF_TOP_SCORER_BONUS_COINS in const.py) - rides along here for the
     # same "no dedicated entity for a plain options value" reason the
@@ -1452,9 +1451,6 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 screen_time_daily_minutes=screen_time_daily_minutes,
                 screen_time_tick_adjustment_minutes_next_week=screen_time_tick_adjustment_next_week,
                 screen_time_daily_minutes_next_week=screen_time_daily_minutes_next_week,
-                streak_weeks_150=(self.streak_bonus_state.get(member_id, "150") or {}).get(
-                    "streak_count", 0
-                ),
                 streak_weeks_200=(self.streak_bonus_state.get(member_id, "200") or {}).get(
                     "streak_count", 0
                 ),
@@ -1473,9 +1469,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # FamilyTasksMemberPointsSensor in sensor.py for how it now reaches
         # the card.
         default_rotation_strategy = DEFAULT_ROTATION_STRATEGY
-        streak_150_bonus_coins = DEFAULT_STREAK_150_BONUS_COINS
-        streak_200_bonus_coins = DEFAULT_STREAK_200_BONUS_COINS
-        streak_bonus_required_weeks = DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+        streak_bonus_2_weeks_coins = DEFAULT_STREAK_BONUS_2_WEEKS_COINS
+        streak_bonus_3_weeks_coins = DEFAULT_STREAK_BONUS_3_WEEKS_COINS
         top_scorer_bonus_coins = DEFAULT_TOP_SCORER_BONUS_COINS
         if self.config_entry:
             options = self.config_entry.options
@@ -1488,14 +1483,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             default_rotation_strategy = options.get(
                 CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
             )
-            streak_150_bonus_coins = options.get(
-                CONF_STREAK_150_BONUS_COINS, DEFAULT_STREAK_150_BONUS_COINS
+            streak_bonus_2_weeks_coins = options.get(
+                CONF_STREAK_BONUS_2_WEEKS_COINS, DEFAULT_STREAK_BONUS_2_WEEKS_COINS
             )
-            streak_200_bonus_coins = options.get(
-                CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
-            )
-            streak_bonus_required_weeks = options.get(
-                CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+            streak_bonus_3_weeks_coins = options.get(
+                CONF_STREAK_BONUS_3_WEEKS_COINS, DEFAULT_STREAK_BONUS_3_WEEKS_COINS
             )
             top_scorer_bonus_coins = options.get(
                 CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
@@ -1526,9 +1518,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             milestone_200_threshold_points=milestone_200_threshold_points,
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
-            streak_150_bonus_coins=streak_150_bonus_coins,
-            streak_200_bonus_coins=streak_200_bonus_coins,
-            streak_bonus_required_weeks=streak_bonus_required_weeks,
+            streak_bonus_2_weeks_coins=streak_bonus_2_weeks_coins,
+            streak_bonus_3_weeks_coins=streak_bonus_3_weeks_coins,
             top_scorer_bonus_coins=top_scorer_bonus_coins,
             vacation_mode_active=vacation_mode_active,
             pool_tasks_open=pool_tasks_open,
@@ -2672,40 +2663,31 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
     async def _async_process_streak_coin_bonus(
         self, start_of_week: datetime, goal_points: int
     ) -> None:
-        """Credit "Streak-Bonus" coins for maintaining a checkpoint across weeks.
+        """Credit "Streak-Bonus" coins for maintaining the 200% checkpoint across weeks.
 
-        See CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS/
-        CONF_STREAK_BONUS_REQUIRED_WEEKS in const.py. v0.36: replaces the old
-        single configurable-threshold, points-based Streak-Bonus entirely -
-        there are now two independent streaks, one for the fixed 150%
-        weekly-progress checkpoint and one for 200%
-        (PROGRESS_THRESHOLD_PERCENTS in const.py), each processed exactly
-        like the old single streak was (see
-        _async_process_member_streak_tier): unlike the Meilensteinbonus
-        above (credited live, mid-week), a streak can only be judged once a
-        week has actually ended - so each tier catches its member up on
-        every fully-elapsed calendar week since that tier's
-        StreakBonusStateStore cursor last stopped, oldest first, judging
-        each one against the tier's checkpoint and incrementing/resetting a
-        per-tier streak counter. v0.54 (correcting a v0.53 misreading): the
-        bonus keeps being paid every fully-elapsed qualifying week, same as
-        the "rolling forever" behaviour of v0.36-v0.52 - it never stops once
-        a streak is long enough - but it no longer climbs indefinitely. The
-        payout is a flat multiple of bonus_coins depending on how long the
-        streak currently is: exactly 1x once the counter reaches
-        streak_bonus_required_weeks, then a flat 2x for every week from
-        streak_bonus_required_weeks + 1 onward for as long as the streak
-        keeps going - never 3x, 4x, etc. This matches the three-dot streak
-        display next to a member's name in the card, which also tops out at
-        the same two milestones (see the streak-dots markup in
-        family-tasks-card.js): dot 3 lighting up means the member is now in
-        the doubled-bonus tier, not that no further bonus will follow. A
-        streak that drops below the checkpoint resets the counter to 0 and
-        has to be built back up from scratch before either payout resumes.
-        A no-op if goal_points is 0 - both checkpoints are a percentage of
-        the weekly goal.
+        See CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS
+        in const.py. v0.63: simplified to a single tier at the fixed 200%
+        weekly-progress checkpoint (PROGRESS_THRESHOLD_PERCENTS in
+        const.py) - the old independent 150% tier and the configurable
+        CONF_STREAK_BONUS_REQUIRED_WEEKS are both gone (see git history for
+        the v0.36-v0.54 evolution of this feature). Unlike the
+        Meilensteinbonus above (credited live, mid-week), a streak can only
+        be judged once a week has actually ended - so
+        _async_process_member_streak_tier catches a member up on every
+        fully-elapsed calendar week since StreakBonusStateStore's "200" tier
+        cursor last stopped, oldest first, judging each one against the
+        checkpoint and incrementing/resetting a streak counter.
+        streak_bonus_2_weeks_coins is paid the week the counter first
+        reaches 2, streak_bonus_3_weeks_coins from 3 onward, repeated every
+        further qualifying week for as long as the streak continues - never
+        climbing past the 3-weeks amount, same "keeps paying, never climbs
+        further" shape the old doubled-forever behaviour had. A streak that
+        drops below the checkpoint resets the counter to 0 and has to be
+        built back up from scratch before either payout resumes. A no-op if
+        goal_points is 0 - the checkpoint is a percentage of the weekly
+        goal.
 
-        A brand-new member (or a tier's very first run) starts its cursor at
+        A brand-new member (or the very first run) starts its cursor at
         "last week" rather than the beginning of time, so turning a bonus on
         doesn't retroactively grind through a household's entire history -
         same reasoning as the Meilensteinbonus only ever reacting to the
@@ -2714,65 +2696,53 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         if not self.config_entry or goal_points <= 0:
             return
         options = self.config_entry.options
-        required_weeks = options.get(
-            CONF_STREAK_BONUS_REQUIRED_WEEKS, DEFAULT_STREAK_BONUS_REQUIRED_WEEKS
+        streak_bonus_2_weeks_coins = options.get(
+            CONF_STREAK_BONUS_2_WEEKS_COINS, DEFAULT_STREAK_BONUS_2_WEEKS_COINS
         )
-        if required_weeks <= 0:
+        streak_bonus_3_weeks_coins = options.get(
+            CONF_STREAK_BONUS_3_WEEKS_COINS, DEFAULT_STREAK_BONUS_3_WEEKS_COINS
+        )
+        if streak_bonus_2_weeks_coins <= 0 and streak_bonus_3_weeks_coins <= 0:
             return
-        streak_150_bonus_coins = options.get(
-            CONF_STREAK_150_BONUS_COINS, DEFAULT_STREAK_150_BONUS_COINS
-        )
-        streak_200_bonus_coins = options.get(
-            CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
-        )
-        tiers = (
-            ("150", 150, streak_150_bonus_coins, COIN_REASON_STREAK_150),
-            ("200", 200, streak_200_bonus_coins, COIN_REASON_STREAK_200),
-        )
+        target_points = round(goal_points * 200 / 100)
 
-        for tier, percent, bonus_coins, coin_reason in tiers:
-            if bonus_coins <= 0:
+        for member_id, member in self.members.data.items():
+            if (
+                not member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                or not member.get("active", True)
+                # v0.37: paused (temporarily away) is excluded here too -
+                # see CONF_MEMBER_PAUSED.
+                or member.get(CONF_MEMBER_PAUSED, False)
+            ):
                 continue
-            target_points = round(goal_points * percent / 100)
-            for member_id, member in self.members.data.items():
-                if (
-                    not member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
-                    or not member.get("active", True)
-                    # v0.37: paused (temporarily away) is excluded here too -
-                    # see CONF_MEMBER_PAUSED.
-                    or member.get(CONF_MEMBER_PAUSED, False)
-                ):
-                    continue
-                await self._async_process_member_streak_tier(
-                    member_id,
-                    tier,
-                    start_of_week,
-                    target_points,
-                    required_weeks,
-                    bonus_coins,
-                    percent,
-                    coin_reason,
-                )
+            await self._async_process_member_streak_tier(
+                member_id,
+                start_of_week,
+                target_points,
+                streak_bonus_2_weeks_coins,
+                streak_bonus_3_weeks_coins,
+            )
 
     async def _async_process_member_streak_tier(
         self,
         member_id: str,
-        tier: str,
         start_of_week: datetime,
         target_points: int,
-        required_weeks: int,
-        bonus_coins: int,
-        percent: int,
-        coin_reason: str,
+        bonus_2_weeks_coins: int,
+        bonus_3_weeks_coins: int,
     ) -> None:
-        """Catch up one member's Streak-Bonus cursor, for one tier, through every elapsed week.
+        """Catch up one member's Streak-Bonus cursor through every elapsed week.
 
-        v0.54: pays bonus_coins once required_weeks consecutive qualifying
-        weeks are reached, then bonus_coins * 2 flat for every further
-        consecutive qualifying week - see the payout_multiplier logic below
-        and the docstring of _async_process_streak_coin_bonus for why.
+        v0.63: pays bonus_2_weeks_coins the week the streak counter first
+        reaches 2, then bonus_3_weeks_coins for every further qualifying
+        week from 3 onward - see _async_process_streak_coin_bonus's
+        docstring for why. Still tracked under the "200" tier key in
+        StreakBonusStateStore (unchanged storage shape - see that class's
+        docstring), just no longer looped over multiple tiers - a
+        household's stored "150" tier state, if any, is simply never read
+        again.
         """
-        state = self.streak_bonus_state.get(member_id, tier)
+        state = self.streak_bonus_state.get(member_id, "200")
         if state and state.get("processed_through"):
             cursor = dt_util.parse_datetime(state["processed_through"]) or (
                 start_of_week - timedelta(days=7)
@@ -2794,49 +2764,38 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 streak_count += 1
             else:
                 streak_count = 0
-            # v0.54 (correcting a v0.53 misreading): paid every qualifying
-            # week from required_weeks onward, not just the first two - see
-            # the docstring of _async_process_streak_coin_bonus above for
-            # the full reasoning. The payout is flat, not climbing further
-            # past required_weeks + 1: exactly bonus_coins at
-            # required_weeks, then bonus_coins * 2 for every week after
-            # that the streak keeps going.
-            if streak_count == required_weeks:
-                payout_multiplier = 1
-            elif streak_count > required_weeks:
-                payout_multiplier = 2
+            # v0.63: fixed milestones instead of a required_weeks-driven
+            # multiplier - exactly bonus_2_weeks_coins at streak_count == 2,
+            # then bonus_3_weeks_coins for every week from 3 onward, flat,
+            # for as long as the streak keeps going.
+            if streak_count == 2:
+                payout = bonus_2_weeks_coins
+            elif streak_count >= 3:
+                payout = bonus_3_weeks_coins
             else:
-                payout_multiplier = 0
-            if payout_multiplier:
+                payout = 0
+            if payout > 0:
                 await self.coin_ledger.async_add_entry(
                     member_id=member_id,
-                    amount=bonus_coins * payout_multiplier,
-                    reason=coin_reason,
+                    amount=payout,
+                    reason=COIN_REASON_STREAK_200,
                     note=(
                         f"Streak-Bonus: {streak_count}. Woche in Folge "
-                        f"über der {percent}%-Marke"
-                        + (
-                            " (doppelter Bonus ab der "
-                            f"{required_weeks + 1}. Woche in Folge)"
-                            if payout_multiplier == 2
-                            else ""
-                        )
+                        "über der 200%-Marke"
                     ),
                 )
                 _LOGGER.debug(
-                    "Credited %s Streak-Bonus coin(s) to %s for tier %s, week of %s (streak %s, multiplier %sx)",
-                    bonus_coins * payout_multiplier,
+                    "Credited %s Streak-Bonus coin(s) to %s, week of %s (streak %s)",
+                    payout,
                     member_id,
-                    tier,
                     dt_util.as_local(cursor).date().isoformat(),
                     streak_count,
-                    payout_multiplier,
                 )
             cursor += timedelta(days=7)
             weeks_processed += 1
 
         if weeks_processed:
-            await self.streak_bonus_state.async_set(member_id, tier, cursor, streak_count)
+            await self.streak_bonus_state.async_set(member_id, "200", cursor, streak_count)
 
     async def _async_process_top_scorer_coin_bonus(
         self, start_of_week: datetime, weekly_progress_goal_points: int
@@ -2855,8 +2814,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         recipient. Also requires at least two eligible members that week;
         with only one (or zero) there is no one to be "top" relative to, so
         nothing is paid - same reasoning as why a solo household never sees
-        a competitive leaderboard on the card either (see _progressMembers's
-        isChildUser branch in family-tasks-card.js).
+        a competitive leaderboard on the card either (see _progressMembers
+        in family-tasks-card.js, which shows one bar per active "child"
+        member to every household user since v0.63).
 
         v0.55: on explicit user request, the winner must additionally have
         reached the household's configured weekly point goal

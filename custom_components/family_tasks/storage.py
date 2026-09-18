@@ -2616,17 +2616,16 @@ async def async_create_milestone_bonus_state_store(hass: HomeAssistant) -> Miles
 class StreakBonusStateStore:
     """Per-member, per-tier Streak-coin-bonus cursor/counter.
 
-    See CONF_STREAK_BONUS_REQUIRED_WEEKS/CONF_STREAK_150_BONUS_COINS/
-    CONF_STREAK_200_BONUS_COINS in const.py and
-    FamilyTasksCoordinator._async_process_streak_coin_bonus in
+    See CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS in
+    const.py and FamilyTasksCoordinator._async_process_streak_coin_bonus in
     coordinator.py. Unlike MilestoneBonusStateStore (which only ever needs to
     remember the *current* week), a streak has to be judged across
     consecutive already-elapsed weeks, so this remembers, per member and per
-    tier ("150"/"200" - the two fixed PROGRESS_THRESHOLD_PERCENTS checkpoints
-    a streak can apply to, tracked independently since v0.36 - a household
-    upgrading from the pre-v0.36 single-streak shape simply starts every
-    member fresh at both tiers, same as any Store.async_load() encountering
-    a shape it doesn't recognize), the UTC start-of-week timestamp already
+    tier (kept as a per-tier shape since v0.36, key "150"/"200" - v0.63
+    simplified the Streak-Bonus itself down to a single "200" tier, so "150"
+    is no longer written; a household with old "150" data from before v0.63
+    simply has it sit unread, same as any Store.async_load() encountering a
+    shape it doesn't recognize), the UTC start-of-week timestamp already
     processed ("processed_through" - the coordinator has caught up on every
     week strictly before this one) and the current consecutive-week streak
     length ("streak_count"). Not a StorageCollection, coordinator-internal

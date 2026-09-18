@@ -2,6 +2,13 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.63.0] - 2026-09-18
+
+### Changed
+- **Kinder sehen jetzt den Wochenfortschritt aller Kinder**: die bisherige Beschränkung, dass ein Kind-Konto im Wochenfortschritt-Abschnitt nur den eigenen Balken sieht (seit v0.29), entfällt - jedes Konto sieht jetzt dieselbe Liste aller aktiven Kinder-Balken, wie es Eltern schon immer taten.
+- **Handyzeit-Tick-Malus um zwei weitere, härtere Stufen erweitert**: unter 10% des Wochenziels gibt es jetzt -6 Min./Tick (statt bisher -4 unter 25%), ab 10% (aber unter 25%) -5 Min./Tick; die bestehenden Stufen ab 25%/50%/75%/100% bleiben unverändert.
+- **Streak-Bonus vereinfacht**: der bisherige, unabhängig von der 200%-Marke laufende 150%-Streak entfällt ersatzlos. Es gibt nur noch einen Streak-Bonus gegen die 200%-Marke, mit zwei separat konfigurierbaren, festen Beträgen für die 2. bzw. 3. Woche in Folge (statt einer frei konfigurierbaren erforderlichen Wochenzahl) - ab der 3. Woche wird dauerhaft der 3-Wochen-Betrag jede weitere Woche erneut ausgezahlt, solange die Serie anhält.
+
 ## [0.62.0] - 2026-09-15
 
 ### Fixed

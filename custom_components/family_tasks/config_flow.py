@@ -36,9 +36,8 @@ from .const import (
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_SCREEN_TIME_TICK_MINUTES,
     CONF_SCREEN_TIME_TICKS_PER_DAY,
-    CONF_STREAK_150_BONUS_COINS,
-    CONF_STREAK_200_BONUS_COINS,
-    CONF_STREAK_BONUS_REQUIRED_WEEKS,
+    CONF_STREAK_BONUS_2_WEEKS_COINS,
+    CONF_STREAK_BONUS_3_WEEKS_COINS,
     CONF_TOP_SCORER_BONUS_COINS,
     CONF_VACATION_MODE_DEFAULT,
     CONF_WEEKLY_PROGRESS_GOAL_POINTS,
@@ -51,9 +50,8 @@ from .const import (
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
     DEFAULT_SCREEN_TIME_TICK_MINUTES,
     DEFAULT_SCREEN_TIME_TICKS_PER_DAY,
-    DEFAULT_STREAK_150_BONUS_COINS,
-    DEFAULT_STREAK_200_BONUS_COINS,
-    DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
+    DEFAULT_STREAK_BONUS_2_WEEKS_COINS,
+    DEFAULT_STREAK_BONUS_3_WEEKS_COINS,
     DEFAULT_TOP_SCORER_BONUS_COINS,
     DEFAULT_VACATION_MODE,
     DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
@@ -278,40 +276,32 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
                 # v0.36: "Streak-Bonus" - replaces the old single
-                # configurable-threshold, points-based version (v0.32). Bonus
-                # coins for reaching/maintaining a fixed checkpoint (150% or
-                # 200% of the weekly goal) for streak_bonus_required_weeks
-                # consecutive calendar weeks - one bonus amount per tier, so
-                # a household can reward the two checkpoints differently. See
-                # CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in
-                # const.py and
-                # FamilyTasksCoordinator._async_process_streak_coin_bonus. A
-                # tier is off exactly when its bonus is 0. v0.54: paid every
-                # further qualifying week too, not just the first two - 1x
-                # this amount at streak_bonus_required_weeks consecutive
-                # weeks, then a flat 2x from streak_bonus_required_weeks + 1
-                # onward - see that method's docstring.
+                # configurable-threshold, points-based version (v0.32).
+                # v0.63: simplified on explicit user request to a single tier
+                # at the fixed 200% weekly-progress checkpoint, with two
+                # independently configurable coin amounts for two fixed
+                # milestones instead of one amount plus a configurable
+                # required-weeks/doubling rule - the old 150% tier and
+                # CONF_STREAK_BONUS_REQUIRED_WEEKS are both gone (see git
+                # history for the v0.36-v0.54 evolution of this feature). See
+                # CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS
+                # in const.py and
+                # FamilyTasksCoordinator._async_process_streak_coin_bonus.
+                # Off exactly when both amounts are 0.
                 vol.Optional(
-                    CONF_STREAK_BONUS_REQUIRED_WEEKS,
+                    CONF_STREAK_BONUS_2_WEEKS_COINS,
                     default=current.get(
-                        CONF_STREAK_BONUS_REQUIRED_WEEKS,
-                        DEFAULT_STREAK_BONUS_REQUIRED_WEEKS,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(min=1, max=52, mode=NumberSelectorMode.BOX)
-                ),
-                vol.Optional(
-                    CONF_STREAK_150_BONUS_COINS,
-                    default=current.get(
-                        CONF_STREAK_150_BONUS_COINS, DEFAULT_STREAK_150_BONUS_COINS
+                        CONF_STREAK_BONUS_2_WEEKS_COINS,
+                        DEFAULT_STREAK_BONUS_2_WEEKS_COINS,
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
                 ),
                 vol.Optional(
-                    CONF_STREAK_200_BONUS_COINS,
+                    CONF_STREAK_BONUS_3_WEEKS_COINS,
                     default=current.get(
-                        CONF_STREAK_200_BONUS_COINS, DEFAULT_STREAK_200_BONUS_COINS
+                        CONF_STREAK_BONUS_3_WEEKS_COINS,
+                        DEFAULT_STREAK_BONUS_3_WEEKS_COINS,
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)

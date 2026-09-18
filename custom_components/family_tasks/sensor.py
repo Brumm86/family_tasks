@@ -255,16 +255,16 @@ class FamilyTasksMemberPointsSensor(
             # per-week target each Streak-Bonus tier below is judged against.
             "milestone_150_threshold_points": self.coordinator.data.milestone_150_threshold_points,
             "milestone_200_threshold_points": self.coordinator.data.milestone_200_threshold_points,
-            # v0.36: household-wide Streak-Bonus coin amounts, one per tier
-            # (see CONF_STREAK_150_BONUS_COINS/CONF_STREAK_200_BONUS_COINS in
-            # const.py) - same "rides along, identical on every member's
+            # v0.36: household-wide Streak-Bonus coin amounts (see
+            # CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS
+            # in const.py) - same "rides along, identical on every member's
             # points sensor" reasoning as the Meilensteinbonus attributes
-            # above. Replaces the pre-v0.36 single configurable-threshold
-            # streak_bonus_enabled/...threshold_points/...points attributes
-            # entirely.
-            "streak_150_bonus_coins": self.coordinator.data.streak_150_bonus_coins,
-            "streak_200_bonus_coins": self.coordinator.data.streak_200_bonus_coins,
-            "streak_bonus_required_weeks": self.coordinator.data.streak_bonus_required_weeks,
+            # above. v0.63: simplified to a single tier at the fixed 200%
+            # checkpoint with two fixed-week milestones (2/3 consecutive
+            # weeks), replacing the old independent 150%/200% tiers and the
+            # configurable streak_bonus_required_weeks entirely.
+            "streak_bonus_2_weeks_coins": self.coordinator.data.streak_bonus_2_weeks_coins,
+            "streak_bonus_3_weeks_coins": self.coordinator.data.streak_bonus_3_weeks_coins,
             # v0.52: "Wochensieger-Bonus" - household-wide bonus coin amount
             # for the member with the most points_week among every eligible
             # member once a calendar week ends (see
@@ -279,11 +279,9 @@ class FamilyTasksMemberPointsSensor(
             # dict on every member's own points sensor - no separate
             # "current leader" attribute is needed.
             "top_scorer_bonus_coins": self.coordinator.data.top_scorer_bonus_coins,
-            # v0.32: this member's current consecutive-week streak length,
-            # one per fixed tier since v0.36 - see
-            # MemberSummaryData.streak_weeks_150/streak_weeks_200 in
-            # coordinator.py.
-            "streak_weeks_150": member.streak_weeks_150,
+            # v0.32: this member's current consecutive-week streak length
+            # against the 200% checkpoint - see MemberSummaryData.streak_weeks_200
+            # in coordinator.py. v0.63 removed the old independent 150% tier.
             "streak_weeks_200": member.streak_weeks_200,
             # v0.23: household-wide default rotation strategy (see
             # CONF_DEFAULT_ROTATION_STRATEGY in const.py), identical on every
