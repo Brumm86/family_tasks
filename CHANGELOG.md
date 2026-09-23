@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.65.0] - 2026-09-23
+
+### Fixed
+- **Neu angelegte "Jährlich"-Aufgabe erschien nicht unter "nicht fällige Aufgaben"**: der in v0.64 eingeführte Wiederholungstyp „Jährlich" übernahm ungeprüft dieselbe Vorher/Nachher-Logik wie „Alle N Tage" - dadurch löste sich die aktuelle Periode immer auf irgendein Datum aus dem laufenden oder vorherigen Kalenderjahr auf, unabhängig davon, ob die Aufgabe zu dem Zeitpunkt überhaupt schon existierte. Eine Aufgabe, die nach ihrem diesjährigen Termin angelegt wurde (z. B. "29.07." im September angelegt), erschien dadurch sofort als „überfällig" für ein Datum vor ihrer eigenen Erstellung; eine vor ihrem Termin angelegte Aufgabe löste sich stattdessen auf das bereits vergangene *vorjährige* Datum auf - eine neu angelegte "Jährlich"-Aufgabe war dadurch faktisch nie "nicht fällig". Die Periodenermittlung orientiert sich jetzt stattdessen an "Wöchentlich": ein bereits erreichtes, nicht vor der Erstellung liegendes Datum bleibt (wie bisher bei "Alle N Tage") die aktuelle, ggf. überfällige Periode; andernfalls wird der nächste Termin nur innerhalb des bereits an anderer Stelle verwendeten "Bald fällig"-Vorschau-Fensters (laufende Kalenderwoche) angezeigt, sonst bleibt die Aufgabe bis dahin als "nicht fällig" ausgeblendet.
+
 ## [0.64.0] - 2026-09-23
 
 ### Added

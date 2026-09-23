@@ -504,6 +504,59 @@ def _yearly_anchor_date(year: int, month: int, day: int) -> date:
         return date(year, month, day - 1)
 
 
+def _yearly_occurrences(
+    recurrence: dict, today: date, created_at: date | None
+) -> tuple[date | None, date]:
+    """Shared "yearly" resolution for _current_period_date/_pool_period_date.
+
+    v0.65: factored out of a first version that lived directly in
+    _current_period_date and (bug, see its own CHANGELOG entry) mirrored
+    "interval_days" unconditionally - anchor_date only ever carries a
+    "yearly" task's month/day (the year is never read back, see
+    RECURRENCE_YEARLY in const.py), so unlike interval_days (whose anchor
+    normally *is* the task's own creation date) that always resolved to
+    *some* date from the current or previous calendar year regardless of
+    whether the task had even existed yet, or whether that date had even
+    arrived: a task created any time after its own month/day had already
+    passed this year showed up immediately "überfällig" for a date before
+    it was ever created (the exact v0.39 "weekly" bug, reproduced here),
+    and one created *before* its date resolved to *last* year's already-past
+    occurrence instead of simply "not due yet" - so a brand-new "yearly"
+    task was, in practice, never idle/"nicht fällig" at all.
+
+    Returns ``(due_or_overdue, next_occurrence)``:
+
+    - ``due_or_overdue`` is this year's occurrence once it has arrived
+      (today included) *and* it doesn't predate the task's own creation -
+      the current, possibly-overdue-until-completed period, same semantics
+      "interval_days" already has - or ``None`` if neither holds yet (not
+      arrived this year, or the only candidate so far predates created_at).
+    - ``next_occurrence`` is always the earliest occurrence that is both
+      still upcoming and not itself before ``created_at`` - the date either
+      caller previews going forward.
+
+    ``created_at`` mirrors the same guard "weekly" has had since v0.39: a
+    candidate date before the task's own creation is never treated as "the"
+    period - the caller instead falls through to whatever comes next.
+    """
+    anchor = date.fromisoformat(recurrence["anchor_date"])
+    this_year_date = _yearly_anchor_date(today.year, anchor.month, anchor.day)
+
+    due_or_overdue: date | None = None
+    if today >= this_year_date and (created_at is None or this_year_date >= created_at):
+        due_or_overdue = this_year_date
+
+    next_occurrence = (
+        this_year_date
+        if today < this_year_date
+        else _yearly_anchor_date(today.year + 1, anchor.month, anchor.day)
+    )
+    while created_at is not None and next_occurrence < created_at:
+        next_occurrence = _yearly_anchor_date(next_occurrence.year + 1, anchor.month, anchor.day)
+
+    return due_or_overdue, next_occurrence
+
+
 def _current_period_date(
     recurrence: dict,
     today: date,
@@ -513,16 +566,19 @@ def _current_period_date(
     """Return the date identifying the current occurrence's period.
 
     ``created_at`` (v0.39): the date the task itself was created, if known -
-    ``None`` for a task saved before this field existed. Only affects a
-    "weekly" recurrence: without it, a task created e.g. on a Sunday for a
-    Monday-only schedule would resolve to *last* Monday (the most recent
-    matching weekday) - a date before the task ever existed - and show up
-    immediately as overdue, even though it has never actually had a chance
-    to be completed. See the v0.39 CHANGELOG entry.
+    ``None`` for a task saved before this field existed. Affects "weekly"
+    (without it, a task created e.g. on a Sunday for a Monday-only schedule
+    would resolve to *last* Monday - a date before the task ever existed -
+    and show up immediately as overdue, even though it has never actually
+    had a chance to be completed; see the v0.39 CHANGELOG entry) and, since
+    v0.65, "yearly" for the same reason (see _yearly_occurrences).
 
-    v0.40: the "weekly" branch is now the only one that can return ``None`` -
-    see its own comment below for when and why. Every other recurrence type
-    always resolves to a concrete date, exactly as before.
+    v0.40: "weekly" was the only branch that could return ``None``, for a
+    task too new to have had a chance at any of its configured weekdays yet
+    this week. v0.65: "yearly" can return ``None`` too, for the analogous
+    "too new/too far ahead" case - see its own branch below and
+    _yearly_occurrences. Every other recurrence type still always resolves
+    to a concrete date.
 
     ``is_completed`` (v0.42): for "weekly" only, see that branch's comment -
     lets a caller with access to the completion log (``_async_update_data``/
@@ -615,17 +671,23 @@ def _current_period_date(
         return anchor + timedelta(days=period_index * interval)
 
     if rtype == "yearly":
-        # Fixed calendar date every year (e.g. "29.07.") - anchor_date only
-        # contributes its month/day (see RECURRENCE_YEARLY in const.py); the
-        # period is this year's occurrence once it has arrived, otherwise
-        # still last year's (not due again yet) - same before/after-the-
-        # anchor convention "interval_days" above uses, just on a yearly
-        # instead of an N-day cadence.
-        anchor = date.fromisoformat(recurrence["anchor_date"])
-        this_year_date = _yearly_anchor_date(today.year, anchor.month, anchor.day)
-        if today >= this_year_date:
-            return this_year_date
-        return _yearly_anchor_date(today.year - 1, anchor.month, anchor.day)
+        # Fixed calendar date every year (e.g. "29.07.") - see
+        # _yearly_occurrences for why this needs its own bounded-preview
+        # handling (v0.65) instead of interval_days' simpler "most recent
+        # anchor <= today" model. Due/overdue (today's-or-a-not-too-old
+        # occurrence, gated on created_at) takes priority; otherwise preview
+        # the next occurrence only once it falls within the current
+        # calendar week - same bounded "Bald fällig" window every other
+        # type gets (see the generic TASK_STATUS_UPCOMING check further
+        # below in _async_update_data) - and stay idle/hidden ("nicht
+        # fällig") for the rest of the year otherwise, exactly like a
+        # "weekly" task whose weekday hasn't fallen within a week it existed
+        # for yet.
+        due_or_overdue, next_occurrence = _yearly_occurrences(recurrence, today, created_at)
+        if due_or_overdue is not None:
+            return due_or_overdue
+        week_end_date = today + timedelta(days=6 - today.weekday())
+        return next_occurrence if next_occurrence <= week_end_date else None
 
     if rtype == RECURRENCE_ONCE:
         # A single, never-repeating occurrence: the period is always the
@@ -657,6 +719,11 @@ def _pool_period_date(recurrence: dict, today: date, created_at: date | None = N
     *some* upcoming date for a child to see and reserve, however far out
     that ends up being for a brand-new task.
 
+    v0.65: "yearly" gained the same never-return-``None`` special-case (see
+    _yearly_occurrences and its own branch below) once _current_period_date
+    started bounding "yearly" to a preview window too, for the exact same
+    reason as "weekly".
+
     Normally bounded to the *current* calendar week (Monday-Sunday, the same
     boundary start_of_week uses): prefers the most recent matching weekday
     within this week if one has already occurred (today included), and
@@ -670,6 +737,19 @@ def _pool_period_date(recurrence: dict, today: date, created_at: date | None = N
     bounded to the rest of the current week either in that case, and instead
     looks into the following week(s) as needed.
     """
+    if recurrence["type"] == "yearly":
+        # v0.65: mirrors the "weekly" special-case below - _current_period_
+        # date can return None for "yearly" now (see _yearly_occurrences),
+        # which would leave an unassigned Aufgabenpool occurrence of this
+        # type with no date to ever be noticed/claimed by. due_or_overdue
+        # already covers "arrived, whether or not still uncompleted";
+        # next_occurrence is always resolvable and used as-is otherwise -
+        # unlike _current_period_date's own preview, not bounded to the
+        # current week, for the same "must always resolve to *some* date"
+        # reason the "weekly" branch below isn't either.
+        due_or_overdue, next_occurrence = _yearly_occurrences(recurrence, today, created_at)
+        return due_or_overdue if due_or_overdue is not None else next_occurrence
+
     if recurrence["type"] != "weekly":
         return _current_period_date(recurrence, today, created_at)
 
@@ -1078,10 +1158,12 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 # configured weekday(s) don't fall within the current week
                 # at all for it yet (see _current_period_date) - e.g. a
                 # brand-new task created after its only weekday already
-                # passed this week. Nothing to show, act on, or claim this
-                # week; treated exactly like an untriggered sensor task
-                # until its weekday actually falls within a week it existed
-                # for.
+                # passed this week. v0.65: also reachable for a non-pool
+                # "yearly" task whose date is more than a week away (see
+                # _yearly_occurrences). Nothing to show, act on, or claim
+                # right now either way; treated exactly like an untriggered
+                # sensor task until its next occurrence actually falls
+                # within a week it existed for.
                 if period_start is None:
                     task_statuses[task_id] = TaskStatusData(
                         task_id=task_id,
