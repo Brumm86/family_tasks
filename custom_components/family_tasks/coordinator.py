@@ -488,6 +488,22 @@ class FamilyTasksData:
     screen_time_ticks_per_day: int = DEFAULT_SCREEN_TIME_TICKS_PER_DAY
 
 
+def _yearly_anchor_date(year: int, month: int, day: int) -> date:
+    """Resolve a "yearly" recurrence's month/day within a given year.
+
+    Falls back to February 28th for a February 29th anchor in a non-leap
+    year, rather than raising - a "29.02." yearly task should still resolve
+    to a sensible date every single year, not just leap ones. Every other
+    month/day combination is always valid for any year (they were already a
+    real calendar date once, when the anchor itself was saved), so this is
+    the only case that can ever need the fallback.
+    """
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return date(year, month, day - 1)
+
+
 def _current_period_date(
     recurrence: dict,
     today: date,
@@ -597,6 +613,19 @@ def _current_period_date(
         delta_days = (today - anchor).days
         period_index = delta_days // interval if delta_days >= 0 else 0
         return anchor + timedelta(days=period_index * interval)
+
+    if rtype == "yearly":
+        # Fixed calendar date every year (e.g. "29.07.") - anchor_date only
+        # contributes its month/day (see RECURRENCE_YEARLY in const.py); the
+        # period is this year's occurrence once it has arrived, otherwise
+        # still last year's (not due again yet) - same before/after-the-
+        # anchor convention "interval_days" above uses, just on a yearly
+        # instead of an N-day cadence.
+        anchor = date.fromisoformat(recurrence["anchor_date"])
+        this_year_date = _yearly_anchor_date(today.year, anchor.month, anchor.day)
+        if today >= this_year_date:
+            return this_year_date
+        return _yearly_anchor_date(today.year - 1, anchor.month, anchor.day)
 
     if rtype == RECURRENCE_ONCE:
         # A single, never-repeating occurrence: the period is always the

@@ -1,6 +1,6 @@
 """Sensor-based triggers for the Family Tasks integration.
 
-Most tasks recur on a calendar (daily/weekly/interval_days), but some are
+Most tasks recur on a calendar (daily/weekly/interval_days/yearly), but some are
 better described by a sensor condition than by a schedule: "take out the
 trash once the bin sensor reports it's full", "water the plants once the
 soil moisture sensor goes dry". Tasks with recurrence type ``"trigger"`` (see

@@ -350,6 +350,12 @@ ROTATION_ONLY_CHILDREN: Final = "only_children"
 RECURRENCE_DAILY: Final = "daily"
 RECURRENCE_WEEKLY: Final = "weekly"
 RECURRENCE_INTERVAL_DAYS: Final = "interval_days"
+# Recurs every calendar year on a fixed month/day (e.g. a birthday or
+# anniversary) - "anchor_date" carries that month/day (its year is ignored;
+# see _current_period_date in coordinator.py, which resolves it against
+# whichever year is current). A "29.02." anchor falls back to the 28th in a
+# non-leap year rather than being skipped.
+RECURRENCE_YEARLY: Final = "yearly"
 # A single occurrence that never repeats: due once on "anchor_date" and, once
 # completed/skipped, stays done forever because its period_key (the anchor
 # date) never changes - see _current_period_date in coordinator.py.
@@ -388,6 +394,7 @@ RECURRENCE_TYPES: Final = [
     RECURRENCE_DAILY,
     RECURRENCE_WEEKLY,
     RECURRENCE_INTERVAL_DAYS,
+    RECURRENCE_YEARLY,
     RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
     RECURRENCE_CONFIRMATION,

@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.64.0] - 2026-09-23
+
+### Added
+- **Neuer Wiederholungstyp „Jährlich"**: eine Aufgabe kann jetzt so angelegt werden, dass sie an einem festen Tag jedes Jahr fällig wird (z. B. immer am 29.07., etwa für einen Geburtstag oder Jahrestag), statt sie über „Alle N Tage" mit 365 Tagen anzunähern. Nutzt dasselbe Datumsfeld wie „Einmalig"/„Alle N Tage" (`anchor_date`) - nur Monat und Tag werden ausgewertet, das ursprünglich gespeicherte Jahr spielt keine Rolle mehr. Die aktuelle Periode ist ab dem Datum selbst der diesjährige Termin, davor noch der vorjährige (dieselbe Vorher/Nachher-Logik wie bei „Alle N Tage"). Ein 29.02.-Anker weicht in einem Nicht-Schaltjahr auf den 28.02. aus.
+
 ## [0.63.0] - 2026-09-18
 
 ### Changed

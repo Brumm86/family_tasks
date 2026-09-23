@@ -556,6 +556,11 @@
     daily: "Täglich",
     weekly: "Wöchentlich (Wochentage)",
     interval_days: "Alle N Tage",
+    // v0.64: fixed calendar date every year (e.g. "29.07.") - reuses the
+    // same anchor_date field as "once"/"interval_days", just interpreted as
+    // month/day only (the year is ignored, see _current_period_date in
+    // coordinator.py).
+    yearly: "Jährlich (fester Tag)",
     once: "Einmalig",
     trigger: "Sensor-Ereignis",
     // Legacy recurrence type: battery monitoring now raises its own one-time
@@ -1947,6 +1952,12 @@
         recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
       } else if (form.recurrence.type === "once") {
         recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
+      } else if (form.recurrence.type === "yearly") {
+        // Only month/day end up mattering (see _current_period_date in
+        // coordinator.py) - stored as a full ISO date anyway, same field
+        // and same ha-date-input as "once"/"interval_days" above, so no
+        // separate month/day inputs are needed.
+        recurrence.anchor_date = form.recurrence.anchor_date || new Date().toISOString().slice(0, 10);
       } else if (form.recurrence.type === "trigger") {
         const t = form.recurrence.trigger;
         if (!t.entity_id.trim()) {
@@ -3283,8 +3294,8 @@
     // _loadUiState/_saveUiState) and toggled independently via the
     // "toggle-recurrence-group" action, same pattern as
     // "toggle-hide-excluded-batteries". Groups are ordered the same way
-    // RECURRENCE_LABELS itself is defined (daily/weekly/interval_days/once/
-    // trigger/confirmation-absent/battery), with any type not in that map
+    // RECURRENCE_LABELS itself is defined (daily/weekly/interval_days/yearly/
+    // once/trigger/confirmation-absent/battery), with any type not in that map
     // (shouldn't normally happen) appended at the end under its raw name
     // rather than silently dropped.
     _renderNotDueGroups(ids, isAdmin, isParentUser, currentMemberId) {
@@ -4864,6 +4875,8 @@
             </div>` : ""}
           ${f.recurrence.type === "once" ? `
             <label>Datum<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date || todayIsoDate())}"></ha-date-input></label>` : ""}
+          ${f.recurrence.type === "yearly" ? `
+            <label>Datum (Jahr wird ignoriert - wiederholt sich jedes Jahr)<ha-date-input data-field="recurrence.anchor_date" value="${esc(f.recurrence.anchor_date || todayIsoDate())}"></ha-date-input></label>` : ""}
           ${f.recurrence.type === "trigger" ? this._renderTriggerFields(f.recurrence.trigger) : ""}
           ${f.recurrence.type === "trigger" ? this._renderCompletionButtonField(f.completion_button_entity_id) : ""}
           ${f.recurrence.type === "battery" ? `

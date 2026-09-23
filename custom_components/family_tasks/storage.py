@@ -60,6 +60,7 @@ from .const import (
     RECURRENCE_ONCE,
     RECURRENCE_TRIGGER,
     RECURRENCE_TYPES,
+    RECURRENCE_YEARLY,
     ROTATION_ONLY_CHILDREN,
     ROTATION_STRATEGIES,
     ROTATION_STRATEGY_FIXED,
@@ -189,7 +190,7 @@ RECURRENCE_SCHEMA = vol.Schema(
         vol.Required("type"): vol.In(RECURRENCE_TYPES),
         vol.Optional("interval"): vol.All(int, vol.Range(min=1)),
         vol.Optional("weekdays"): [vol.All(int, vol.Range(min=0, max=6))],
-        vol.Optional("anchor_date"): str,  # ISO date, required for interval_days
+        vol.Optional("anchor_date"): str,  # ISO date, required for interval_days/yearly
         vol.Optional("trigger"): TASK_TRIGGER_SCHEMA,  # required for type "trigger"
     },
     extra=vol.ALLOW_EXTRA,
@@ -394,6 +395,7 @@ class TaskStorageCollection(collection.DictStorageCollection):
         recurrence = validated["recurrence"]
         if recurrence["type"] in (
             RECURRENCE_INTERVAL_DAYS,
+            RECURRENCE_YEARLY,
             RECURRENCE_ONCE,
         ) and not recurrence.get("anchor_date"):
             recurrence["anchor_date"] = dt_util.now().date().isoformat()
@@ -456,6 +458,7 @@ class TaskStorageCollection(collection.DictStorageCollection):
             )
         if updated["recurrence"]["type"] in (
             RECURRENCE_INTERVAL_DAYS,
+            RECURRENCE_YEARLY,
             RECURRENCE_ONCE,
         ) and not updated["recurrence"].get("anchor_date"):
             updated["recurrence"]["anchor_date"] = dt_util.now().date().isoformat()
