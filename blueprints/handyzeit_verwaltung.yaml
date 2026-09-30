@@ -35,6 +35,32 @@ blueprint:
     wird das neue Limit auf die tatsächlich verbrauchte Zeit zuzüglich des
     Tick-Zuwachses gesetzt, statt blind auf das zuletzt gesetzte Limit
     aufzuschlagen.
+
+    Optional (neu, testweise) lässt sich zusätzlich ein input_number
+    angeben, in den bei jeder Neuberechnung derselbe Wert geschrieben
+    wird, der sonst an Google gemeldet wird ("family_tasks:
+    Verfügbarkeits-Zähler (Test)" unten) - rein additiv, verändert die
+    bestehende Google-Anbindung nicht, dient nur dem Vergleich mit den
+    von Google ermittelten Werten.
+
+    Optional (neu, v0.66) lässt sich außerdem eine zeitnahe Korrektur für
+    denselben Google-Family-Link-Fehler wie oben (v0.59) aktivieren, die
+    nicht auf die nächste Plus-Tick-Uhrzeit wartet: siehe "family_tasks:
+    Zeitnahe Korrektur (alle 5 Minuten)" unten. Alle 5 Minuten wird
+    verglichen, wie viel Nutzung Google tatsächlich auf das Tageslimit
+    anrechnet (`used_minutes`) gegenüber der Summe der Nutzung aller
+    Apps, die NICHT "immer erlaubt" sind (ermittelt aus dem
+    Tages-Nutzungs-Sensor und der Liste der immer erlaubten Apps) - jede
+    positive Differenz ist Nutzung "immer erlaubter" Apps, die Google zu
+    Unrecht mitzählt. Nur diese Differenz (abzüglich einer bereits
+    denselben Tag gutgeschriebenen Menge) wird zum aktuellen Limit
+    addiert, nie mehr - eine Überkreditierung ist damit ausgeschlossen,
+    da nie mehr gutgeschrieben wird, als Google selbst als Nutzung
+    "immer erlaubter" Apps ausweist. Behebt Google diesen Fehler eines
+    Tages, wird die Differenz künftig dauerhaft 0 und die Korrektur wird
+    nie mehr aktiv - über den optionalen Zähler-Helfer unten lässt sich
+    das beobachten (sein "zuletzt geändert"-Zeitpunkt zeigt, wann zuletzt
+    tatsächlich korrigiert wurde).
   domain: automation
   input:
     child_name:
@@ -248,6 +274,78 @@ blueprint:
         entity:
           domain: sensor
 
+    available_time_counter:
+      name: "family_tasks: Verfügbarkeits-Zähler (Test, optional)"
+      description: >-
+        Rein additiv, testweise (siehe Blueprint-Beschreibung oben): ein
+        input_number, in das bei jeder Neuberechnung zusätzlich derselbe
+        Wert geschrieben wird, der auch an Google gemeldet wird
+        (daily_minutes). Verändert nichts an der bestehenden
+        Google-Anbindung, dient nur der parallelen Beobachtung. Leer
+        lassen (Standard), um wie bisher nur an Google zu melden.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+
+    daily_screen_time_sensor:
+      name: "family_tasks: Zeitnahe Korrektur - Tages-Nutzungs-Sensor (optional, v0.66)"
+      description: >-
+        Der von der Google-Family-Link-Integration je Kind bereitgestellte
+        "...Daily Screen Time"-Sensor - trägt im Attribut "apps" die
+        heutige Nutzung jeder einzelnen App in Minuten. Zusammen mit
+        "Immer-erlaubte-Apps-Sensor" unten die Grundlage für die zeitnahe
+        Korrektur - siehe Blueprint-Beschreibung oben. Leer lassen, um die
+        zeitnahe Korrektur zu deaktivieren (nur die v0.59-Korrektur bei
+        automatischen Ticks bleibt dann aktiv, falls dort konfiguriert).
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    always_allowed_apps_sensor:
+      name: "family_tasks: Zeitnahe Korrektur - Immer-erlaubte-Apps-Sensor (optional, v0.66)"
+      description: >-
+        Der von der Google-Family-Link-Integration je Kind bereitgestellte
+        "...Always Allowed Apps"-Sensor - trägt im Attribut "apps" die
+        Liste der von der Sperre ausgenommenen Apps (Paketnamen). Zusammen
+        mit "Tages-Nutzungs-Sensor" oben die Grundlage für die zeitnahe
+        Korrektur. Leer lassen, um die zeitnahe Korrektur zu deaktivieren.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    correction_credited_helper:
+      name: "family_tasks: Zeitnahe Korrektur - bereits gutgeschrieben (optional, v0.66)"
+      description: >-
+        Ein input_number, in dem diese Automatisierung merkt, wie viele
+        Minuten sie dem heutigen Limit wegen des Immer-erlaubte-Apps-
+        Fehlers bereits gutgeschrieben hat - verhindert, dass derselbe
+        Fehlbetrag alle 5 Minuten erneut aufaddiert wird. Wird bei jedem
+        Mitternachts-Reset automatisch auf 0 zurückgesetzt. Min. 0,
+        Schrittweite 1 empfohlen. Leer lassen, um die zeitnahe Korrektur
+        zu deaktivieren.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+
+    correction_count_helper:
+      name: "family_tasks: Zeitnahe Korrektur - Zähler (optional, v0.66)"
+      description: >-
+        Ein counter-Helfer, der bei jeder tatsächlich vorgenommenen
+        Korrektur um 1 erhöht wird - rein zur Beobachtung, ob/wie oft der
+        Google-Fehler noch auftritt (siehe Blueprint-Beschreibung oben:
+        dessen "zuletzt geändert"-Zeitpunkt zeigt an, wann zuletzt
+        tatsächlich korrigiert wurde). Wird nie zurückgesetzt. Leer
+        lassen, um auf den Zähler zu verzichten - die Korrektur selbst
+        funktioniert auch ohne ihn.
+      default: ""
+      selector:
+        entity:
+          domain: counter
+
 triggers:
   - id: reset
     trigger: time
@@ -261,6 +359,9 @@ triggers:
   - id: family_event
     trigger: event
     event_type: family_tasks_reward_redeemed
+  - id: correction_check
+    trigger: time_pattern
+    minutes: "/5"
 
 conditions: []
 
@@ -277,6 +378,11 @@ actions:
       increment_minutes: !input increment_minutes
       screen_time_tick_adjustment_source_entity: !input screen_time_tick_adjustment_source_entity
       screen_time_remaining_sensor: !input screen_time_remaining_sensor
+      available_time_counter: !input available_time_counter
+      daily_screen_time_sensor: !input daily_screen_time_sensor
+      always_allowed_apps_sensor: !input always_allowed_apps_sensor
+      correction_credited_helper: !input correction_credited_helper
+      correction_count_helper: !input correction_count_helper
 
   # Frühe Ausstiege, bevor überhaupt eine neue Handyzeit berechnet wird -
   # derselbe "stop"-Stil wie in der ursprünglichen Automation.
@@ -324,6 +430,78 @@ actions:
         sequence:
           - stop: "Ignoriert: Belohnungs-Event betrifft ein anderes Kind oder trägt keine Bildschirmzeit-Minuten."
 
+      # v0.66: zeitnahe Korrektur (alle 5 Minuten) desselben Google-Fehlers
+      # wie die v0.59-Korrektur oben - eigener, unabhängiger Zweig, läuft
+      # unabhängig von Pause-Schalter/Pflichtaufgaben-Sensor (siehe
+      # Blueprint-Beschreibung: keine Bonuszeit, nur Ausgleich eines
+      # Mess-/Zurechnungsfehlers) und endet immer mit "stop", berührt also
+      # nie die normale Tick-/Button-/Belohnungs-Logik unten.
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'correction_check' }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ daily_screen_time_sensor | default('') != ''
+                         and always_allowed_apps_sensor | default('') != ''
+                         and screen_time_remaining_sensor | default('') != '' }}
+                sequence:
+                  - variables:
+                      allowed_pkgs: >-
+                        {{ (state_attr(always_allowed_apps_sensor, 'apps') or [])
+                           | map(attribute='package') | list }}
+                      relevant_minutes: >-
+                        {{ (((state_attr(daily_screen_time_sensor, 'apps') or [])
+                            | rejectattr('package', 'in', allowed_pkgs)
+                            | sum(attribute='minutes'))) | round(0, 'ceil') | int(0) }}
+                      google_used_minutes: >-
+                        {{ state_attr(screen_time_remaining_sensor, 'used_minutes') | int(0) }}
+                      gap_now: "{{ [google_used_minutes - relevant_minutes, 0] | max }}"
+                      already_credited: >-
+                        {{ (states(correction_credited_helper) | float(0)) if (correction_credited_helper | default('') != '') else 0 }}
+                      correction_delta: "{{ [gap_now - already_credited, 0] | max }}"
+                  - choose:
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ correction_delta > 0 }}"
+                        sequence:
+                          - action: familylink.set_daily_limit
+                            data:
+                              entity_id: !input switch_entity
+                              daily_minutes: "{{ (states(daily_limit_sensor) | int(0)) + correction_delta }}"
+                          - choose:
+                              - conditions:
+                                  - condition: template
+                                    value_template: "{{ correction_credited_helper | default('') != '' }}"
+                                sequence:
+                                  - action: input_number.set_value
+                                    target:
+                                      entity_id: "{{ correction_credited_helper }}"
+                                    data:
+                                      value: "{{ gap_now }}"
+                          - choose:
+                              - conditions:
+                                  - condition: template
+                                    value_template: "{{ correction_count_helper | default('') != '' }}"
+                                sequence:
+                                  - action: counter.increment
+                                    target:
+                                      entity_id: "{{ correction_count_helper }}"
+                          - action: logbook.log
+                            data:
+                              name: "Handyzeit-Korrektur ({{ child_name }})"
+                              message: >-
+                                Immer-erlaubte-Apps-Fehler ausgeglichen: +{{ correction_delta }}
+                                Min. (Google used_minutes {{ google_used_minutes }}, tatsächlich
+                                relevante Nutzung {{ relevant_minutes }} Min., Gesamtkorrektur
+                                heute {{ gap_now }} Min.)
+                              entity_id: !input switch_entity
+          - stop: >-
+              Ende des zeitnahen Korrektur-Checks (Trigger "correction_check") -
+              unabhängig von der normalen Tick-/Button-/Belohnungs-Logik unten.
+
   - variables:
       daily_minutes: >-
         {% set current = states(daily_limit_sensor) | int(0) %}
@@ -353,6 +531,33 @@ actions:
     data:
       entity_id: !input switch_entity
       daily_minutes: "{{ daily_minutes }}"
+
+  # v0.66: bereits gutgeschriebene Korrektur-Minuten täglich zurücksetzen,
+  # damit die zeitnahe Korrektur am neuen Tag wieder bei 0 anfängt.
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'reset' and correction_credited_helper | default('') != '' }}
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: "{{ correction_credited_helper }}"
+            data:
+              value: 0
+
+  # Optional (testweise): denselben Wert zusätzlich in einen input_number
+  # schreiben - siehe available_time_counter oben.
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ available_time_counter | default('') != '' }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: "{{ available_time_counter }}"
+            data:
+              value: "{{ daily_minutes }}"
 
 mode: queued
 max: 10
