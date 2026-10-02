@@ -121,10 +121,11 @@ blueprint:
       name: Admin-User-IDs
       description: >-
         Diese HA-Nutzer dürfen die Buttons bedienen - alle anderen werden
-        geblockt und per persistent_notification gemeldet.
-      default:
-        - 74920404dcbc436ca01c7972f657e48a
-        - d555f81fabab410789565e2df189d540
+        geblockt und per persistent_notification gemeldet. Es gibt bewusst
+        keinen Standardwert: hier müssen die HA-User-IDs der Admin-Accounts
+        eingetragen werden (Einstellungen > Personen > Benutzer), sonst ist
+        niemand berechtigt.
+      default: []
       selector:
         text:
           multiple: true

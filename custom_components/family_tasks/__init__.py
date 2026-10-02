@@ -460,7 +460,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     "family-tasks-card", deterministically, on every single load, immune to
     a reload or to clearing the app's cache - unlike the caching problem
     described above, the browser never even tries to fetch the file here.
-    Observed on two different Samsung phones' Home Assistant Companion App
+    Observed on Samsung phones' Home Assistant Companion App
     WebView, never on iPhone/Safari (long since "latestJS" by that check).
     The card file itself has no `import`/`export` statement - it never
     needed ES-module semantics to begin with - so the exact same cache-

@@ -112,7 +112,7 @@
  * v0.21 along with the collapsible-inline-section approach it belonged to -
  * see the Favoriten note further down.) This also softens a real-world
  * failure
- * mode: on some devices/browsers (observed on a Samsung Galaxy S24, likely a
+ * mode: on some devices/browsers (observed on a Samsung device, likely a
  * webview/private-mode storage restriction) window.localStorage silently
  * throws on every read/write, so the toggle state never persists at all and
  * every load falls back to this default - previously that meant "always
@@ -5980,7 +5980,7 @@
   // happens some indeterminate time after this script runs - reproducible
   // roughly proportional to *how fast* this small file loads relative to
   // HA's multi-MB main bundle, so it's most visible on slower/cheaper
-  // devices, not just slow networks - see the A17 investigation notes).
+  // devices, not just slow networks).
   // Instead we wait for a reliable "the main bundle has definitely finished
   // installing everything, including that polyfill if present" signal: HA's
   // own root element, <home-assistant>, becoming defined on whichever
