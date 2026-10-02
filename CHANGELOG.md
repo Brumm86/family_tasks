@@ -2,6 +2,18 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.67.0] - 2026-10-02
+
+### Removed
+- **Handyzeit-Blueprint: beide bisherigen Korrekturen für den Google-Family-Link-Fehler entfernt**: sowohl die v0.59-Korrektur (Limit = `used_minutes` + Tick, wenn beim automatischen Tick die Restzeit 0 beträgt) als auch die v0.66-Alle-5-Minuten-Prüfung wurden samt der Eingänge `screen_time_remaining_sensor` (alte Fassung), `daily_screen_time_sensor`, `always_allowed_apps_sensor`, `correction_credited_helper` und `correction_count_helper` aus `blueprints/handyzeit_verwaltung.yaml` entfernt; der `plus_tick`-Zweig der `daily_minutes`-Berechnung rechnet wieder nur „letztes Limit + Tick". Die gleiche v0.59-Logik in der (nicht im Repository liegenden) Home-Assistant-Automation „Handyzeit ändern / Bonuszeit (nur Admin)" wurde ebenfalls entfernt.
+
+### Added
+- **Handyzeit-Blueprint: Ausgleich der von Google zu Unrecht angerechneten Zeit, bemessen an den tatsächlich zählenden Apps**: neue, unabhängige Alle-5-Minuten-Prüfung (Trigger `correction_check`). Verglichen wird die von Google angerechnete Nutzung (`used_minutes` des „Screen Time Remaining"-Sensors) mit der „Korrekten Nutzungszeit", also der Summe der Pro-App-Minuten aller Apps, die nicht „immer erlaubt" sind. Die Differenz umfasst damit auch Zeit, die keiner App zugeordnet ist (z. B. Telefonate). Nur der noch nicht ausgeglichene Teil der Differenz (Zähler `correction_credited_helper`, täglich um 00:00 auf 0) wird zum aktuellen Limit addiert; die Gutschrift läuft nur nach oben und kann nie über den von Google ausgewiesenen Fehlbetrag hinausgehen. Der Ausgleich ist nur aktiv, wenn alle vier Pflicht-Eingänge (Remaining-Sensor, Tages-Nutzungs-Sensor, Immer-erlaubte-Apps-Sensor, Zähler-Helfer) gesetzt sind. Optional: `correction_count_helper` (zählt jede Gutschrift) und `correction_min_gap_minutes` (Mindest-Fehlbetrag, Standard 1, blendet Rundungsabweichungen aus).
+- **Schutz vor Fehlgutschriften**: der Ausgleich rechnet nur mit frischen Daten (beide Sensoren müssen seit Mitternacht aktualisiert worden sein, sonst würde nach dem Tageswechsel der Fehlbetrag des Vortags gutgeschrieben), überspringt den Lauf bei `unknown`/`unavailable`-Sensoren, fehlenden Attributen oder nicht verfügbarem Zähler (ein fehlendes `apps`-Attribut würde sonst die gesamte Tagesnutzung als Fehlbetrag erscheinen lassen) und schreibt den Zähler vor der Limit-Änderung fort (scheitert er, bleibt das Limit unverändert). Nach jeder Anpassung wartet die Automatisierung bis zu zwei Minuten, bis der Tageslimit-Sensor den neuen Wert zeigt, damit ein nachfolgender Tick oder Button nicht auf einem veralteten Limit aufsetzt und die Gutschrift überschreibt.
+
+### Known limitations
+- Ob eine App zählt, richtet sich immer nach der aktuellen Liste der immer erlaubten Apps: wird eine App im Tagesverlauf in diese Liste aufgenommen oder aus ihr entfernt (z. B. durch die Spotify-Freischaltung), wird auch ihre bereits früher am selben Tag angefallene Nutzung entsprechend behandelt.
+
 ## [0.65.0] - 2026-09-23
 
 ### Fixed
