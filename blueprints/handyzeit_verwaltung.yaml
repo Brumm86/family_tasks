@@ -58,7 +58,9 @@ blueprint:
     Fehlmessung; Rundungsabweichungen lassen sich über den optionalen
     Mindest-Fehlbetrag unten ausblenden. Behebt Google den Fehler eines
     Tages, wird die Differenz dauerhaft 0 und der Ausgleich nie mehr
-    aktiv.
+    aktiv. Gutgeschrieben wird frühestens ab der ersten automatischen
+    Plus-Uhrzeit des Tages (v0.67.1) - vorher bleibt das Limit nach dem
+    Reset um Mitternacht unangetastet.
   domain: automation
   input:
     child_name:
@@ -379,6 +381,7 @@ actions:
       correction_credited_helper: !input correction_credited_helper
       correction_count_helper: !input correction_count_helper
       correction_min_gap_minutes: !input correction_min_gap_minutes
+      plus_times: !input plus_times
 
   # Frühe Ausstiege, bevor überhaupt eine neue Handyzeit berechnet wird -
   # derselbe "stop"-Stil wie in der ursprünglichen Automation.
@@ -445,6 +448,22 @@ actions:
                      or correction_credited_helper | default('') == '' }}
             then:
               - stop: "Ausgleich nicht vollständig konfiguriert (vier Pflicht-Eingänge) - nichts zu tun."
+          # v0.67.1: Gutschrift erst ab dem ersten automatischen Tick des
+          # Tages. Direkt nach dem Reset um 00:00 läuft die Prüfung zeitgleich
+          # (mode: queued, Reihenfolge nicht garantiert) und konnte noch
+          # Attributwerte des Vortags lesen, obwohl der Sensor-Zustand schon
+          # neu geladen war - der Fehlbetrag des Vortags wurde dann dem neuen
+          # Tag gutgeschrieben und das Limit nach dem Reset sofort wieder
+          # angehoben.
+          - variables:
+              first_tick_reached: >-
+                {% set t = (plus_times | default([]) | sort | list) %}
+                {{ true if (t | count) == 0 else now() >= today_at(t[0]) }}
+          - if:
+              - condition: template
+                value_template: "{{ not first_tick_reached }}"
+            then:
+              - stop: "Ausgleich übersprungen: der erste automatische Tick des Tages ist noch nicht erreicht."
           # Nur mit frischen, vollständigen Daten rechnen: Sensoren, die nach
           # Mitternacht noch nicht neu geladen wurden, zeigen noch den Vortag
           # (-> sonst würde dessen Fehlbetrag dem neuen Tag gutgeschrieben).

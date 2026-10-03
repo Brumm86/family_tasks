@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.67.1] - 2026-10-03
+
+### Fixed
+- **Handyzeit-Blueprint: Reset um Mitternacht wurde sofort wieder aufgehoben**: der Ausgleich (Trigger `correction_check`) läuft um 00:00 zeitgleich mit dem Reset und las dabei noch Attributwerte des Vortags (`used_minutes`), obwohl die Sensor-Zustände bereits neu geladen waren - der Frische-Check über `last_updated` griff deshalb nicht. Der Fehlbetrag des Vortags wurde dem neuen Tag gutgeschrieben und das gerade auf 0 gesetzte Limit unmittelbar wieder angehoben. Der Ausgleich schreibt jetzt erst ab der ersten automatischen Plus-Uhrzeit des Tages (kleinster Wert von `plus_times`) gut; davor endet die Prüfung ohne Änderung.
+
 ## [0.67.0] - 2026-10-02
 
 ### Removed
