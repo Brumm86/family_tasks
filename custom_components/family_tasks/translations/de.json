@@ -27,6 +27,12 @@
           "screen_time_ticks_per_day": "Automatische Ticks pro Tag (wie im Handyzeit-Blueprint hinterlegt)",
           "screen_time_malus_start_date": "Handyzeit-Tick-Malus berücksichtigt ab (Datum)",
           "weekly_progress_goal_points": "Wöchentliche Zielpunktzahl (Fortschrittsbalken)",
+          "malus_threshold_1_points": "Handyzeit-Malus Stufe 1: darunter −6 Min. pro Tick (ab dieser Punktzahl der Vorwoche −5 Min.)",
+          "malus_threshold_2_points": "Handyzeit-Malus Stufe 2: ab dieser Punktzahl der Vorwoche −3 Min. pro Tick",
+          "malus_threshold_3_points": "Handyzeit-Malus Stufe 3: ab dieser Punktzahl der Vorwoche −2 Min. pro Tick",
+          "malus_threshold_4_points": "Handyzeit-Malus Stufe 4: ab dieser Punktzahl der Vorwoche −1 Min. pro Tick (ab dem Wochenziel kein Malus)",
+          "coin_threshold_1_points": "Münz-Schwelle 1 (Punkte pro Woche, Meilensteinbonus-Münzen)",
+          "coin_threshold_2_points": "Münz-Schwelle 2 (Punkte pro Woche, Meilensteinbonus-Münzen und Streak-Bonus)",
           "milestone_150_bonus_coins": "Meilensteinbonus-Münzen bei 150% der Zielpunktzahl",
           "milestone_200_bonus_coins": "Meilensteinbonus-Münzen bei 200% der Zielpunktzahl",
           "streak_bonus_2_weeks_coins": "Streak-Bonus-Münzen bei 2 Wochen in Folge über der 200%-Marke",
@@ -35,6 +41,9 @@
           "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
       }
+    },
+    "error": {
+      "thresholds_not_ascending": "Die Schwellen müssen aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2."
     }
   },
   "selector": {

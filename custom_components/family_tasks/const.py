@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import timedelta
-from typing import Final
+from typing import Any, Final
 
 from homeassistant.const import Platform
 
@@ -109,6 +110,14 @@ CONF_SCREEN_TIME_MALUS_START_DATE: Final = "screen_time_malus_start_date"
 # single tier at the 200% checkpoint - see CONF_STREAK_BONUS_2_WEEKS_COINS/
 # CONF_STREAK_BONUS_3_WEEKS_COINS below; 150% remains a Meilensteinbonus-only
 # checkpoint from here on.
+#
+# v0.68: the checkpoints are no longer fixed percentages but absolute point
+# values, each configurable separately in the options flow (see
+# CONF_MALUS_THRESHOLD_*_POINTS / CONF_COIN_THRESHOLD_*_POINTS below and
+# resolve_progress_thresholds). The weekly goal itself
+# (CONF_WEEKLY_PROGRESS_GOAL_POINTS) stays and doubles as the "no malus any
+# more" threshold. PROGRESS_THRESHOLD_PERCENTS is kept only as the legacy
+# percent table that unset thresholds are derived from (migration default).
 PROGRESS_THRESHOLD_PERCENTS: Final = [0, 10, 25, 50, 75, 100, 150, 200]
 
 # v0.36: replaces the pre-v0.36 tick-based screen-time automation's fixed
@@ -156,6 +165,63 @@ PROGRESS_THRESHOLD_PERCENTS: Final = [0, 10, 25, 50, 75, 100, 150, 200]
 # (family-tasks-card.js) does a real lookup against a JS mirror of this dict
 # rather than assuming even spacing; keep both in sync by hand.
 PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES: Final = {0: -6, 10: -5, 25: -3, 50: -2, 75: -1, 100: 0}
+
+# v0.68: the malus table expressed per stage instead of per percent. Stage 0
+# applies below malus threshold 1, stage 1 from threshold 1 up to (not
+# including) threshold 2, ... stage 4 from threshold 4 up to (not including)
+# the weekly goal, stage 5 (no malus) from the weekly goal onward. The
+# thresholds themselves are absolute points - see resolve_progress_thresholds.
+MALUS_STAGE_ADJUSTMENT_MINUTES: Final = (-6, -5, -3, -2, -1, 0)
+
+# v0.68: absolute-point thresholds (all optional; unset -> derived from the
+# weekly goal and the legacy percent, so existing installations behave
+# unchanged after the update).
+CONF_MALUS_THRESHOLD_1_POINTS: Final = "malus_threshold_1_points"
+CONF_MALUS_THRESHOLD_2_POINTS: Final = "malus_threshold_2_points"
+CONF_MALUS_THRESHOLD_3_POINTS: Final = "malus_threshold_3_points"
+CONF_MALUS_THRESHOLD_4_POINTS: Final = "malus_threshold_4_points"
+CONF_COIN_THRESHOLD_1_POINTS: Final = "coin_threshold_1_points"
+CONF_COIN_THRESHOLD_2_POINTS: Final = "coin_threshold_2_points"
+MALUS_THRESHOLD_KEYS: Final = (
+    CONF_MALUS_THRESHOLD_1_POINTS,
+    CONF_MALUS_THRESHOLD_2_POINTS,
+    CONF_MALUS_THRESHOLD_3_POINTS,
+    CONF_MALUS_THRESHOLD_4_POINTS,
+)
+COIN_THRESHOLD_KEYS: Final = (CONF_COIN_THRESHOLD_1_POINTS, CONF_COIN_THRESHOLD_2_POINTS)
+_LEGACY_MALUS_PERCENTS: Final = (10, 25, 50, 75)
+_LEGACY_COIN_PERCENTS: Final = (150, 200)
+
+
+def resolve_progress_thresholds(
+    options: Mapping[str, Any], goal_points: int
+) -> tuple[tuple[int, int, int, int], tuple[int, int]]:
+    """Return ((malus 1-4), (coin 1-2)) thresholds in absolute points.
+
+    A threshold the household has not set explicitly falls back to the
+    weekly goal times its legacy percent (10/25/50/75 % for the malus,
+    150/200 % for the coins), rounded with Python's round() - the single
+    place that computation lives, shared by the awarding logic, the sensor
+    attributes and the options flow.
+    """
+
+    def _one(key: str, percent: int) -> int:
+        value = options.get(key)
+        if value is None or value == "":
+            return round(goal_points * percent / 100) if goal_points > 0 else 0
+        return int(value)
+
+    malus = tuple(_one(k, p) for k, p in zip(MALUS_THRESHOLD_KEYS, _LEGACY_MALUS_PERCENTS))
+    coin = tuple(_one(k, p) for k, p in zip(COIN_THRESHOLD_KEYS, _LEGACY_COIN_PERCENTS))
+    return malus, coin  # type: ignore[return-value]
+
+
+def thresholds_ascending(
+    malus: tuple[int, ...], goal_points: int, coin: tuple[int, ...]
+) -> bool:
+    """True if malus 1 < 2 < 3 < 4 < weekly goal < coin 1 < coin 2."""
+    chain = [*malus, goal_points, *coin]
+    return all(a < b for a, b in zip(chain, chain[1:]))
 
 # v0.36: bonus *coins* (see the "Münzen"/coin-shop section below) awarded
 # live, the moment a participating member's weekly points cross the fixed

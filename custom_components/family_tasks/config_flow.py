@@ -29,7 +29,17 @@ from .const import (
     CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
     CONF_BATTERY_WARNING_THRESHOLD,
     CONF_DEFAULT_ROTATION_STRATEGY,
+    COIN_THRESHOLD_KEYS,
+    CONF_COIN_THRESHOLD_1_POINTS,
+    CONF_COIN_THRESHOLD_2_POINTS,
+    CONF_MALUS_THRESHOLD_1_POINTS,
+    CONF_MALUS_THRESHOLD_2_POINTS,
+    CONF_MALUS_THRESHOLD_3_POINTS,
+    CONF_MALUS_THRESHOLD_4_POINTS,
     CONF_MILESTONE_150_BONUS_COINS,
+    MALUS_THRESHOLD_KEYS,
+    resolve_progress_thresholds,
+    thresholds_ascending,
     CONF_MILESTONE_200_BONUS_COINS,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SCREEN_TIME_MALUS_START_DATE,
@@ -109,13 +119,22 @@ class FamilyTasksOptionsFlow(OptionsFlow):
         """Manage the options."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            # v0.36: the old threshold-2-must-exceed-threshold-1 validation
-            # is gone along with the configurable thresholds themselves - the
-            # Meilenstein-/Streak-Bonus checkpoints are now the fixed 150%/
-            # 200% weekly-progress bands (PROGRESS_THRESHOLD_PERCENTS in
-            # const.py), so there is no ordering left for a household to get
-            # wrong here.
             data = dict(user_input)
+            # v0.68: the malus/coin thresholds are absolute points now; an
+            # empty field means "derive from the weekly goal" (see
+            # resolve_progress_thresholds). They must be strictly ascending:
+            # malus 1 < 2 < 3 < 4 < weekly goal < coin 1 < coin 2.
+            for key in (*MALUS_THRESHOLD_KEYS, *COIN_THRESHOLD_KEYS):
+                if data.get(key) in (None, ""):
+                    data.pop(key, None)
+                else:
+                    data[key] = int(data[key])
+            goal_points = int(data.get(CONF_WEEKLY_PROGRESS_GOAL_POINTS) or 0)
+            if goal_points > 0:
+                malus, coin = resolve_progress_thresholds(data, goal_points)
+                if not thresholds_ascending(malus, goal_points, coin):
+                    errors["base"] = "thresholds_not_ascending"
+                    return self._show_form(user_input, errors)
             # v0.46: DateSelector (see CONF_SCREEN_TIME_MALUS_START_DATE
             # below) validates to a raw datetime.date object, but
             # config-entry options are persisted through HA's plain
@@ -133,7 +152,26 @@ class FamilyTasksOptionsFlow(OptionsFlow):
         # On a validation error, re-show the form pre-filled with what the
         # user just submitted (not the previously saved options) so a typo'd
         # field doesn't reset every other field back to its old value too.
+        return self._show_form(None, errors)
+
+    def _show_form(
+        self, user_input: dict[str, Any] | None, errors: dict[str, str]
+    ) -> ConfigFlowResult:
+        """Render the options form (pre-filled from user_input after an error)."""
         current = user_input if user_input is not None else self.config_entry.options
+        goal_now = int(current.get(CONF_WEEKLY_PROGRESS_GOAL_POINTS) or 0)
+        malus_now, coin_now = resolve_progress_thresholds(current, goal_now)
+
+        def _threshold(key: str, suggested: int) -> tuple[vol.Optional, NumberSelector]:
+            return (
+                vol.Optional(key, description={"suggested_value": suggested}),
+                NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=100000, mode=NumberSelectorMode.BOX, unit_of_measurement="Pkt."
+                    )
+                ),
+            )
+
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -334,4 +372,33 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                 ): BooleanSelector(),
             }
         )
+        # v0.68: absolute-point thresholds - malus 1-4 right behind the weekly
+        # goal, the two coin thresholds right before the coin bonuses
+        # (vol.Schema keeps insertion order, which is the form order).
+        malus_fields = [
+            _threshold(key, value)
+            for key, value in zip(
+                (
+                    CONF_MALUS_THRESHOLD_1_POINTS,
+                    CONF_MALUS_THRESHOLD_2_POINTS,
+                    CONF_MALUS_THRESHOLD_3_POINTS,
+                    CONF_MALUS_THRESHOLD_4_POINTS,
+                ),
+                malus_now,
+            )
+        ]
+        coin_fields = [
+            _threshold(key, value)
+            for key, value in zip(
+                (CONF_COIN_THRESHOLD_1_POINTS, CONF_COIN_THRESHOLD_2_POINTS), coin_now
+            )
+        ]
+        ordered: dict = {}
+        for marker, selector in schema.schema.items():
+            if marker.schema == CONF_MILESTONE_150_BONUS_COINS:
+                ordered.update(coin_fields)
+            ordered[marker] = selector
+            if marker.schema == CONF_WEEKLY_PROGRESS_GOAL_POINTS:
+                ordered.update(malus_fields)
+        schema = vol.Schema(ordered)
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

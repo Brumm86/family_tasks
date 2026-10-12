@@ -73,7 +73,7 @@ from .const import (
     MANUAL_POINTS_TASK_ID,
     MEMBER_ROLE_CHILD,
     MEMBER_ROLE_PARENT,
-    PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES,
+    MALUS_STAGE_ADJUSTMENT_MINUTES,
     RECURRENCE_BATTERY,
     RECURRENCE_CONFIRMATION,
     RECURRENCE_ONCE,
@@ -94,6 +94,7 @@ from .const import (
     VACATION_BEHAVIOR_PAUSE,
     VACATION_BEHAVIOR_SHOW,
 )
+from .const import resolve_progress_thresholds
 from .storage import (
     BatteryOverrideStorageCollection,
     ChecklistStateStore,
@@ -420,6 +421,9 @@ class FamilyTasksData:
     # a percentage of).
     milestone_150_threshold_points: int = 0
     milestone_200_threshold_points: int = 0
+    # v0.68: absolute-point malus thresholds 1-4 (the weekly goal itself is
+    # the fifth boundary), shown as numbers on the progress bar.
+    malus_threshold_points: tuple[int, int, int, int] = (0, 0, 0, 0)
     # v0.23: household-wide default rotation strategy for new tasks (see
     # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
     # same reason the milestone-bonus settings above do (no dedicated entity
@@ -1609,15 +1613,20 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         # (_async_process_milestone_coin_bonus) uses, computed once here too
         # so the card never has to redo it (and risk disagreeing on a .5
         # case).
-        milestone_150_threshold_points = (
-            round(weekly_progress_goal_points * 150 / 100)
-            if weekly_progress_goal_points > 0
-            else 0
+        # v0.68: no longer 150%/200% of the goal but the household's own
+        # absolute coin thresholds (CONF_COIN_THRESHOLD_1/2_POINTS), still
+        # defaulting to the old percentages when unset. The attribute names
+        # keep their historical "150"/"200" suffix (slot 1/slot 2).
+        _, coin_thresholds = resolve_progress_thresholds(
+            self.config_entry.options if self.config_entry else {},
+            weekly_progress_goal_points,
         )
-        milestone_200_threshold_points = (
-            round(weekly_progress_goal_points * 200 / 100)
-            if weekly_progress_goal_points > 0
-            else 0
+        milestone_150_threshold_points, milestone_200_threshold_points = (
+            coin_thresholds if weekly_progress_goal_points > 0 else (0, 0)
+        )
+        malus_thresholds, _ = resolve_progress_thresholds(
+            self.config_entry.options if self.config_entry else {},
+            weekly_progress_goal_points,
         )
 
         return FamilyTasksData(
@@ -1627,6 +1636,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             milestone_200_bonus_coins=milestone_200_bonus_coins,
             milestone_150_threshold_points=milestone_150_threshold_points,
             milestone_200_threshold_points=milestone_200_threshold_points,
+            malus_threshold_points=malus_thresholds if weekly_progress_goal_points > 0 else (0, 0, 0, 0),
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
             streak_bonus_2_weeks_coins=streak_bonus_2_weeks_coins,
@@ -2618,41 +2628,39 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
 
-    def _screen_time_tick_adjustment_minutes(self, last_week_points: int, goal_points: int) -> int:
+    def _screen_time_tick_adjustment_minutes(
+        self,
+        last_week_points: int,
+        goal_points: int,
+        malus_thresholds: tuple[int, int, int, int] | None = None,
+    ) -> int:
         """Per-tick minute adjustment for the household's Handyzeit blueprint.
 
-        v0.36: see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES/PROGRESS_THRESHOLD_PERCENTS
-        in const.py and MemberSummaryData.screen_time_tick_adjustment_minutes.
-        Banded on a progress percent (``last_week_points`` as a percentage of
-        goal_points) against the fixed bands in
-        PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES (v0.55: 0/25/50/75/100, one
-        minute harsher per band the lower the percent): -4 below 25%, -3 from
-        25% up to (not including) 50%, -2 from 50% up to (not including) 75%,
-        -1 from 75% up to (not including) 100%, 0 from the full goal onward -
-        PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES has no entry above 100 because
-        nothing beyond "leave the blueprint's own increment unchanged" ever
-        applies once the goal itself is met. Always 0 (no adjustment) when
-        goal_points itself is 0 - there is no goal to measure a percentage
-        against, so the tick-based grant just runs at the blueprint's own
-        configured pace, same as this feature being effectively off.
+        v0.36: see MALUS_STAGE_ADJUSTMENT_MINUTES in const.py and
+        MemberSummaryData.screen_time_tick_adjustment_minutes.
+        v0.68: banded on *absolute points* instead of a percentage. The four
+        malus thresholds (CONF_MALUS_THRESHOLD_1..4_POINTS, resolved via
+        resolve_progress_thresholds when ``malus_thresholds`` is not given)
+        plus the weekly goal split the points into six stages: below
+        threshold 1 -> -6, from threshold 1 -> -5, from threshold 2 -> -3,
+        from threshold 3 -> -2, from threshold 4 -> -1, from the weekly goal
+        onward -> 0. Always 0 (no adjustment) when goal_points is 0 - without
+        a weekly goal the malus is effectively off.
 
-        v0.45.1: purely the banding math now, given whatever week's point
-        total the caller decides to judge - it no longer assumes that's the
-        still-running current week. The malus is only ever meant to bite in
-        the week *after* a shortfall (see the caller in _async_update_data,
-        which passes *last* week's points, and only once a last week that
-        actually happened under family_tasks's watch exists at all) -
-        banding on the current week's still-incomplete progress made every
-        week look like a shortfall until the very last day, which is the bug
-        this docstring used to describe as intended behavior.
+        v0.45.1: purely the banding math, given whatever week's point total
+        the caller decides to judge (the callers pass the already-final
+        previous week, or the running week for the next-week projection).
         """
         if goal_points <= 0:
             return 0
-        percent = (last_week_points / goal_points) * 100
-        adjustment = 0
-        for band_percent in sorted(PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES):
-            if percent >= band_percent:
-                adjustment = PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES[band_percent]
+        if malus_thresholds is None:
+            options = self.config_entry.options if self.config_entry else {}
+            malus_thresholds, _ = resolve_progress_thresholds(options, goal_points)
+        adjustment = MALUS_STAGE_ADJUSTMENT_MINUTES[0]
+        boundaries = (*malus_thresholds, goal_points)
+        for stage, boundary in enumerate(boundaries, start=1):
+            if last_week_points >= boundary:
+                adjustment = MALUS_STAGE_ADJUSTMENT_MINUTES[stage]
         return adjustment
 
     async def _async_credit_task_coins(self, task: dict, member_id: str | None) -> None:
@@ -2729,9 +2737,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         )
 
         period_key = start_of_week.date().isoformat()
+        # v0.68: absolute coin thresholds (points), see resolve_progress_thresholds.
+        _, coin_thresholds = resolve_progress_thresholds(options, goal_points)
         tiers = (
-            (1, COIN_REASON_MILESTONE_150, 150, milestone_150_bonus_coins),
-            (2, COIN_REASON_MILESTONE_200, 200, milestone_200_bonus_coins),
+            (1, COIN_REASON_MILESTONE_150, coin_thresholds[0], milestone_150_bonus_coins),
+            (2, COIN_REASON_MILESTONE_200, coin_thresholds[1], milestone_200_bonus_coins),
         )
 
         for member_id, member in self.members.data.items():
@@ -2744,10 +2754,9 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             ):
                 continue
             points_week = self.completions.points_since(member_id, start_of_week)
-            for threshold_index, coin_reason, percent, bonus_coins in tiers:
+            for threshold_index, coin_reason, threshold_points, bonus_coins in tiers:
                 if bonus_coins <= 0:
                     continue
-                threshold_points = round(goal_points * percent / 100)
                 if points_week < threshold_points:
                     continue
                 if await self.milestone_bonus_state.async_has_awarded(
@@ -2758,16 +2767,16 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                     member_id=member_id,
                     amount=bonus_coins,
                     reason=coin_reason,
-                    note=f"Meilensteinbonus: {percent}% des Wochenziels erreicht",
+                    note=f"Meilensteinbonus: {threshold_points} Punkte in der Woche erreicht",
                 )
                 await self.milestone_bonus_state.async_mark_awarded(
                     period_key, threshold_index, member_id
                 )
                 _LOGGER.debug(
-                    "Credited %s Meilensteinbonus coin(s) to %s for the %s%% checkpoint in week %s",
+                    "Credited %s Meilensteinbonus coin(s) to %s for the %s-point checkpoint in week %s",
                     bonus_coins,
                     member_id,
-                    percent,
+                    threshold_points,
                     period_key,
                 )
 
@@ -2815,7 +2824,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         )
         if streak_bonus_2_weeks_coins <= 0 and streak_bonus_3_weeks_coins <= 0:
             return
-        target_points = round(goal_points * 200 / 100)
+        # v0.68: the second absolute coin threshold (formerly 200% of the goal).
+        target_points = resolve_progress_thresholds(options, goal_points)[1][1]
 
         for member_id, member in self.members.data.items():
             if (

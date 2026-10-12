@@ -599,10 +599,11 @@
   // bandMarkers/_renderBandInfo/malusBoundaryPercent below all do a real
   // lookup against this table instead of assuming a fixed step size. Keep
   // this in sync by hand whenever the backend constant changes.
-  const SCREEN_TIME_MALUS_BANDS = { 0: -6, 10: -5, 25: -3, 50: -2, 75: -1, 100: 0 };
-  const SCREEN_TIME_MALUS_BAND_PERCENTS = Object.keys(SCREEN_TIME_MALUS_BANDS)
-    .map(Number)
-    .sort((a, b) => a - b);
+  // v0.68: the thresholds are absolute points now (malus_threshold_points
+  // sensor attribute + the weekly goal as the fifth boundary), so only the
+  // per-stage minutes remain here: stage 0 = below threshold 1, stage k =
+  // from boundary k (1-4 = malus thresholds, 5 = weekly goal) onward.
+  const SCREEN_TIME_MALUS_STAGE_MINUTES = [-6, -5, -3, -2, -1, 0];
 
   // v0.29: curated fallback icon list for every "Icon (optional)" field
   // (Aufgabe/Favorit/Mitglied/Belohnung, see _hydrateIconPickers below) -
@@ -1222,7 +1223,8 @@
       // (nicht pro Mitglied), daher genügt der angeklickte Prozentsatz als
       // einziger Zustand, kein *MemberId nötig.
       this._bandInfoDialogOpen = false;
-      this._bandInfoPercent = null;
+      this._bandInfoStage = null;
+      this._bandInfoPoints = null;
       // v0.56: welche Aufgabenpool-Aufgabe gerade ihre "Annehmen"-
       // Bestätigungszeile zeigt - gleiches Muster wie _pendingRedeemId bei
       // Belohnungen (aufklappbare .confirm-row statt sofortiger Aktion).
@@ -1638,7 +1640,7 @@
     // points-based version entirely - the two checkpoints are now fixed at
     // 150%/200% of the weekly goal.
     _milestoneBonus() {
-      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0 };
+      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0, malusThresholds: [] };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
@@ -1657,6 +1659,8 @@
         // different point value than the backend actually awards at.
         threshold150Points: Number(sensor.attributes.milestone_150_threshold_points ?? 0),
         threshold200Points: Number(sensor.attributes.milestone_200_threshold_points ?? 0),
+        // v0.68: absolute malus thresholds 1-4 (points).
+        malusThresholds: (sensor.attributes.malus_threshold_points ?? []).map(Number),
       };
     }
 
@@ -2481,15 +2485,17 @@
     // _renderProgressSection. Purely local (the band values are fixed,
     // household-wide constants mirrored from PROGRESS_BAND_TICK_ADJUSTMENT_
     // MINUTES in const.py), same reasoning as _openTopScorerInfo above.
-    _openBandInfo(percent) {
-      this._bandInfoPercent = Number(percent);
+    _openBandInfo(stage, points) {
+      this._bandInfoStage = Number(stage);
+      this._bandInfoPoints = Number(points);
       this._bandInfoDialogOpen = true;
       this._render();
     }
 
     _closeBandInfo() {
       this._bandInfoDialogOpen = false;
-      this._bandInfoPercent = null;
+      this._bandInfoStage = null;
+      this._bandInfoPoints = null;
       this._render();
     }
 
@@ -2799,7 +2805,7 @@
           ${this._bandInfoDialogOpen ? `
           <dialog class="dialog" data-dialog="band-info">
             <div class="section-header">
-              <h3>${esc(this._bandInfoPercent)}% des Wochenziels</h3>
+              <h3>${esc(this._bandInfoPoints)} Punkte pro Woche</h3>
               <button type="button" class="link" data-action="close-band-info">Schließen</button>
             </div>
             ${this._renderBandInfo()}
@@ -3990,7 +3996,16 @@
       // konfigurierter Meilenstein-2-Schwelle - die Schwellen sind selbst
       // jetzt fest, also gibt es nichts mehr, worüber sich barMaxPercent
       // noch strecken müsste.
-      const barMaxPercent = 200;
+      // v0.68: the bar now spans 0 .. the highest threshold in absolute
+      // points (second coin threshold, or the weekly goal if that is
+      // higher) instead of a fixed 0-200% of the goal.
+      const barMaxPoints = Math.max(
+        milestone ? milestone.threshold200Points : 0,
+        milestone ? milestone.threshold150Points : 0,
+        goal,
+        1
+      );
+      const barPos = (points) => Math.min(100, Math.max(0, (points / barMaxPoints) * 100));
 
       // v0.52: "Wochensieger-Bonus" - live "wer führt gerade" Krone, siehe
       // _topScorerBonusCoins/CONF_TOP_SCORER_BONUS_COINS in const.py. Rein
@@ -4046,7 +4061,7 @@
               const sensor = this._pointsSensorForMember(id);
               const weekPoints = Number(sensor?.attributes?.points_week ?? 0);
               const pct = goal > 0
-                ? Math.min(100, Math.round((weekPoints / (goal * barMaxPercent / 100)) * 100))
+                ? Math.min(100, Math.round((weekPoints / barMaxPoints) * 100))
                 : 100;
               const goalReached = goal > 0 && weekPoints >= goal;
               // v0.36: leichte Marken bei den Handyzeit-Tick-Bändern
@@ -4060,15 +4075,22 @@
               // Handyzeit-/Wochensieger-Info-Dialoge. v0.63: um die neue
               // 10%-Marke ergänzt (0% selbst bekommt weiterhin keine eigene
               // Marke - deckungsgleich mit dem Balkenanfang).
-              const bandMarkers = goal > 0
-                ? [10, 25, 50, 75, 100].map((percent) => ({
-                    left: (percent / barMaxPercent) * 100,
-                    percent,
-                    title: `${percent}% des Wochenziels - antippen für Details zum Handyzeit-Tick-Malus`,
-                  }))
+              // v0.68: absolute points - malus thresholds 1-4 plus the
+              // weekly goal as the fifth boundary (stage k starts at
+              // boundary k, see SCREEN_TIME_MALUS_STAGE_MINUTES).
+              const malusBoundaries = goal > 0
+                ? [...((milestone && milestone.malusThresholds) || []), goal]
                 : [];
+              const bandMarkers = malusBoundaries
+                .map((points, index) => ({
+                  left: barPos(points),
+                  points,
+                  stage: index + 1,
+                  title: `${points} Pkt. pro Woche - antippen für Details zum Handyzeit-Tick-Malus`,
+                }))
+                .filter((m) => m.points > 0);
               const bandMarkersHtml = bandMarkers
-                .map((m) => `<div class="bar-band-marker" style="left:${Math.min(100, m.left)}%" data-action="open-band-info" data-percent="${m.percent}" role="button" tabindex="0" title="${esc(m.title)}"></div>`)
+                .map((m) => `<div class="bar-band-marker" style="left:${Math.min(100, m.left)}%" data-action="open-band-info" data-stage="${m.stage}" data-points="${m.points}" role="button" tabindex="0" title="${esc(m.title)}"></div>`)
                 .join("");
               // v0.36: Marken für die beiden festen Meilenstein-Schwellen
               // (150%/200%), als Prozent-Position *innerhalb* des Balkens
@@ -4087,10 +4109,10 @@
               const milestone200Reached = milestone200Points !== null && weekPoints >= milestone200Points;
               const milestoneMarkers = [
                 milestone150Points !== null
-                  ? { left: (150 / barMaxPercent) * 100, points: milestone150Points, bonus: milestone.bonus150, percent: 150, reached: milestone150Reached }
+                  ? { left: barPos(milestone150Points), points: milestone150Points, bonus: milestone.bonus150, slot: 1, reached: milestone150Reached }
                   : null,
                 milestone200Points !== null
-                  ? { left: (200 / barMaxPercent) * 100, points: milestone200Points, bonus: milestone.bonus200, percent: 200, reached: milestone200Reached }
+                  ? { left: barPos(milestone200Points), points: milestone200Points, bonus: milestone.bonus200, slot: 2, reached: milestone200Reached }
                   : null,
               ].filter(Boolean);
               // v0.32: die Marke selbst zeigt den absoluten Punktwert ("ab X
@@ -4098,7 +4120,7 @@
               // nur noch ergänzend in Klammern im Tooltip. v0.36: der Bonus
               // ist jetzt in Münzen, nicht mehr Punkten.
               const milestoneMarkersHtml = milestoneMarkers
-                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels)${m.bonus > 0 ? ` · +${coinsLabel(m.bonus)}` : ""}`)}"></div>`)
+                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt.${m.bonus > 0 ? ` · +${coinsLabel(m.bonus)}` : ""}`)}"></div>`)
                 .join("");
               // v0.49: die Münzenbelohnung selbst ("+X Münzen") wird jetzt
               // ausschließlich grafisch direkt am Balken dargestellt - ein
@@ -4118,11 +4140,38 @@
               const milestoneBadgesHtml = milestoneMarkers
                 .filter((m) => m.bonus > 0)
                 .map((m) => {
-                  const edgeAligned = m.percent === 200;
+                  const edgeAligned = m.left >= 99;
                   const style = edgeAligned
                     ? `right:0`
                     : `left:${Math.min(100, m.left)}%;transform:translateX(-50%)`;
-                  return `<div class="bar-milestone-badge${m.reached ? " reached" : ""}" style="${style}" title="${esc(`ab ${m.points} Pkt. (${m.percent}% des Wochenziels) → +${coinsLabel(m.bonus)}`)}"><span class="coin">🪙</span>${esc(m.bonus)}</div>`;
+                  return `<div class="bar-milestone-badge${m.reached ? " reached" : ""}" style="${style}" title="${esc(`ab ${m.points} Pkt. → +${coinsLabel(m.bonus)}`)}"><span class="coin">🪙</span>${esc(m.bonus)}</div>`;
+                })
+                .join("");
+              // v0.68: die Schwellen als sichtbare Zahlen direkt unter dem
+              // Balken (Malus-Schwellen, Wochenziel, beide Münz-Schwellen).
+              // Liegen zwei Zahlen zu dicht beieinander (< 9% der
+              // Balkenbreite), rutscht die spätere in eine zweite Zeile.
+              const scaleEntries = [
+                ...malusBoundaries.map((points, index) => ({
+                  points,
+                  kind: index === malusBoundaries.length - 1 ? "goal" : "malus",
+                })),
+                ...milestoneMarkers.map((m) => ({ points: m.points, kind: "coin" })),
+              ]
+                .filter((e) => e.points > 0)
+                .sort((x, y) => x.points - y.points);
+              let lastLeft = -100;
+              let lastRow = 1;
+              const scaleLabelsHtml = scaleEntries
+                .map((e) => {
+                  const left = barPos(e.points);
+                  const row = left - lastLeft < 9 && lastRow === 1 ? 2 : 1;
+                  lastLeft = left;
+                  lastRow = row;
+                  const style = left >= 99
+                    ? `right:0`
+                    : `left:${left}%;transform:translateX(-50%)`;
+                  return `<span class="bar-scale-label ${e.kind}${row === 2 ? " row2" : ""}" style="${style}">${esc(e.points)}</span>`;
                 })
                 .join("");
               const barFillClass = milestone200Reached
@@ -4150,7 +4199,7 @@
               const streakWeeksNow = this._streakWeeksFor(id);
               const streakBonusNow = streakWeeksNow >= 3 ? streak.bonus3Weeks : streak.bonus2Weeks;
               const streakBadgesHtml = streakBonusNow > 0 && streakWeeksNow > 0
-                ? `<div class="bar-streak-badge" style="right:0" title="${esc(`${streakWeeksNow}. Woche in Folge über 200% des Wochenziels → +${coinsLabel(streakBonusNow)}/Woche`)}"><span class="flame">🔥</span>${esc(streakWeeksNow)}</div>`
+                ? `<div class="bar-streak-badge" style="right:0" title="${esc(`${streakWeeksNow}. Woche in Folge ab ${milestone200Points} Pkt. → +${coinsLabel(streakBonusNow)}/Woche`)}"><span class="flame">🔥</span>${esc(streakWeeksNow)}</div>`
                 : "";
               // v0.37: no longer shows the Münzen balance here - coins now
               // persist independently of the calendar week (see
@@ -4231,6 +4280,7 @@
                         ${bandMarkersHtml}
                         ${milestoneMarkersHtml}
                       </div>
+                      ${scaleLabelsHtml}
                       ${milestoneBadgesHtml}
                       ${streakBadgesHtml}
                     </div>
@@ -4325,22 +4375,16 @@
     // PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py gehalten werden,
     // dieselbe Konvention wie schon bei den bisherigen 50%/100%-Tooltips.
     _renderBandInfo() {
-      const percent = this._bandInfoPercent;
-      // v0.63: derived from SCREEN_TIME_MALUS_BANDS instead of a hand-
-      // written table, now that the bands are no longer evenly spaced -
-      // each marker's "from" is the previous band's adjustment, "to" is
-      // this band's own.
-      const idx = SCREEN_TIME_MALUS_BAND_PERCENTS.indexOf(Number(percent));
-      const band = idx > 0
-        ? {
-            from: SCREEN_TIME_MALUS_BANDS[SCREEN_TIME_MALUS_BAND_PERCENTS[idx - 1]],
-            to: SCREEN_TIME_MALUS_BANDS[SCREEN_TIME_MALUS_BAND_PERCENTS[idx]],
-          }
-        : null;
-      if (!band) return "";
-      const text = band.to === 0
-        ? `Ab ${esc(percent)}% des Wochenziels - also sobald es erreicht ist - entfällt der Handyzeit-Tick-Malus vollständig: die Handyzeit-Automation läuft ab hier mit ihrer vollen, unveränderten Länge pro Tick.`
-        : `Ab ${esc(percent)}% des Wochenziels sinkt der Handyzeit-Tick-Malus von ${esc(band.from)} auf ${esc(band.to)} Min. pro Tick.`;
+      const stage = this._bandInfoStage;
+      const points = this._bandInfoPoints;
+      // v0.68: stage k (1-5) starts at its boundary in absolute points - the
+      // previous stage's minutes are the "from", this stage's the "to".
+      if (!(stage >= 1 && stage < SCREEN_TIME_MALUS_STAGE_MINUTES.length)) return "";
+      const from = SCREEN_TIME_MALUS_STAGE_MINUTES[stage - 1];
+      const to = SCREEN_TIME_MALUS_STAGE_MINUTES[stage];
+      const text = to === 0
+        ? `Ab ${esc(points)} Punkten pro Woche - also sobald das Wochenziel erreicht ist - entfällt der Handyzeit-Tick-Malus vollständig: die Handyzeit-Automation läuft ab hier mit ihrer vollen, unveränderten Länge pro Tick.`
+        : `Ab ${esc(points)} Punkten pro Woche sinkt der Handyzeit-Tick-Malus von ${esc(from)} auf ${esc(to)} Min. pro Tick.`;
       return `
         <p>${text}</p>
         <p class="muted">Beurteilt wird dabei immer die bereits vollständig abgelaufene Vorwoche, nicht der laufende Fortschritt dieser Woche - der Wert steht deshalb für die gesamte laufende Woche fest und ändert sich erst wieder mit dem nächsten Wochenwechsel.</p>
@@ -4382,24 +4426,24 @@
       // adjustment matches, then return the percent of the band right
       // after it (the boundary not yet reached) - null if adjustment is
       // already the least severe band (nothing above it to name).
-      const malusBoundaryPercent = (adj) => {
-        const idx = SCREEN_TIME_MALUS_BAND_PERCENTS.findIndex(
-          (percent) => SCREEN_TIME_MALUS_BANDS[percent] === adj
-        );
-        return idx >= 0 && idx + 1 < SCREEN_TIME_MALUS_BAND_PERCENTS.length
-          ? SCREEN_TIME_MALUS_BAND_PERCENTS[idx + 1]
-          : null;
+      // v0.68: the boundary not yet reached, in absolute points - the
+      // stage index of the given adjustment is also the index of the next
+      // boundary (malus thresholds 1-4, then the weekly goal).
+      const malusBoundaries = [...(this._milestoneBonus().malusThresholds || []), this._weeklyProgressGoal()];
+      const malusBoundaryPoints = (adj) => {
+        const idx = SCREEN_TIME_MALUS_STAGE_MINUTES.indexOf(adj);
+        return idx >= 0 && idx < malusBoundaries.length ? malusBoundaries[idx] : null;
       };
       const malusLine =
         adjustment < 0
-          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil in der Vorwoche weniger als ${esc(malusBoundaryPercent(adjustment))}% des Wochenziels erreicht wurden.</p>`
+          ? `<p>Aktueller Malus: <strong>${esc(adjustment)} Min. pro Tick</strong>, weil in der Vorwoche weniger als ${esc(malusBoundaryPoints(adjustment))} Punkte erreicht wurden.</p>`
           : `<p>Aktuell kein Malus - das Wochenziel war in der Vorwoche vollständig erreicht (oder es liegt noch keine beurteilbare Vorwoche vor).</p>`;
       // v0.60: same boundary-recovery trick as malusLine above, just for
       // the projected adjustment (banded on this week's still-running
       // progress instead of last week's final one).
       const nextWeekMalusLine =
         adjustmentNextWeek < 0
-          ? `<p>Voraussichtlicher Malus ab kommender Woche: <strong>${esc(adjustmentNextWeek)} Min. pro Tick</strong>, weil bisher weniger als ${esc(malusBoundaryPercent(adjustmentNextWeek))}% des Wochenziels erreicht wurden.</p>`
+          ? `<p>Voraussichtlicher Malus ab kommender Woche: <strong>${esc(adjustmentNextWeek)} Min. pro Tick</strong>, weil bisher weniger als ${esc(malusBoundaryPoints(adjustmentNextWeek))} Punkte erreicht wurden.</p>`
           : `<p>Voraussichtlich kein Malus ab kommender Woche - das Wochenziel ist schon jetzt vollständig erreicht (oder es liegt noch keine beurteilbare Woche vor).</p>`;
       return `
         <p>${esc(ticksPerDay)} Ticks/Tag × ${esc(tickMinutes)} Min. (in der Handyzeit-Automation hinterlegter Wert)${
@@ -4479,7 +4523,7 @@
       }
       const streak = this._streakBonus();
       if (info.currentWeeks <= 0) {
-        return `<p class="muted">Aktuell läuft keine Serie - 2 Wochen in Folge mit mindestens 200% des Wochenziels starten eine neue.</p>`;
+        return `<p class="muted">Aktuell läuft keine Serie - 2 Wochen in Folge mit mindestens ${esc(this._milestoneBonus().threshold200Points)} Punkten pro Woche starten eine neue.</p>`;
       }
       const reached3Weeks = info.currentWeeks >= 3;
       const reached2Weeks = info.currentWeeks >= 2;
@@ -4489,7 +4533,7 @@
           ? `Die Serie hat gerade die 2 Wochen erreicht - ab der nächsten Woche in Folge gibt es den höheren 3-Wochen-Bonus.`
           : `Noch ${esc(2 - info.currentWeeks)} Woche(n) bis zum ersten Bonus.`;
       return `
-        <p>${esc(info.currentWeeks)}. Woche in Folge über der 200%-Marke des Wochenziels.</p>
+        <p>${esc(info.currentWeeks)}. Woche in Folge mit mindestens ${esc(this._milestoneBonus().threshold200Points)} Punkten pro Woche (zweite Münz-Schwelle).</p>
         <p>Ab 2 Wochen in Folge gibt es <strong>${esc(coinsLabel(streak.bonus2Weeks))}</strong> je Woche, ab 3 Wochen in Folge dauerhaft <strong>${esc(coinsLabel(streak.bonus3Weeks))}</strong> je Woche - die Serie kann beliebig lange weiterlaufen.</p>
         <p class="muted">${statusLine}${info.bonus > 0 ? ` Aktuell laufender Wochenbonus: ${esc(coinsLabel(info.bonus))}.` : ""}</p>
       `;
@@ -5263,7 +5307,13 @@
         /* v0.52: padding-bottom added to fit .bar-streak-badge below the
            bar, symmetric to the top padding .bar-milestone-badge already
            uses above it. */
-        .bar-wrap { position: relative; padding-top: 15px; padding-bottom: 15px; }
+        .bar-wrap { position: relative; padding-top: 15px; padding-bottom: 32px; }
+        /* v0.68: Schwellen als Zahlen direkt unter dem Balken (zwei Zeilen,
+           falls sich Zahlen sonst überlappen würden). */
+        .bar-scale-label { position: absolute; top: 24px; font-size: 0.65em; line-height: 1.2;
+                            color: var(--secondary-text-color); white-space: nowrap; pointer-events: none; }
+        .bar-scale-label.row2 { top: 35px; }
+        .bar-scale-label.goal, .bar-scale-label.coin { font-weight: 700; color: var(--primary-text-color); }
         /* v0.50: a thin border so the (otherwise empty) track stays visible
            even at 0 points, i.e. before .bar-fill has any width at all -
            "Sorge dafür, dass der Fortschrittsbalken selbst auch sichtbar
@@ -5652,7 +5702,7 @@
         } else if (action === "close-note-info") {
           this._closeNoteDialog();
         } else if (action === "open-band-info") {
-          this._openBandInfo(el.dataset.percent);
+          this._openBandInfo(el.dataset.stage, el.dataset.points);
         } else if (action === "close-band-info") {
           this._closeBandInfo();
         } else if (action === "add-subtask") {

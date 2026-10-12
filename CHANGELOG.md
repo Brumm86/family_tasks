@@ -2,6 +2,14 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.68.0] - 2026-10-12
+
+### Changed
+- **Handyzeit-Malus- und Münz-Schwellen jetzt als absolute Punktwerte**: die bisher als Prozent des Wochenziels festen Schwellen (Malus 10/25/50/75 %, Münzen 150/200 %) sind in den Integrations-Optionen einzeln als Punkte einstellbar: `malus_threshold_1..4_points` und `coin_threshold_1_points`/`coin_threshold_2_points`. Das Wochenziel bleibt als eigene Einstellung bestehen und ist zugleich die Schwelle, ab der kein Malus mehr gilt (Wochensieger-Bonus, Streak und Balken beziehen sich weiterhin darauf). Die Schwellen müssen streng aufsteigend sein (Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2), sonst lehnt der Options-Flow das Speichern mit einer Fehlermeldung ab.
+- **Migration ohne Verhaltensänderung**: ein nicht gesetztes Feld wird aus dem Wochenziel mal dem bisherigen Prozentsatz abgeleitet (`resolve_progress_thresholds` in `const.py`), das Formular zeigt diese Werte vorbelegt an. Einmal gespeicherte Werte bleiben absolut, auch wenn das Wochenziel später geändert wird.
+- **Fortschrittsbalken**: reicht jetzt von 0 bis zur höchsten Schwelle (zweite Münz-Schwelle bzw. Wochenziel) statt fest bis 200 %. Alle Schwellen (Malus-Stufen, Wochenziel, beide Münz-Schwellen) stehen als Zahl direkt unter dem Balken; liegen zwei Zahlen zu dicht beieinander, rutscht die spätere in eine zweite Zeile. Die Info-Dialoge zu Malus und Streak nennen Punktwerte statt Prozent.
+- Technisch: `_screen_time_tick_adjustment_minutes` vergleicht Punkte gegen Punkte (`MALUS_STAGE_ADJUSTMENT_MINUTES`), Meilenstein- und Streak-Bonus nutzen die absoluten Münz-Schwellen, der Punkte-Sensor liefert zusätzlich das Attribut `malus_threshold_points`.
+
 ## [0.67.1] - 2026-10-03
 
 ### Fixed

@@ -27,6 +27,12 @@
           "screen_time_ticks_per_day": "Automatic ticks per day (matches the Handyzeit blueprint)",
           "screen_time_malus_start_date": "Handyzeit-Tick-Malus considered active from (date)",
           "weekly_progress_goal_points": "Weekly point goal (progress bar)",
+          "malus_threshold_1_points": "Handyzeit malus stage 1: below this = -6 min per tick (from this many points last week: -5 min)",
+          "malus_threshold_2_points": "Handyzeit malus stage 2: from this many points last week: -3 min per tick",
+          "malus_threshold_3_points": "Handyzeit malus stage 3: from this many points last week: -2 min per tick",
+          "malus_threshold_4_points": "Handyzeit malus stage 4: from this many points last week: -1 min per tick (no malus from the weekly goal onward)",
+          "coin_threshold_1_points": "Coin threshold 1 (points per week, milestone bonus coins)",
+          "coin_threshold_2_points": "Coin threshold 2 (points per week, milestone bonus coins and streak bonus)",
           "milestone_bonus_enabled": "Award a Meilensteinbonus (milestone bonus)",
           "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",
           "milestone_1_bonus_points": "Bonus points at threshold 1",
@@ -41,7 +47,8 @@
       }
     },
     "error": {
-      "milestone_threshold_order": "Threshold 2 must be greater than threshold 1."
+      "milestone_threshold_order": "Threshold 2 must be greater than threshold 1.",
+      "thresholds_not_ascending": "Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin threshold 1 < 2."
     }
   },
   "selector": {
