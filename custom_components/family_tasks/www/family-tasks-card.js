@@ -1850,7 +1850,13 @@
     // of the reward system has no spendable balance for this bar to lead
     // toward.
     _progressMembers() {
-      const ids = Object.keys(this._members).filter((id) => this._members[id].role === "child");
+      // v0.69: parents (and any other non-"child" role) now get a bar too,
+      // provided they take part in the reward system - the role filter that
+      // used to restrict this to children is gone, participates_in_rewards/
+      // paused/active below are the only criteria. This matches the backend,
+      // which already awards Meilenstein-/Streak-/Wochensieger-Bonus to every
+      // participating member regardless of role.
+      const ids = Object.keys(this._members);
       return ids
         .map((id) => ({ id, member: this._members[id] }))
         .filter((entry) => entry.member && entry.member.active !== false)
@@ -4120,7 +4126,7 @@
               // nur noch ergänzend in Klammern im Tooltip. v0.36: der Bonus
               // ist jetzt in Münzen, nicht mehr Punkten.
               const milestoneMarkersHtml = milestoneMarkers
-                .map((m) => `<div class="bar-milestone${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt.${m.bonus > 0 ? ` · +${coinsLabel(m.bonus)}` : ""}`)}"></div>`)
+                .map((m) => `<div class="bar-milestone slot${m.slot}${m.reached ? " reached" : ""}" style="left:${Math.min(100, m.left)}%" title="${esc(`ab ${m.points} Pkt.${m.bonus > 0 ? ` · +${coinsLabel(m.bonus)}` : ""}`)}"></div>`)
                 .join("");
               // v0.49: die Münzenbelohnung selbst ("+X Münzen") wird jetzt
               // ausschließlich grafisch direkt am Balken dargestellt - ein
@@ -4144,7 +4150,7 @@
                   const style = edgeAligned
                     ? `right:0`
                     : `left:${Math.min(100, m.left)}%;transform:translateX(-50%)`;
-                  return `<div class="bar-milestone-badge${m.reached ? " reached" : ""}" style="${style}" title="${esc(`ab ${m.points} Pkt. → +${coinsLabel(m.bonus)}`)}"><span class="coin">🪙</span>${esc(m.bonus)}</div>`;
+                  return `<div class="bar-milestone-badge slot${m.slot}${m.reached ? " reached" : ""}" style="${style}" title="${esc(`ab ${m.points} Pkt. → +${coinsLabel(m.bonus)}`)}"><span class="coin">🪙</span>${esc(m.bonus)}</div>`;
                 })
                 .join("");
               // v0.68: die Schwellen als sichtbare Zahlen direkt unter dem
@@ -4156,7 +4162,7 @@
                   points,
                   kind: index === malusBoundaries.length - 1 ? "goal" : "malus",
                 })),
-                ...milestoneMarkers.map((m) => ({ points: m.points, kind: "coin" })),
+                ...milestoneMarkers.map((m) => ({ points: m.points, kind: `coin coin${m.slot}` })),
               ]
                 .filter((e) => e.points > 0)
                 .sort((x, y) => x.points - y.points);
@@ -4226,7 +4232,10 @@
               // Woche erledigt" one. null (household hasn't configured
               // CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY
               // yet) hides it entirely rather than showing a guessed number.
-              const screenTimeInfo = this._screenTimeInfoFor(id);
+              // v0.69: Handyzeit is a child-only concept, so a parent's bar never
+              // carries the badge even though the backend computes the
+              // attributes for every member.
+              const screenTimeInfo = member.role === "child" ? this._screenTimeInfoFor(id) : null;
               // v0.60: "(voraussichtlich X Min. kommende Woche)" - a live
               // projection of next week's daily estimate, based on this
               // week's progress so far (screenTimeInfo.dailyMinutesNextWeek,
@@ -5314,6 +5323,11 @@
                             color: var(--secondary-text-color); white-space: nowrap; pointer-events: none; }
         .bar-scale-label.row2 { top: 35px; }
         .bar-scale-label.goal, .bar-scale-label.coin { font-weight: 700; color: var(--primary-text-color); }
+        /* v0.69: Münz-Schwellen farbig - Schwelle 1 silber, Schwelle 2 gold
+           (Marke, Badge, Zahl unter dem Balken und Balkenfüllung nach
+           Erreichen). */
+        .bar-scale-label.coin1 { color: #78909c; }
+        .bar-scale-label.coin2 { color: #b8860b; }
         /* v0.50: a thin border so the (otherwise empty) track stays visible
            even at 0 points, i.e. before .bar-fill has any width at all -
            "Sorge dafür, dass der Fortschrittsbalken selbst auch sichtbar
@@ -5342,8 +5356,8 @@
         /* v0.30: Meilensteinbonus-Stufen - zwei zunehmend "wertvollere"
            Farben, damit auf einen Blick erkennbar ist, welche Schwelle ein
            Kind diese Woche schon geschafft hat. */
-        .bar-fill.milestone-1-reached { background: #ffb300; }
-        .bar-fill.milestone-2-reached { background: #ff6f00; }
+        .bar-fill.milestone-1-reached { background: #b0bec5; }
+        .bar-fill.milestone-2-reached { background: #ffc107; }
         /* v0.30: senkrechte Marke an der Position einer Meilensteinbonus-
            Schwelle innerhalb des Balkens (siehe barMaxPercent/markers in
            _renderProgressSection) - "reached" nur zur Unterscheidung, falls
@@ -5393,7 +5407,17 @@
                                 border: 1px solid var(--divider-color, #e0e0e0); border-radius: 8px;
                                 padding: 0 4px; white-space: nowrap; cursor: default; }
         .bar-milestone-badge .coin { font-size: 1.1em; }
-        .bar-milestone-badge.reached { color: var(--primary-text-color); border-color: #ff6f00; }
+        .bar-milestone-badge.reached { color: var(--primary-text-color); }
+        /* v0.69: Silber (Schwelle 1) / Gold (Schwelle 2). Die Marke bekommt
+           einen dunklen Rand, damit sie auch auf der gleichfarbigen
+           Balkenfüllung nach Erreichen sichtbar bleibt. */
+        .bar-milestone.slot1 { background: #b0bec5; mix-blend-mode: normal; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); }
+        .bar-milestone.slot2 { background: #ffc107; mix-blend-mode: normal; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); }
+        .bar-milestone-badge.slot1 { border-color: #b0bec5; }
+        .bar-milestone-badge.slot2 { border-color: #ffc107; }
+        .bar-milestone-badge.slot1 .coin { filter: grayscale(1) brightness(1.15); }
+        .bar-milestone-badge.slot1.reached { background: #eceff1; color: #37474f; }
+        .bar-milestone-badge.slot2.reached { background: #fff3c4; color: #5d4300; }
         /* v0.52: Streak-Bonus-Badge - dieselbe Optik wie .bar-milestone-badge
            oben, nur unterhalb des Balkens ("bottom: 0" statt "top: 0", siehe
            .bar-wrap's padding-bottom) statt oberhalb, damit sich beide Badge-

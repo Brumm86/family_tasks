@@ -31,23 +31,18 @@
           "malus_threshold_2_points": "Handyzeit malus stage 2: from this many points last week: -3 min per tick",
           "malus_threshold_3_points": "Handyzeit malus stage 3: from this many points last week: -2 min per tick",
           "malus_threshold_4_points": "Handyzeit malus stage 4: from this many points last week: -1 min per tick (no malus from the weekly goal onward)",
-          "coin_threshold_1_points": "Coin threshold 1 (points per week, milestone bonus coins)",
-          "coin_threshold_2_points": "Coin threshold 2 (points per week, milestone bonus coins and streak bonus)",
-          "milestone_bonus_enabled": "Award a Meilensteinbonus (milestone bonus)",
-          "milestone_1_threshold_percent": "Threshold 1 (% of weekly goal)",
-          "milestone_1_bonus_points": "Bonus points at threshold 1",
-          "milestone_2_threshold_percent": "Threshold 2 (% of weekly goal)",
-          "milestone_2_bonus_points": "Bonus points at threshold 2",
-          "streak_bonus_enabled": "Award a Streak-Bonus",
-          "streak_bonus_threshold_points": "Extra points above weekly goal required per week",
-          "streak_bonus_required_weeks": "Consecutive weeks required",
-          "streak_bonus_points": "Bonus points per streak week",
+          "coin_threshold_1_points": "Coin threshold 1 – silver (points per week, milestone bonus coins)",
+          "coin_threshold_2_points": "Coin threshold 2 – gold (points per week, milestone bonus coins and streak bonus)",
+          "milestone_150_bonus_coins": "Meilensteinbonus coins when reaching coin threshold 1 (silver)",
+          "milestone_200_bonus_coins": "Meilensteinbonus coins when reaching coin threshold 2 (gold)",
+          "streak_bonus_2_weeks_coins": "Streak-Bonus coins for staying above coin threshold 2 for 2 weeks in a row",
+          "streak_bonus_3_weeks_coins": "Streak-Bonus coins for staying above coin threshold 2 for 3 weeks in a row (paid every further qualifying week too)",
+          "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week, but only if they also reached the weekly point goal (0 disables it; no bonus on a tie, and none if the weekly goal is unmet)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
       }
     },
     "error": {
-      "milestone_threshold_order": "Threshold 2 must be greater than threshold 1.",
       "thresholds_not_ascending": "Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin threshold 1 < 2."
     }
   },

@@ -2,6 +2,13 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.69.0] - 2026-10-12
+
+### Changed
+- **Wochenfortschritt zeigt auch Eltern**: Mitglieder mit der Rolle „Elternteil" erscheinen jetzt ebenfalls mit eigenem Balken im Wochenfortschritt, sofern sie am Belohnungssystem teilnehmen (`participates_in_rewards`), aktiv und nicht pausiert sind. Bisher war der Bereich auf Kinder beschränkt, obwohl das Backend Meilenstein-, Streak- und Wochensieger-Bonus bereits an alle teilnehmenden Mitglieder vergab. Der Handyzeit-Hinweis („📱 X Min. Handyzeit heute") bleibt Kindern vorbehalten und erscheint bei Eltern nicht. Wer als Elternteil nicht im Wochenfortschritt auftauchen soll, deaktiviert in der Mitglieder-Bearbeitung „Nimmt am Belohnungssystem teil".
+- **Optionen-Texte zu den Münz-Schwellen**: die Beschriftungen der Meilensteinbonus- und Streak-Bonus-Felder nannten noch „150 %"/„200 % der Zielpunktzahl" bzw. die „200 %-Marke". Sie verweisen jetzt auf Münz-Schwelle 1 (silber) bzw. 2 (gold). Die veralteten, prozentbasierten Einträge in `translations/en.json` wurden an `strings.json` angeglichen. Die Feld-Schlüssel (`milestone_150_bonus_coins` usw.) bleiben unverändert, bestehende Einstellungen gehen nicht verloren.
+- **Münz-Schwellen im Fortschrittsbalken farbig**: Schwelle 1 in Silber, Schwelle 2 in Gold - Marke im Balken, Münz-Badge, Zahl unter dem Balken und Balkenfüllung nach Erreichen (vorher Amber/Orange).
+
 ## [0.68.0] - 2026-10-12
 
 ### Changed
