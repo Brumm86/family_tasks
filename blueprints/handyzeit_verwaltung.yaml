@@ -2,7 +2,9 @@ blueprint:
   name: Handyzeit-Verwaltung (Family Link + family_tasks-Belohnungen)
   description: >-
     Verwaltet das tägliche Handyzeit-Guthaben eines Kindes über die
-    Google-Family-Link-Integration: Reset um Mitternacht, automatische
+    Google-Family-Link-Integration: Reset um Mitternacht auf 1 Minute (ein Limit von
+    0 Minuten wertet Family Link als "kein Limit" - das Gerät bliebe nachts
+    nutzbar), automatische
     Erhöhung zu festen Uhrzeiten, manuelle Plus-/Minus-Buttons (nur für
     Admin-Accounts) und sofortige Erhöhung, sobald das Kind im
     family_tasks-Punkte-Shop eine Belohnung mit "Zusätzliche Bildschirmzeit
@@ -549,7 +551,7 @@ actions:
       daily_minutes: >-
         {% set current = states(daily_limit_sensor) | int(0) %}
         {% if trigger.id == 'reset' %}
-          {{ 0 }}
+          {{ 1 }}
         {% elif trigger.id == 'plus_tick' %}
           {% set adjustment = (state_attr(screen_time_tick_adjustment_source_entity, 'screen_time_tick_adjustment_minutes') | int(0)) if (screen_time_tick_adjustment_source_entity | default('') != '') else 0 %}
           {% set tick_increment = [(increment_minutes | int) + adjustment, 0] | max %}

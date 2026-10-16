@@ -2,6 +2,11 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.69.1] - 2026-10-16
+
+### Fixed
+- **Handyzeit-Blueprint: Reset um Mitternacht auf 1 statt 0 Minuten**: Ein Tageslimit von 0 Minuten wird von Family Link bzw. der Integration als „kein Limit" gewertet (Sensor „Limit erreicht" wechselte um 00:00 auf aus, das Gerät wurde entsperrt) - das Gerät war in der Nacht uneingeschränkt nutzbar, sofern die Schlafenszeit nicht aktiv war. Der Reset setzt das Limit jetzt auf 1 Minute. Folge: Das Tageslimit liegt dauerhaft 1 Minute über der Summe der Plus-Ticks. Der Wert 1 ist noch nicht live über Mitternacht verifiziert.
+
 ## [0.69.0] - 2026-10-12
 
 ### Changed
