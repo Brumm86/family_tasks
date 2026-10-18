@@ -257,6 +257,9 @@ class FamilyTasksMemberPointsSensor(
             "milestone_200_threshold_points": self.coordinator.data.milestone_200_threshold_points,
             # v0.68: absolute malus thresholds 1-4 (points); the weekly goal is the fifth boundary.
             "malus_threshold_points": list(self.coordinator.data.malus_threshold_points),
+            # v0.70: household-wide Spotify unlock threshold (points of the
+            # previous week, 0 = off); drawn on the progress bar for children.
+            "spotify_threshold_points": self.coordinator.data.spotify_threshold_points,
             # v0.36: household-wide Streak-Bonus coin amounts (see
             # CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS
             # in const.py) - same "rides along, identical on every member's

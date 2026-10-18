@@ -37,6 +37,7 @@
           "milestone_200_bonus_coins": "Meilensteinbonus coins when reaching coin threshold 2 (gold)",
           "streak_bonus_2_weeks_coins": "Streak-Bonus coins for staying above coin threshold 2 for 2 weeks in a row",
           "streak_bonus_3_weeks_coins": "Streak-Bonus coins for staying above coin threshold 2 for 3 weeks in a row (paid every further qualifying week too)",
+          "spotify_threshold_points": "Spotify unlock: minimum points last week for Spotify to be unlocked this week (0 = off)",
           "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week, but only if they also reached the weekly point goal (0 disables it; no bonus on a tie, and none if the weekly goal is unmet)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
@@ -82,6 +83,9 @@
     "binary_sensor": {
       "screen_time_grant_active": {
         "name": "Screen time grant active"
+      },
+      "spotify_unlocked": {
+        "name": "Spotify unlocked"
       }
     },
     "switch": {

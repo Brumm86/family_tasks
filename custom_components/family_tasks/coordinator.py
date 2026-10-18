@@ -47,6 +47,7 @@ from .const import (
     CONF_STREAK_BONUS_2_WEEKS_COINS,
     CONF_STREAK_BONUS_3_WEEKS_COINS,
     CONF_TASK_CREATED_BY_MEMBER_ID,
+    CONF_SPOTIFY_THRESHOLD_POINTS,
     CONF_TOP_SCORER_BONUS_COINS,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
@@ -54,6 +55,7 @@ from .const import (
     CONFIRMATION_REJECTION_PENALTY_POINTS,
     COORDINATOR_UPDATE_INTERVAL,
     DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+    DEFAULT_SPOTIFY_THRESHOLD_POINTS,
     DEFAULT_BATTERY_WARNING_THRESHOLD,
     DEFAULT_MILESTONE_150_BONUS_COINS,
     DEFAULT_MILESTONE_200_BONUS_COINS,
@@ -324,6 +326,18 @@ class MemberSummaryData:
     # FamilyTasksCoordinator._async_update_data and that constant's
     # docstring for why the old per-member inference was replaced).
     screen_time_tick_adjustment_minutes: int = 0
+    # v0.70: this member's role (MEMBER_ROLE_CHILD/MEMBER_ROLE_PARENT) - the
+    # Spotify unlock sensor only exists for children.
+    role: str = MEMBER_ROLE_PARENT
+    # v0.70: points of the already-final previous calendar week (always
+    # computed - unlike the Handyzeit malus above it is not gated on
+    # CONF_SCREEN_TIME_MALUS_START_DATE) and whether that reached the
+    # household's Spotify threshold, i.e. whether Spotify is unlocked for the
+    # *current* week. False whenever the threshold is 0 (feature off). See
+    # CONF_SPOTIFY_THRESHOLD_POINTS in const.py and
+    # FamilyTasksSpotifyUnlockedSensor in binary_sensor.py.
+    last_week_points: int = 0
+    spotify_unlocked: bool = False
     # v0.45: this member's own estimated total Handyzeit for today, in
     # minutes - screen_time_ticks_per_day * max(screen_time_tick_minutes +
     # screen_time_tick_adjustment_minutes above, 0), the same per-tick malus
@@ -424,6 +438,10 @@ class FamilyTasksData:
     # v0.68: absolute-point malus thresholds 1-4 (the weekly goal itself is
     # the fifth boundary), shown as numbers on the progress bar.
     malus_threshold_points: tuple[int, int, int, int] = (0, 0, 0, 0)
+    # v0.70: household-wide Spotify threshold (absolute points of the
+    # previous week; 0 = feature off), drawn on the weekly progress bar and
+    # backing the per-child Spotify unlock binary sensor.
+    spotify_threshold_points: int = DEFAULT_SPOTIFY_THRESHOLD_POINTS
     # v0.23: household-wide default rotation strategy for new tasks (see
     # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
     # same reason the milestone-bonus settings above do (no dedicated entity
@@ -1516,13 +1534,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             # same lack of real history now always show the same (absent)
             # malus. Unset entirely (None) means the malus never applies.
             last_week_start = start_of_week - timedelta(days=7)
+            # v0.70: computed unconditionally now - the Spotify unlock below
+            # judges the same, already-final previous week but is independent
+            # of the malus start date.
+            last_week_points = self.completions.points_between(
+                member_id, last_week_start, start_of_week
+            )
+            spotify_threshold_points = self._spotify_threshold_points()
             if (
                 screen_time_malus_start_date is not None
                 and dt_util.as_local(last_week_start).date() >= screen_time_malus_start_date
             ):
-                last_week_points = self.completions.points_between(
-                    member_id, last_week_start, start_of_week
-                )
                 screen_time_tick_adjustment = self._screen_time_tick_adjustment_minutes(
                     last_week_points, weekly_progress_goal_points
                 )
@@ -1563,6 +1585,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 open_tasks=open_tasks_by_member.get(member_id, 0),
                 screen_time_grant_active=member_id not in screen_time_paused_members,
                 screen_time_tick_adjustment_minutes=screen_time_tick_adjustment,
+                role=member.get("role", MEMBER_ROLE_PARENT),
+                last_week_points=last_week_points,
+                spotify_unlocked=(
+                    spotify_threshold_points > 0 and last_week_points >= spotify_threshold_points
+                ),
                 screen_time_daily_minutes=screen_time_daily_minutes,
                 screen_time_tick_adjustment_minutes_next_week=screen_time_tick_adjustment_next_week,
                 screen_time_daily_minutes_next_week=screen_time_daily_minutes_next_week,
@@ -1637,6 +1664,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             milestone_150_threshold_points=milestone_150_threshold_points,
             milestone_200_threshold_points=milestone_200_threshold_points,
             malus_threshold_points=malus_thresholds if weekly_progress_goal_points > 0 else (0, 0, 0, 0),
+            spotify_threshold_points=self._spotify_threshold_points(),
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
             streak_bonus_2_weeks_coins=streak_bonus_2_weeks_coins,
@@ -2627,6 +2655,15 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             }
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
+
+    def _spotify_threshold_points(self) -> int:
+        """Household-wide Spotify unlock threshold in points (v0.70); 0 = off."""
+        options = self.config_entry.options if self.config_entry else {}
+        value = options.get(CONF_SPOTIFY_THRESHOLD_POINTS, DEFAULT_SPOTIFY_THRESHOLD_POINTS)
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError):
+            return DEFAULT_SPOTIFY_THRESHOLD_POINTS
 
     def _screen_time_tick_adjustment_minutes(
         self,

@@ -37,6 +37,7 @@
           "milestone_200_bonus_coins": "Meilensteinbonus-Münzen bei Erreichen von Münz-Schwelle 2 (gold)",
           "streak_bonus_2_weeks_coins": "Streak-Bonus-Münzen bei 2 Wochen in Folge über Münz-Schwelle 2",
           "streak_bonus_3_weeks_coins": "Streak-Bonus-Münzen bei 3 Wochen in Folge über Münz-Schwelle 2 (danach weiterhin jede Woche)",
+          "spotify_threshold_points": "Spotify-Freigabe: Mindestpunktzahl der Vorwoche, damit Spotify in dieser Woche freigegeben ist (0 = aus)",
           "top_scorer_bonus_coins": "Bonus-Münzen für das Kind mit den meisten Punkten der Woche, aber nur wenn dabei auch die wöchentliche Zielpunktzahl erreicht wurde (0 deaktiviert es; bei Gleichstand kein Bonus, ebenso wenn das Wochenziel verfehlt wird)",
           "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
@@ -82,6 +83,9 @@
     "binary_sensor": {
       "screen_time_grant_active": {
         "name": "Handyzeitgewährung aktiv"
+      },
+      "spotify_unlocked": {
+        "name": "Spotify freigegeben"
       }
     },
     "switch": {

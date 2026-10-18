@@ -189,6 +189,19 @@ MALUS_THRESHOLD_KEYS: Final = (
     CONF_MALUS_THRESHOLD_4_POINTS,
 )
 COIN_THRESHOLD_KEYS: Final = (CONF_COIN_THRESHOLD_1_POINTS, CONF_COIN_THRESHOLD_2_POINTS)
+
+# v0.70: Spotify-Freigabe. A child's Spotify (Family Link "Immer erlaubt") is
+# unlocked for a whole calendar week when the points of the already-final
+# previous week reached this household-wide threshold (absolute points).
+# 0 (the default) switches the feature off. Deliberately not part of the
+# ascending chain checked by thresholds_ascending - it is independent of the
+# malus/coin stages. This integration never talks to Family Link itself: it
+# only exposes FamilyTasksSpotifyUnlockedSensor (binary_sensor.py) and draws
+# the threshold on the weekly progress bar; the household's own
+# Handyzeit-Verwaltung blueprint (blueprints/handyzeit_verwaltung.yaml) does
+# the actual switching, same division of labour as for the Handyzeit malus.
+CONF_SPOTIFY_THRESHOLD_POINTS: Final = "spotify_threshold_points"
+DEFAULT_SPOTIFY_THRESHOLD_POINTS: Final = 0
 _LEGACY_MALUS_PERCENTS: Final = (10, 25, 50, 75)
 _LEGACY_COIN_PERCENTS: Final = (150, 200)
 

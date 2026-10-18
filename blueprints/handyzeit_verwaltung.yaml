@@ -63,6 +63,18 @@ blueprint:
     aktiv. Gutgeschrieben wird frühestens ab der ersten automatischen
     Plus-Uhrzeit des Tages (v0.67.1) - vorher bleibt das Limit nach dem
     Reset um Mitternacht unangetastet.
+
+    Optional (neu, v0.70) schaltet das Blueprint außerdem Spotify frei oder
+    sperrt es: jeden Montag um 00:20 Uhr liest es den family_tasks-Sensor
+    "Spotify freigegeben" dieses Kindes (binary_sensor.<name>_spotify_freigegeben).
+    Ist er an (Punkte der abgeschlossenen Vorwoche >= Spotify-Mindestpunktzahl
+    in den family_tasks-Optionen), wird die App in Family Link auf "Immer
+    erlaubt" gesetzt (familylink.set_app_daily_limit, minutes: -2), sonst
+    auf "App-Limit aus" (minutes: -1, d. h. nur noch im normalen
+    Handyzeit-Kontingent nutzbar). Ist der Sensor nicht verfügbar (Funktion in
+    family_tasks aus, Mindestpunktzahl 0) oder kein Sensor angegeben, bleibt
+    Spotify unangetastet. Eine zwischenzeitlich von Hand geänderte Freigabe
+    gilt bis zum nächsten Montag-Lauf.
   domain: automation
   input:
     child_name:
@@ -345,10 +357,38 @@ blueprint:
           mode: box
           step: 1
 
+    spotify_unlock_sensor:
+      name: "family_tasks: Spotify-freigegeben-Sensor (optional, v0.70)"
+      description: >-
+        Der Binary-Sensor "<Kind> Spotify freigegeben" dieses Kindes in
+        family_tasks (binary_sensor.<name>_spotify_freigegeben). "an" = die
+        Punkte der abgeschlossenen Vorwoche haben die Spotify-Mindestpunktzahl
+        erreicht. Das Blueprint wertet ihn jeden Montag um 00:20 Uhr aus (nach
+        dem Wochenwechsel hat family_tasks die neue Vorwoche berechnet, die
+        Aktualisierung läuft alle 15 Minuten) und setzt Spotify entsprechend
+        auf "Immer erlaubt" (an) bzw. "App-Limit aus" (aus). Leer lassen, um die
+        Spotify-Steuerung nicht zu nutzen.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+    spotify_package:
+      name: "Spotify-Paketname (v0.70)"
+      description: >-
+        Android-Paketname der App, die über die Spotify-Freigabe gesteuert
+        wird. Nur ändern, wenn eine andere App gemeint ist.
+      default: com.spotify.music
+      selector:
+        text:
+
 triggers:
   - id: reset
     trigger: time
     at: "00:00:00"
+  - id: spotify_week
+    trigger: time
+    at: "00:20:00"
   - id: plus_tick
     trigger: time
     at: !input plus_times
@@ -384,6 +424,8 @@ actions:
       correction_count_helper: !input correction_count_helper
       correction_min_gap_minutes: !input correction_min_gap_minutes
       plus_times: !input plus_times
+      spotify_unlock_sensor: !input spotify_unlock_sensor
+      spotify_package: !input spotify_package
 
   # Frühe Ausstiege, bevor überhaupt eine neue Handyzeit berechnet wird -
   # derselbe "stop"-Stil wie in der ursprünglichen Automation.
@@ -430,6 +472,46 @@ actions:
                       or trigger.event.data.screen_time_minutes is none) }}
         sequence:
           - stop: "Ignoriert: Belohnungs-Event betrifft ein anderes Kind oder trägt keine Bildschirmzeit-Minuten."
+
+      # v0.70: Spotify-Freigabe pro Woche - eigener, unabhängiger Zweig
+      # (Trigger "spotify_week", täglich 00:20, aber nur montags aktiv; zu
+      # diesem Zeitpunkt hat family_tasks die neue Vorwoche berechnet).
+      # Berührt weder das Tageslimit noch die Tick-/Button-/
+      # Belohnungs-Logik unten und endet immer mit "stop".
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'spotify_week' }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ now().weekday() != 0
+                     or spotify_unlock_sensor | default('') == ''
+                     or states(spotify_unlock_sensor) not in ['on', 'off'] }}
+            then:
+              - stop: >-
+                  Spotify-Steuerung übersprungen: nicht Montag, kein Sensor
+                  angegeben oder Sensor nicht verfügbar (Funktion in
+                  family_tasks aus).
+          - variables:
+              spotify_unlocked: "{{ is_state(spotify_unlock_sensor, 'on') }}"
+          # entity_id ist bei diesem Dienst ein normales Datenfeld (kein
+          # Ziel/target) - siehe familylink.set_app_daily_limit.
+          - action: familylink.set_app_daily_limit
+            data:
+              entity_id: !input switch_entity
+              package_name: "{{ spotify_package }}"
+              minutes: "{{ -2 if spotify_unlocked else -1 }}"
+          - action: logbook.log
+            data:
+              name: "Spotify-Freigabe ({{ child_name }})"
+              message: >-
+                {{ spotify_package }} ist für diese Woche
+                {{ 'freigegeben ("Immer erlaubt")' if spotify_unlocked else 'nicht freigegeben (normales Handyzeit-Kontingent)' }}.
+                Punkte der Vorwoche: {{ state_attr(spotify_unlock_sensor, 'last_week_points') }},
+                Mindestpunktzahl: {{ state_attr(spotify_unlock_sensor, 'threshold_points') }}.
+              entity_id: !input switch_entity
+          - stop: "Ende der Spotify-Steuerung (Trigger \"spotify_week\")."
 
       # v0.67: Ausgleich der von Google zu Unrecht auf das Tageslimit
       # angerechneten Zeit (alle 5 Minuten) - eigener, unabhängiger Zweig,

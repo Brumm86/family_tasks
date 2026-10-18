@@ -1640,7 +1640,7 @@
     // points-based version entirely - the two checkpoints are now fixed at
     // 150%/200% of the weekly goal.
     _milestoneBonus() {
-      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0, malusThresholds: [] };
+      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0, malusThresholds: [], spotifyThresholdPoints: 0 };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
@@ -1661,6 +1661,9 @@
         threshold200Points: Number(sensor.attributes.milestone_200_threshold_points ?? 0),
         // v0.68: absolute malus thresholds 1-4 (points).
         malusThresholds: (sensor.attributes.malus_threshold_points ?? []).map(Number),
+        // v0.70: Spotify-Freigabe - Mindestpunkte pro Woche, ab denen Spotify
+        // in der Folgewoche freigegeben ist (0 = aus).
+        spotifyThresholdPoints: Number(sensor.attributes.spotify_threshold_points ?? 0),
       };
     }
 
@@ -4008,6 +4011,7 @@
       const barMaxPoints = Math.max(
         milestone ? milestone.threshold200Points : 0,
         milestone ? milestone.threshold150Points : 0,
+        milestone ? milestone.spotifyThresholdPoints : 0,
         goal,
         1
       );
@@ -4153,6 +4157,39 @@
                   return `<div class="bar-milestone-badge slot${m.slot}${m.reached ? " reached" : ""}" style="${style}" title="${esc(`ab ${m.points} Pkt. → +${coinsLabel(m.bonus)}`)}"><span class="coin">🪙</span>${esc(m.bonus)}</div>`;
                 })
                 .join("");
+              // v0.70: Spotify-Freigabe - das Spotify-Symbol steht oberhalb
+              // des Balkens an der Position der Schwelle, die Punktzahl
+              // unterhalb (als Skalenzahl, siehe scaleEntries). Nur bei
+              // Kindern und nur mit konfiguriertem Wochenziel (sonst hat der
+              // Balken keine Skala) sowie Schwelle > 0. "reached" =
+              // Schwelle diese Woche schon erreicht, d. h. Spotify ist in der
+              // Folgewoche freigegeben (der Sensor
+              // binary_sensor.<name>_spotify_freigegeben bildet dagegen die
+              // bereits abgeschlossene Vorwoche ab). Liegt das Symbol dicht an
+              // einem Münz-Badge, weicht es zur Seite aus, damit sich beide
+              // nicht überdecken.
+              const spotifyPoints = milestone && member.role === "child"
+                ? Number(milestone.spotifyThresholdPoints || 0)
+                : 0;
+              const spotifyReached = spotifyPoints > 0 && weekPoints >= spotifyPoints;
+              const spotifyLeft = spotifyPoints > 0 ? barPos(spotifyPoints) : 0;
+              const spotifyNeighbour = milestoneMarkers.find(
+                (m) => m.bonus > 0 && Math.abs(m.left - spotifyLeft) < 9
+              );
+              const spotifyStyle = spotifyLeft >= 99
+                ? `right:0`
+                : spotifyNeighbour
+                  ? (spotifyLeft < spotifyNeighbour.left
+                      ? `left:${spotifyLeft}%;transform:translateX(-100%)`
+                      : `left:${spotifyLeft}%`)
+                  : `left:${spotifyLeft}%;transform:translateX(-50%)`;
+              const spotifyTitle = `Spotify-Freigabe: ab ${spotifyPoints} Pkt. pro Woche ist Spotify in der Folgewoche freigegeben${spotifyReached ? " - diese Woche schon erreicht" : ""}`;
+              const spotifyMarkerHtml = spotifyPoints > 0
+                ? `<div class="bar-milestone spotify${spotifyReached ? " reached" : ""}" style="left:${Math.min(100, spotifyLeft)}%" title="${esc(spotifyTitle)}"></div>`
+                : "";
+              const spotifyBadgeHtml = spotifyPoints > 0
+                ? `<div class="bar-spotify-badge${spotifyReached ? " reached" : ""}" style="${spotifyStyle}" title="${esc(spotifyTitle)}"><ha-icon icon="mdi:spotify"></ha-icon></div>`
+                : "";
               // v0.68: die Schwellen als sichtbare Zahlen direkt unter dem
               // Balken (Malus-Schwellen, Wochenziel, beide Münz-Schwellen).
               // Liegen zwei Zahlen zu dicht beieinander (< 9% der
@@ -4163,6 +4200,9 @@
                   kind: index === malusBoundaries.length - 1 ? "goal" : "malus",
                 })),
                 ...milestoneMarkers.map((m) => ({ points: m.points, kind: `coin coin${m.slot}` })),
+                ...(spotifyPoints > 0
+                  ? [{ points: spotifyPoints, kind: `spotify${spotifyReached ? " reached" : ""}` }]
+                  : []),
               ]
                 .filter((e) => e.points > 0)
                 .sort((x, y) => x.points - y.points);
@@ -4288,9 +4328,11 @@
                         <div class="bar-fill${barFillClass}" style="width:${pct}%"></div>
                         ${bandMarkersHtml}
                         ${milestoneMarkersHtml}
+                        ${spotifyMarkerHtml}
                       </div>
                       ${scaleLabelsHtml}
                       ${milestoneBadgesHtml}
+                      ${spotifyBadgeHtml}
                       ${streakBadgesHtml}
                     </div>
                     ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
@@ -5328,6 +5370,10 @@
            Erreichen). */
         .bar-scale-label.coin1 { color: #78909c; }
         .bar-scale-label.coin2 { color: #b8860b; }
+        /* v0.70: Spotify-Freigabe - Zahl unter dem Balken in Grün, fett,
+           sobald die Schwelle diese Woche erreicht ist. */
+        .bar-scale-label.spotify { color: #1db954; }
+        .bar-scale-label.spotify.reached { font-weight: 700; }
         /* v0.50: a thin border so the (otherwise empty) track stays visible
            even at 0 points, i.e. before .bar-fill has any width at all -
            "Sorge dafür, dass der Fortschrittsbalken selbst auch sichtbar
@@ -5413,6 +5459,18 @@
            Balkenfüllung nach Erreichen sichtbar bleibt. */
         .bar-milestone.slot1 { background: #b0bec5; mix-blend-mode: normal; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); }
         .bar-milestone.slot2 { background: #ffc107; mix-blend-mode: normal; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); }
+        /* v0.70: Spotify-Freigabe - Marke im Balken (wie die Münz-Marken
+           ohne Blend-Modus, mit dunklem Rand) und Symbol-Badge oberhalb des
+           Balkens. Grau, solange die Schwelle diese Woche noch nicht erreicht
+           ist, grün danach. */
+        .bar-milestone.spotify { background: #1db954; mix-blend-mode: normal; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); }
+        .bar-spotify-badge { position: absolute; top: 0; display: inline-flex; align-items: center;
+                              line-height: 1.4; color: var(--secondary-text-color);
+                              background: var(--card-background-color, #fff);
+                              border: 1px solid var(--divider-color, #e0e0e0); border-radius: 8px;
+                              padding: 0 3px; cursor: default; }
+        .bar-spotify-badge ha-icon { --mdc-icon-size: 12px; width: 12px; height: 12px; }
+        .bar-spotify-badge.reached { color: #1db954; border-color: #1db954; }
         .bar-milestone-badge.slot1 { border-color: #b0bec5; }
         .bar-milestone-badge.slot2 { border-color: #ffc107; }
         .bar-milestone-badge.slot1 .coin { filter: grayscale(1) brightness(1.15); }

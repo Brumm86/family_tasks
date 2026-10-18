@@ -2,6 +2,17 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.70.0] - 2026-10-18
+
+### Added
+- **Spotify-Freigabe nach Wochenpunkten**: neue Integrations-Option „Spotify-Freigabe: Mindestpunktzahl der Vorwoche" (absolute Punkte, haushaltsweit, 0 = aus). Erreicht ein Kind in der Vorwoche mindestens diese Punktzahl, gilt Spotify in der laufenden Woche als freigegeben.
+- **Neue Entity `binary_sensor.<name>_spotify_freigegeben`** je Kind (nicht verfügbar, solange die Option 0 ist) mit den Attributen `threshold_points`, `last_week_points`, `points_week` und `unlocked_next_week`. Der Punkte-Sensor trägt zusätzlich das Attribut `spotify_threshold_points`.
+- **Fortschrittsbalken**: Die Schwelle erscheint als Zahl unter dem Balken, darüber ein Spotify-Symbol (grau, bei erreichter Schwelle grün). Nur bei gesetztem Wochenziel und nur für Kinder.
+- **Handyzeit-Blueprint**: neue optionale Eingänge `spotify_unlock_sensor` und `spotify_package`. Montags um 00:20 setzt das Blueprint über `familylink.set_app_daily_limit` die App auf „Immer erlaubt" (-2) oder normal (-1). Manuelle Änderungen werden am nächsten Montag überschrieben.
+
+### Tests
+- Neue `tests/test_v070_features.py`.
+
 ## [0.69.1] - 2026-10-16
 
 ### Fixed

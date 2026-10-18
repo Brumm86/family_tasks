@@ -42,6 +42,7 @@ from .const import (
     thresholds_ascending,
     CONF_MILESTONE_200_BONUS_COINS,
     CONF_OVERDUE_AFTER_MINUTES,
+    CONF_SPOTIFY_THRESHOLD_POINTS,
     CONF_SCREEN_TIME_MALUS_START_DATE,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_SCREEN_TIME_TICK_MINUTES,
@@ -58,6 +59,7 @@ from .const import (
     DEFAULT_OVERDUE_AFTER_MINUTES,
     DEFAULT_ROTATION_STRATEGY,
     DEFAULT_SCREEN_TIME_MINUTES_PER_POINT,
+    DEFAULT_SPOTIFY_THRESHOLD_POINTS,
     DEFAULT_SCREEN_TIME_TICK_MINUTES,
     DEFAULT_SCREEN_TIME_TICKS_PER_DAY,
     DEFAULT_STREAK_BONUS_2_WEEKS_COINS,
@@ -129,6 +131,11 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     data.pop(key, None)
                 else:
                     data[key] = int(data[key])
+            # v0.70: Spotify unlock threshold (points of the previous week,
+            # 0 = off) - independent of the ascending chain above.
+            data[CONF_SPOTIFY_THRESHOLD_POINTS] = int(
+                data.get(CONF_SPOTIFY_THRESHOLD_POINTS) or 0
+            )
             goal_points = int(data.get(CONF_WEEKLY_PROGRESS_GOAL_POINTS) or 0)
             if goal_points > 0:
                 malus, coin = resolve_progress_thresholds(data, goal_points)
@@ -361,6 +368,21 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                     ),
                 ): NumberSelector(
                     NumberSelectorConfig(min=0, max=1000, mode=NumberSelectorMode.BOX)
+                ),
+                # v0.70: minimum points of the *previous* calendar week for
+                # Spotify to be unlocked in the current one (Family Link
+                # "Immer erlaubt", switched by the Handyzeit blueprint from
+                # the per-child binary sensor). 0 (default) = feature off.
+                # See CONF_SPOTIFY_THRESHOLD_POINTS in const.py.
+                vol.Optional(
+                    CONF_SPOTIFY_THRESHOLD_POINTS,
+                    default=current.get(
+                        CONF_SPOTIFY_THRESHOLD_POINTS, DEFAULT_SPOTIFY_THRESHOLD_POINTS
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=100000, mode=NumberSelectorMode.BOX, unit_of_measurement="Pkt."
+                    )
                 ),
                 # v0.32: only seeds VacationModeStateStore's initial value the
                 # first time it loads with nothing on disk yet - the actual
