@@ -209,6 +209,7 @@ async def test_completing_battery_task_awards_points(hass, init_integration) -> 
     assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_PENDING
 
     await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
 
     status = runtime.coordinator.data.tasks[task["id"]]
     assert status.status == TASK_STATUS_DONE

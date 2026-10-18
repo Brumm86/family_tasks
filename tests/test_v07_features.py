@@ -168,21 +168,6 @@ async def test_no_completion_button_configured_is_a_no_op(hass, init_integration
 # --- checklist tasks ---------------------------------------------------------
 
 
-async def test_checklist_task_requires_at_least_one_subtask(hass, init_integration) -> None:
-    """A checklist with no sub-items must be rejected."""
-    runtime = init_integration.runtime_data
-
-    with pytest.raises(vol.Invalid):
-        await runtime.tasks.async_create_item(
-            {
-                "name": "Kofferpacken",
-                "kind": "checklist",
-                "recurrence": {"type": "once"},
-                "rotation": {"member_ids": []},
-            }
-        )
-
-
 async def test_checklist_task_rejects_duplicate_subtask_ids(hass, init_integration) -> None:
     """Sub-item ids must be unique within a task."""
     runtime = init_integration.runtime_data

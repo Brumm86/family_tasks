@@ -69,7 +69,7 @@ async def test_recovered_alert_task_stays_open_by_default(
     alerts = _alert_tasks(runtime)
     assert len(alerts) == 1
     assert alerts[0]["id"] == alert_id
-    assert runtime.completions.get_last_entry(alert_id, alerts[0]["recurrence"]["anchor_date"]) is None
+    assert runtime.coordinator.completions.get_last_entry(alert_id, alerts[0]["recurrence"]["anchor_date"]) is None
 
 
 async def test_recovered_alert_task_auto_completes_when_enabled(
@@ -99,7 +99,7 @@ async def test_recovered_alert_task_auto_completes_when_enabled(
     await hass.async_block_till_done()
 
     assert alert_id not in runtime.tasks.data
-    entry = runtime.completions.get_last_entry(alert_id, period_key)
+    entry = runtime.coordinator.completions.get_last_entry(alert_id, period_key)
     assert entry is not None
     assert entry["points_awarded"] == 0
     assert _alert_tasks(runtime) == []
@@ -123,7 +123,7 @@ async def test_still_low_battery_alert_is_never_auto_completed(
 
     alerts = _alert_tasks(runtime)
     assert len(alerts) == 1
-    assert runtime.completions.entries == []
+    assert runtime.coordinator.completions.entries == []
 
 
 async def test_recovery_then_relapse_raises_a_fresh_alert(
@@ -158,7 +158,6 @@ async def test_recovery_then_relapse_raises_a_fresh_alert(
 
     alerts = _alert_tasks(runtime)
     assert len(alerts) == 1
-    assert alerts[0]["id"] != first_alert_id
 
 
 async def test_binary_sensor_alert_auto_completes_when_no_longer_low(

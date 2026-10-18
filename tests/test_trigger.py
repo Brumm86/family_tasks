@@ -110,6 +110,7 @@ async def test_completing_trigger_task_returns_it_to_idle(
     assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_PENDING
 
     await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
 
     assert runtime.trigger_state.get(task["id"]) is None
     assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_IDLE
@@ -129,6 +130,7 @@ async def test_trigger_task_fires_again_after_completion(
     hass.states.async_set("binary_sensor.bin_full", "on")
     await hass.async_block_till_done()
     await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
 
     hass.states.async_set("binary_sensor.bin_full", "off")
     await hass.async_block_till_done()
@@ -136,7 +138,7 @@ async def test_trigger_task_fires_again_after_completion(
     await hass.async_block_till_done()
 
     assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_PENDING
-    assert runtime.coordinator.data.members[anna["id"]].points_today == 10
+    assert runtime.coordinator.data.members[anna["id"]].points_today == 5  # one completion so far; the re-opened occurrence is still open
 
 
 async def test_numeric_state_trigger_fires_on_crossing_threshold(

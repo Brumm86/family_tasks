@@ -116,7 +116,7 @@ async def test_least_points_only_children_ignores_parents_in_the_pool(
     # Sue has fewer points than Timmy; Mom (parent) has none at all.
     scoring_task = await _add_task(runtime, member_ids=[timmy["id"]], points=10)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(scoring_task["id"])
+    await runtime.coordinator.async_complete_task(scoring_task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     task = await _add_task(

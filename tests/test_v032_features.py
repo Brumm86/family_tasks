@@ -1,19 +1,13 @@
-"""Tests for the v0.32 features:
+"""Tests for the v0.32 features that still exist (the point-based Streak-Bonus
+and the percent-based Meilenstein threshold exposure were replaced by the coin
+system and are covered by test_v063_features.py / test_v068_features.py):
 
 - ``reset_points`` service (FamilyTasksCoordinator.async_reset_points):
-  clears the completion log, reward redemptions, and Meilenstein-/Streak-
+  clears the completion log, reward redemptions, coins, and Meilenstein-/Streak-
   Bonus tracking, optionally scoped to one member.
 - Urlaubsmodus (VacationModeStateStore / switch.py): a task with
   vacation_behavior="pause" is skipped entirely while active; "show" (the
   default) is unaffected.
-- Streak-Bonus (CONF_STREAK_BONUS_ENABLED and friends): bonus points for
-  consecutive already-elapsed weeks above weekly_progress_goal_points +
-  streak_bonus_threshold_points - see
-  FamilyTasksCoordinator._async_process_streak_bonus.
-- Absolute Meilenstein threshold points (FamilyTasksData.
-  milestone_1_threshold_points/...2_threshold_points) exposed alongside the
-  existing percent-based settings, computed with the exact round() the
-  awarding logic itself uses.
 - Ablehnungsnotiz: async_skip_task's optional "note" is stored both on the
   rejection's completion-log entry and on the original task
   (last_rejection_note/...at), then cleared again once the child retries.
@@ -29,14 +23,8 @@ from unittest.mock import patch
 from homeassistant.util import dt as dt_util
 
 from custom_components.family_tasks.const import (
-    CONF_STREAK_BONUS_ENABLED,
-    CONF_STREAK_BONUS_POINTS,
-    CONF_STREAK_BONUS_REQUIRED_WEEKS,
-    CONF_STREAK_BONUS_THRESHOLD_POINTS,
     CONF_TASK_VACATION_BEHAVIOR,
-    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     MANUAL_POINTS_TASK_ID,
-    STREAK_BONUS_TASK_ID,
     TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_PENDING,
     VACATION_BEHAVIOR_PAUSE,
@@ -88,7 +76,7 @@ async def _add_points_at_utc(runtime, member_id, points, utc_dt) -> None:
     each one.
     """
     with patch.object(dt_util, "utcnow", return_value=utc_dt):
-        await runtime.completions.async_add_entry(
+        await runtime.coordinator.completions.async_add_entry(
             task_id="manual_test",
             period_key=utc_dt.date().isoformat(),
             member_id=member_id,
@@ -134,14 +122,14 @@ async def test_reset_points_without_member_id_resets_everyone(
     await runtime.coordinator.async_complete_task(task_a["id"])
     await runtime.coordinator.async_complete_task(task_b["id"])
 
-    reward = await runtime.rewards.async_create_item({"name": "Kino", "points_cost": 3})
+    reward = await runtime.rewards.async_create_item({"name": "Kino", "coin_cost": 3})
     await runtime.reward_redemptions.async_create_item(
         {
             "member_id": anna["id"],
             "member_name": "Anna",
             "reward_id": reward["id"],
             "reward_name": "Kino",
-            "points_cost": 3,
+            "coin_cost": 3,
         }
     )
     await runtime.coordinator.async_refresh()
@@ -152,7 +140,7 @@ async def test_reset_points_without_member_id_resets_everyone(
     assert runtime.coordinator.data.members[anna["id"]].points_total == 0
     assert runtime.coordinator.data.members[ben["id"]].points_total == 0
     assert not runtime.reward_redemptions.data
-    assert not runtime.completions.entries
+    assert not runtime.coordinator.completions.entries
 
 
 async def test_reset_points_leaves_tasks_members_and_catalog_untouched(
@@ -161,7 +149,7 @@ async def test_reset_points_leaves_tasks_members_and_catalog_untouched(
     runtime = init_integration.runtime_data
     anna = await runtime.members.async_create_item({"name": "Anna"})
     task = await _add_task(runtime, member_ids=[anna["id"]], points=10)
-    reward = await runtime.rewards.async_create_item({"name": "Kino", "points_cost": 3})
+    reward = await runtime.rewards.async_create_item({"name": "Kino", "coin_cost": 3})
     await runtime.coordinator.async_refresh()
     await runtime.coordinator.async_complete_task(task["id"])
 
@@ -214,125 +202,6 @@ async def test_vacation_mode_state_persists_across_store_reload(
     assert reloaded.is_active is True
 
 
-# --- Streak-Bonus ---------------------------------------------------------------
-
-
-async def test_streak_bonus_awarded_after_required_consecutive_weeks(
-    hass, init_integration
-) -> None:
-    """Week -2 already judged (streak 1, seeded directly via the state
-    store - see StreakBonusStateStore); week -1 also meets target, so the
-    second consecutive qualifying week should award the bonus the first
-    refresh that happens once it has fully elapsed."""
-    runtime = init_integration.runtime_data
-    hass.config_entries.async_update_entry(
-        init_integration,
-        options={
-            CONF_STREAK_BONUS_ENABLED: True,
-            CONF_STREAK_BONUS_THRESHOLD_POINTS: 10,
-            CONF_STREAK_BONUS_REQUIRED_WEEKS: 2,
-            CONF_STREAK_BONUS_POINTS: 4,
-        },
-    )
-    anna = await runtime.members.async_create_item({"name": "Anna"})
-    monday = _start_of_week_utc(0)
-
-    await runtime.streak_bonus_state.async_set(anna["id"], monday - timedelta(weeks=1), 1)
-    await _add_points_at_utc(runtime, anna["id"], 10, monday - timedelta(weeks=1, days=-1))
-
-    await _refresh_at_utc(runtime, monday + timedelta(hours=1))
-
-    streak_entries = [
-        e for e in runtime.completions.entries if e["task_id"] == STREAK_BONUS_TASK_ID
-    ]
-    assert len(streak_entries) == 1
-    assert streak_entries[0]["points_awarded"] == 4
-    assert runtime.coordinator.data.members[anna["id"]].streak_weeks == 2
-
-
-async def test_streak_bonus_resets_after_a_missed_week(hass, init_integration) -> None:
-    """Week -2 (seeded as already having a streak of 1) falls below target
-    this time, so the streak must reset to 0 before counting week -1 fresh -
-    not enough on its own for the (2-week) bonus yet."""
-    runtime = init_integration.runtime_data
-    hass.config_entries.async_update_entry(
-        init_integration,
-        options={
-            CONF_STREAK_BONUS_ENABLED: True,
-            CONF_STREAK_BONUS_THRESHOLD_POINTS: 10,
-            CONF_STREAK_BONUS_REQUIRED_WEEKS: 2,
-            CONF_STREAK_BONUS_POINTS: 4,
-        },
-    )
-    anna = await runtime.members.async_create_item({"name": "Anna"})
-    monday = _start_of_week_utc(0)
-
-    await runtime.streak_bonus_state.async_set(anna["id"], monday - timedelta(weeks=2), 1)
-    await _add_points_at_utc(runtime, anna["id"], 2, monday - timedelta(weeks=2, days=-1))
-    await _add_points_at_utc(runtime, anna["id"], 10, monday - timedelta(weeks=1, days=-1))
-
-    await _refresh_at_utc(runtime, monday + timedelta(hours=1))
-
-    assert not any(
-        e["task_id"] == STREAK_BONUS_TASK_ID for e in runtime.completions.entries
-    )
-    assert runtime.coordinator.data.members[anna["id"]].streak_weeks == 1
-
-
-async def test_streak_bonus_disabled_by_default(hass, init_integration) -> None:
-    runtime = init_integration.runtime_data
-    anna = await runtime.members.async_create_item({"name": "Anna"})
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
-    await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
-    await runtime.coordinator.async_refresh()
-
-    assert not any(
-        e["task_id"] == STREAK_BONUS_TASK_ID for e in runtime.completions.entries
-    )
-    assert runtime.coordinator.data.streak_bonus_enabled is False
-
-
-# --- Absolute Meilenstein threshold points --------------------------------------
-
-
-async def test_milestone_threshold_points_match_awarding_computation(
-    hass, init_integration
-) -> None:
-    from custom_components.family_tasks.const import (
-        CONF_MILESTONE_1_THRESHOLD_PERCENT,
-        CONF_MILESTONE_2_THRESHOLD_PERCENT,
-    )
-
-    runtime = init_integration.runtime_data
-    hass.config_entries.async_update_entry(
-        init_integration,
-        options={
-            CONF_WEEKLY_PROGRESS_GOAL_POINTS: 15,
-            CONF_MILESTONE_1_THRESHOLD_PERCENT: 50,
-            CONF_MILESTONE_2_THRESHOLD_PERCENT: 150,
-        },
-    )
-    await runtime.members.async_create_item({"name": "Anna"})
-    await runtime.coordinator.async_refresh()
-
-    # Both land on an exact .5 value (7.5 and 22.5) where Python's round()
-    # (banker's rounding, nearest *even*) and a naive "always round .5 up"
-    # implementation would disagree (7.5 -> 8, but 22.5 -> 22, not 23) - the
-    # whole point of computing this server-side once and exposing it, rather
-    # than letting the card recompute it independently in JS.
-    assert runtime.coordinator.data.milestone_1_threshold_points == round(15 * 50 / 100) == 8
-    assert runtime.coordinator.data.milestone_2_threshold_points == round(15 * 150 / 100) == 22
-
-
-async def test_milestone_threshold_points_zero_without_weekly_goal(
-    hass, init_integration
-) -> None:
-    runtime = init_integration.runtime_data
-    await runtime.coordinator.async_refresh()
-    assert runtime.coordinator.data.milestone_1_threshold_points == 0
-    assert runtime.coordinator.data.milestone_2_threshold_points == 0
-
 
 # --- Ablehnungsnotiz ------------------------------------------------------------
 
@@ -369,7 +238,7 @@ async def test_rejection_note_stored_on_original_task_and_completion_entry(
 
     rejection_entries = [
         e
-        for e in runtime.completions.entries
+        for e in runtime.coordinator.completions.entries
         if e["task_id"] == MANUAL_POINTS_TASK_ID and e["note"] == "Bett noch nicht gemacht"
     ]
     assert len(rejection_entries) == 1

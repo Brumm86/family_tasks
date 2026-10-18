@@ -3,9 +3,8 @@
 - A user linked (via person_entity_id -> person.user_id) to a family member
   with role "child" may never create/update/delete family members over the
   websocket API, regardless of their HA admin flag.
-- Only such a "child"-linked user may use the non-admin
-  family_tasks/task/create_own command, and it always forces points=0 and a
-  single-member ([self]) rotation.
+- family_tasks/task/create_own is disabled since v0.47: it rejects every
+  caller, children included.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ async def _client_for_new_user(hass, hass_ws_client, *, is_admin: bool, name: st
     """Create a fresh HA user (admin or not) and return a connected ws client."""
     group_ids = [GROUP_ID_ADMIN] if is_admin else []
     user = await hass.auth.async_create_user(name, group_ids=group_ids)
-    refresh_token = await hass.auth.async_create_refresh_token(user)
+    refresh_token = await hass.auth.async_create_refresh_token(user, client_id="https://example.com")
     access_token = hass.auth.async_create_access_token(refresh_token)
     client = await hass_ws_client(hass, access_token)
     return user, client
@@ -88,13 +87,12 @@ async def test_admin_user_not_linked_to_a_child_can_still_manage_members(
     assert "Anna" in [m["name"] for m in runtime.members.data.values()]
 
 
-async def test_child_can_create_own_task_without_admin_rights(
+async def test_child_cannot_create_own_task_since_v047(
     hass, init_integration, hass_ws_client
 ) -> None:
-    """A non-admin user linked to a 'child' member can create a task for
-    themselves via the restricted create_own command."""
+    """v0.47 disabled the self-service form: create_own now always errors."""
     runtime = init_integration.runtime_data
-    timmy = await runtime.members.async_create_item(
+    await runtime.members.async_create_item(
         {"name": "Timmy", "role": "child", "person_entity_id": "person.timmy"}
     )
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -110,11 +108,9 @@ async def test_child_can_create_own_task_without_admin_rights(
     )
     response = await client.receive_json()
 
-    assert response["success"] is True
-    task = response["result"]
-    assert task["points"] == 0
-    assert task["rotation"]["member_ids"] == [timmy["id"]]
-    assert task["requires_confirmation"] is False
+    assert response["success"] is False
+    assert response["error"]["code"] == "unauthorized"
+    assert not any(t["name"] == "Zimmer aufräumen" for t in runtime.tasks.data.values())
 
 
 async def test_non_child_user_cannot_use_create_own_task(

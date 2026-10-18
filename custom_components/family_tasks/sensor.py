@@ -35,6 +35,11 @@ class FamilyTasksTaskStatusSensor(
     ) -> None:
         super().__init__(coordinator)
         self._task_id = task_id
+        # Remembered because Home Assistant reads ``name`` even while the
+        # entity is unavailable, and a task paused by vacation mode is
+        # missing from the coordinator data in that case.
+        initial_task = coordinator.data.tasks.get(task_id) if coordinator.data else None
+        self._last_name: str = initial_task.name if initial_task else task_id
         self._attr_unique_id = f"{entry.entry_id}_task_{task_id}_status"
         self._attr_device_info = _device_info(entry)
         self._attr_translation_key = "task_status"
@@ -49,7 +54,10 @@ class FamilyTasksTaskStatusSensor(
 
     @property
     def name(self) -> str:
-        return self._task.name
+        task = self.coordinator.data.tasks.get(self._task_id)
+        if task is not None:
+            self._last_name = task.name
+        return self._last_name
 
     # v0.51: no longer shows the task's own "icon" field (see const.py/
     # storage.py TASK_*_SCHEMA and family-tasks-card.js) - task icons are no

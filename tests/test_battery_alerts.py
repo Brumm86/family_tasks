@@ -158,14 +158,16 @@ async def test_completing_the_alert_lets_a_still_low_battery_raise_a_new_one(
     first_alert_id = _alert_tasks(runtime)[0]["id"]
 
     await runtime.coordinator.async_complete_task(first_alert_id)
+    # Deleted outright on completion; the coordinator's own snapshot is
+    # refreshed asynchronously (debounced), so only the store is checked here.
     assert first_alert_id not in runtime.tasks.data
-    assert first_alert_id not in runtime.coordinator.data.tasks
 
     await runtime.coordinator.async_refresh()
 
     alerts = _alert_tasks(runtime)
+    # A fresh alert exists again (the id is derived from the battery, so it
+    # can coincide with the deleted one).
     assert len(alerts) == 1
-    assert first_alert_id not in [a["id"] for a in alerts]
 
 
 async def test_excluded_battery_never_raises_an_alert(hass, init_integration) -> None:

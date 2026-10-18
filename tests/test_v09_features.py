@@ -1,7 +1,7 @@
 """Tests for the v0.9 features:
 
 - The reward catalog (admin-only CRUD, `family_tasks/reward/*`): each item
-  has a name and a price in points ("points_cost"). Replaces v0.8's
+  has a name and a price in points ("coin_cost"). Replaces v0.8's
   parent-defined "reward groups".
 - The redeem flow (`family_tasks/reward_redemption/redeem`): any family
   member who participates in the reward system (see
@@ -25,7 +25,7 @@ async def _client_for_new_user(hass, hass_ws_client, *, is_admin: bool, name: st
     """Create a fresh HA user (admin or not) and return a connected ws client."""
     group_ids = [GROUP_ID_ADMIN] if is_admin else []
     user = await hass.auth.async_create_user(name, group_ids=group_ids)
-    refresh_token = await hass.auth.async_create_refresh_token(user)
+    refresh_token = await hass.auth.async_create_refresh_token(user, client_id="https://example.com")
     access_token = hass.auth.async_create_access_token(refresh_token)
     client = await hass_ws_client(hass, access_token)
     return user, client
@@ -50,17 +50,17 @@ async def test_admin_can_manage_reward_catalog(hass, init_integration, hass_ws_c
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=True)
 
     await client.send_json_auto_id(
-        {"type": "family_tasks/reward/create", "name": "Filmabend aussuchen", "points_cost": 10}
+        {"type": "family_tasks/reward/create", "name": "Filmabend aussuchen", "coin_cost": 10}
     )
     response = await client.receive_json()
 
     assert response["success"] is True
     assert response["result"]["name"] == "Filmabend aussuchen"
-    assert response["result"]["points_cost"] == 10
+    assert response["result"]["coin_cost"] == 10
     assert response["result"]["id"] in runtime.rewards.data
 
 
-async def test_reward_catalog_points_cost_defaults_to_zero(
+async def test_reward_catalog_coin_cost_defaults_to_zero(
     hass, init_integration, hass_ws_client
 ) -> None:
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=True)
@@ -69,7 +69,7 @@ async def test_reward_catalog_points_cost_defaults_to_zero(
     response = await client.receive_json()
 
     assert response["success"] is True
-    assert response["result"]["points_cost"] == 0
+    assert response["result"]["coin_cost"] == 0
 
 
 async def test_non_admin_cannot_create_reward_catalog(
@@ -78,7 +78,7 @@ async def test_non_admin_cannot_create_reward_catalog(
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
 
     await client.send_json_auto_id(
-        {"type": "family_tasks/reward/create", "name": "Sneaky reward", "points_cost": 1}
+        {"type": "family_tasks/reward/create", "name": "Sneaky reward", "coin_cost": 1}
     )
     response = await client.receive_json()
 
@@ -102,7 +102,7 @@ async def test_generic_reward_redemption_create_is_always_rejected(
             "member_name": "Anyone",
             "reward_id": "whatever",
             "reward_name": "Whatever",
-            "points_cost": 0,
+            "coin_cost": 0,
         }
     )
     response = await client.receive_json()
@@ -117,13 +117,13 @@ async def test_member_can_redeem_affordable_reward(
     anna = await runtime.members.async_create_item(
         {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
     )
-    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "points_cost": 10})
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=15)
+    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "coin_cost": 10})
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=15, coin_value=15)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
-    assert runtime.coordinator.data.members[anna["id"]].points_available == 15
+    assert runtime.coordinator.data.members[anna["id"]].coins_available == 15
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
     hass.states.async_set("person.anna", "home", {"user_id": user.id})
@@ -138,12 +138,12 @@ async def test_member_can_redeem_affordable_reward(
     assert redemption["member_id"] == anna["id"]
     assert redemption["member_name"] == "Anna"
     assert redemption["reward_name"] == "Filmabend"
-    assert redemption["points_cost"] == 10
+    assert redemption["coin_cost"] == 10
     assert redemption["fulfilled"] is False
 
     await runtime.coordinator.async_refresh()
-    # 15 earned - 10 spent = 5 left; points_total itself is untouched.
-    assert runtime.coordinator.data.members[anna["id"]].points_available == 5
+    # 15 coins earned - 10 spent = 5 left; points_total itself is untouched.
+    assert runtime.coordinator.data.members[anna["id"]].coins_available == 5
     assert runtime.coordinator.data.members[anna["id"]].points_total == 15
 
     # A second redemption the balance can't cover is rejected, and does not
@@ -163,7 +163,7 @@ async def test_member_cannot_redeem_reward_they_cannot_afford(
     await runtime.members.async_create_item(
         {"name": "Ben", "role": "child", "person_entity_id": "person.ben"}
     )
-    reward = await runtime.rewards.async_create_item({"name": "Konsole", "points_cost": 1000})
+    reward = await runtime.rewards.async_create_item({"name": "Konsole", "coin_cost": 1000})
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -192,8 +192,8 @@ async def test_non_participating_member_cannot_redeem(
             "participates_in_rewards": False,
         }
     )
-    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "points_cost": 1})
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=50)
+    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "coin_cost": 1})
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=50, coin_value=50)
     await runtime.coordinator.async_refresh()
     await runtime.coordinator.async_complete_task(task["id"])
     await runtime.coordinator.async_refresh()
@@ -228,14 +228,14 @@ async def test_parent_can_fulfill_redemption_but_child_cannot(
     timmy = await runtime.members.async_create_item(
         {"name": "Timmy", "role": "child", "person_entity_id": "person.timmy"}
     )
-    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "points_cost": 5})
+    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "coin_cost": 5})
     redemption = await runtime.reward_redemptions.async_create_item(
         {
             "member_id": anna["id"],
             "member_name": "Anna",
             "reward_id": reward["id"],
             "reward_name": reward["name"],
-            "points_cost": 5,
+            "coin_cost": 5,
         }
     )
 
@@ -277,7 +277,7 @@ async def test_parent_can_fulfill_redemption_but_child_cannot(
 async def test_legacy_reward_group_is_migrated_to_priced_catalog_item(
     hass, hass_storage, mock_config_entry
 ) -> None:
-    """A v0.8 "reward group" (name/icon only) gets points_cost=0 backfilled."""
+    """A v0.8 "reward group" (name/icon only) gets coin_cost=0 backfilled."""
     hass_storage["family_tasks.reward_groups"] = {
         "version": 1,
         "minor_version": 1,
@@ -291,14 +291,14 @@ async def test_legacy_reward_group_is_migrated_to_priced_catalog_item(
 
     runtime = mock_config_entry.runtime_data
     assert runtime.rewards.data["lunch"]["name"] == "Mittagessen auswählen"
-    assert runtime.rewards.data["lunch"]["points_cost"] == 0
+    assert runtime.rewards.data["lunch"]["coin_cost"] == 0
 
 
 async def test_legacy_claimed_reward_is_migrated_to_free_redemption(
     hass, hass_storage, mock_config_entry
 ) -> None:
     """A v0.8 claim (reward_group_id/name + detail, no price) is remapped and
-    gets points_cost=0 so it never retroactively reduces anyone's balance."""
+    gets coin_cost=0 so it never retroactively reduces anyone's balance."""
     hass_storage["family_tasks.rewards"] = {
         "version": 1,
         "minor_version": 1,
@@ -326,7 +326,7 @@ async def test_legacy_claimed_reward_is_migrated_to_free_redemption(
 
     runtime = mock_config_entry.runtime_data
     migrated = runtime.reward_redemptions.data["anna-2026-07-27"]
-    assert migrated["points_cost"] == 0
+    assert migrated["coin_cost"] == 0
     assert migrated["reward_id"] == "lunch"
     assert migrated["reward_name"] == "Mittagessen auswählen (Pizza)"
     assert migrated["redeemed_at"] == "2026-07-27T10:00:00+00:00"

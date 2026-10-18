@@ -31,21 +31,33 @@ async def test_task_create_applies_defaults(hass) -> None:
     assert task["rotation"]["current_index"] == 0
 
 
-async def test_task_update_merges_nested_rotation_dict(hass) -> None:
-    """Updating only current_index must not drop member_ids/strategy."""
+async def test_task_update_keeps_current_index_when_rotation_is_edited(hass) -> None:
+    """Editing the rotation (the form never sends current_index) must not reset it.
+
+    Since v0.37 a rotation update has to carry member_ids (ROTATION_SCHEMA),
+    but an omitted current_index is carried over from the stored task instead
+    of being re-defaulted to 0 by the schema.
+    """
     tasks = await async_create_tasks_collection(hass)
     task = await tasks.async_create_item(
         {
             "name": "Spülmaschine",
             "points": 5,
             "recurrence": {"type": "daily"},
-            "rotation": {"member_ids": ["anna", "ben"], "strategy": "round_robin"},
+            "rotation": {
+                "member_ids": ["anna", "ben"],
+                "strategy": "round_robin",
+                "current_index": 1,
+            },
         }
     )
 
-    updated = await tasks.async_update_item(task["id"], {"rotation": {"current_index": 1}})
+    updated = await tasks.async_update_item(
+        task["id"],
+        {"rotation": {"member_ids": ["anna", "ben", "cara"], "strategy": "round_robin"}},
+    )
 
-    assert updated["rotation"]["member_ids"] == ["anna", "ben"]
+    assert updated["rotation"]["member_ids"] == ["anna", "ben", "cara"]
     assert updated["rotation"]["strategy"] == "round_robin"
     assert updated["rotation"]["current_index"] == 1
     # Unrelated top-level fields must survive the update untouched.

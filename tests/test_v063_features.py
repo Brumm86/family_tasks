@@ -233,6 +233,10 @@ async def test_streak_bonus_no_payout_before_2_weeks(hass, init_integration) -> 
     anna = await runtime.members.async_create_item({"name": "Anna"})
     task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
 
+    # Seed the "200" tier's cursor one week back (creating the member already
+    # advanced it to the current week) - same technique as the tests above.
+    await runtime.streak_bonus_state.async_set(anna["id"], "200", _start_of_week_utc(-1), 0)
+
     week_start = _start_of_week_utc(-1)
     await _complete_at_utc(runtime, task["id"], anna["id"], week_start + timedelta(days=1))
     await _refresh_at_utc(runtime, _start_of_week_utc(0))

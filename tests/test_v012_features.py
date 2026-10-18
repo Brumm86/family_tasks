@@ -24,7 +24,7 @@ async def _client_for_new_user(hass, hass_ws_client, *, is_admin: bool, name: st
     """Create a fresh HA user (admin or not) and return a connected ws client."""
     group_ids = [GROUP_ID_ADMIN] if is_admin else []
     user = await hass.auth.async_create_user(name, group_ids=group_ids)
-    refresh_token = await hass.auth.async_create_refresh_token(user)
+    refresh_token = await hass.auth.async_create_refresh_token(user, client_id="https://example.com")
     access_token = hass.auth.async_create_access_token(refresh_token)
     client = await hass_ws_client(hass, access_token)
     return user, client
@@ -48,7 +48,7 @@ async def test_reward_auto_fulfill_defaults_to_false(hass, init_integration, has
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=True)
 
     await client.send_json_auto_id(
-        {"type": "family_tasks/reward/create", "name": "Filmabend", "points_cost": 5}
+        {"type": "family_tasks/reward/create", "name": "Filmabend", "coin_cost": 5}
     )
     response = await client.receive_json()
 
@@ -63,7 +63,7 @@ async def test_reward_can_set_auto_fulfill(hass, init_integration, hass_ws_clien
         {
             "type": "family_tasks/reward/create",
             "name": "Extra Bildschirmzeit",
-            "points_cost": 5,
+            "coin_cost": 5,
             "screen_time_minutes": 30,
             "auto_fulfill": True,
         }
@@ -76,7 +76,7 @@ async def test_reward_can_set_auto_fulfill(hass, init_integration, hass_ws_clien
 
 async def test_reward_update_can_toggle_auto_fulfill(hass, init_integration, hass_ws_client) -> None:
     runtime = init_integration.runtime_data
-    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "points_cost": 5})
+    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "coin_cost": 5})
     assert runtime.rewards.data[reward["id"]]["auto_fulfill"] is False
 
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=True)
@@ -106,14 +106,14 @@ async def test_redeeming_an_auto_fulfill_reward_creates_fulfilled_redemption(
     reward = await runtime.rewards.async_create_item(
         {
             "name": "Extra Bildschirmzeit",
-            "points_cost": 5,
+            "coin_cost": 5,
             "screen_time_minutes": 20,
             "auto_fulfill": True,
         }
     )
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=10)
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=10, coin_value=10)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -140,10 +140,10 @@ async def test_redeeming_a_non_auto_fulfill_reward_stays_unfulfilled(
     anna = await runtime.members.async_create_item(
         {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
     )
-    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "points_cost": 5})
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=10)
+    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "coin_cost": 5})
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=10, coin_value=10)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)

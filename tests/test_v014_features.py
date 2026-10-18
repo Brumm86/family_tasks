@@ -35,7 +35,7 @@ async def _client_for_new_user(hass, hass_ws_client, *, is_admin: bool, name: st
 
     group_ids = [GROUP_ID_ADMIN] if is_admin else []
     user = await hass.auth.async_create_user(name, group_ids=group_ids)
-    refresh_token = await hass.auth.async_create_refresh_token(user)
+    refresh_token = await hass.auth.async_create_refresh_token(user, client_id="https://example.com")
     access_token = hass.auth.async_create_access_token(refresh_token)
     client = await hass_ws_client(hass, access_token)
     return user, client
@@ -66,9 +66,9 @@ async def test_investable_redeem_derives_minutes_from_default_bonus_factor(
     reward = await runtime.rewards.async_create_item(
         {"name": "Handyzeit", "screen_time_investable": True}
     )
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=20, coin_value=20)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -78,18 +78,18 @@ async def test_investable_redeem_derives_minutes_from_default_bonus_factor(
         {
             "type": "family_tasks/reward_redemption/redeem",
             "reward_id": reward["id"],
-            "points_spent": 12,
+            "coins_spent": 12,
         }
     )
     response = await client.receive_json()
 
     assert response["success"] is True
-    assert response["result"]["points_cost"] == 12
-    assert response["result"]["points_invested"] == 12
+    assert response["result"]["coin_cost"] == 12
+    assert response["result"]["coins_invested"] == 12
     assert response["result"]["screen_time_minutes"] == 12
 
     await runtime.coordinator.async_refresh()
-    assert runtime.coordinator.data.members[anna["id"]].points_available == 8
+    assert runtime.coordinator.data.members[anna["id"]].coins_available == 8
 
 
 async def test_investable_redeem_uses_configured_bonus_factor(
@@ -105,9 +105,9 @@ async def test_investable_redeem_uses_configured_bonus_factor(
     reward = await runtime.rewards.async_create_item(
         {"name": "Handyzeit", "screen_time_investable": True}
     )
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=20, coin_value=20)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -117,7 +117,7 @@ async def test_investable_redeem_uses_configured_bonus_factor(
         {
             "type": "family_tasks/reward_redemption/redeem",
             "reward_id": reward["id"],
-            "points_spent": 4,
+            "coins_spent": 4,
         }
     )
     response = await client.receive_json()
@@ -134,7 +134,7 @@ async def test_investable_redeem_requires_points_spent(hass, init_integration, h
     reward = await runtime.rewards.async_create_item(
         {"name": "Handyzeit", "screen_time_investable": True}
     )
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=20)
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=20, coin_value=20)
     await runtime.coordinator.async_refresh()
     await runtime.coordinator.async_complete_task(task["id"])
     await runtime.coordinator.async_refresh()
@@ -169,7 +169,7 @@ async def test_investable_redeem_rejected_without_enough_points(
         {
             "type": "family_tasks/reward_redemption/redeem",
             "reward_id": reward["id"],
-            "points_spent": 5,
+            "coins_spent": 5,
         }
     )
     response = await client.receive_json()
@@ -186,7 +186,7 @@ async def test_existing_screen_time_reward_is_migrated_to_investable(hass, init_
 
     runtime = init_integration.runtime_data
     reward = await runtime.rewards.async_create_item(
-        {"name": "Alte Handyzeit", "points_cost": 5, "screen_time_minutes": 30}
+        {"name": "Alte Handyzeit", "coin_cost": 5, "screen_time_minutes": 30}
     )
     # Simulate a pre-v0.14 stored item: drop the key the schema would
     # otherwise have defaulted to False, exactly like data written before

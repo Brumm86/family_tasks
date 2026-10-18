@@ -10,6 +10,7 @@ for the household's parents (recurrence "confirmation", linked back via the
 from __future__ import annotations
 
 from custom_components.family_tasks.const import (
+    CONFIRMATION_REJECTION_PENALTY_POINTS,
     TASK_STATUS_AWAITING_CONFIRMATION,
     TASK_STATUS_DONE,
     TASK_STATUS_PENDING,
@@ -86,7 +87,7 @@ async def test_parent_confirming_finalizes_child_completion(
 
 
 async def test_parent_rejecting_returns_task_to_pending(hass, init_integration) -> None:
-    """Skipping the confirmation task rejects the claim without awarding points."""
+    """Skipping the confirmation task rejects the claim (penalty, no award)."""
     runtime = init_integration.runtime_data
     timmy = await runtime.members.async_create_item({"name": "Timmy", "role": "child"})
     await runtime.members.async_create_item({"name": "Mom", "role": "parent"})
@@ -94,18 +95,25 @@ async def test_parent_rejecting_returns_task_to_pending(hass, init_integration) 
     await runtime.coordinator.async_refresh()
     await runtime.coordinator.async_complete_task(task["id"])
     await runtime.coordinator.async_refresh()
+    await runtime.coordinator.async_refresh()
 
     confirmation_task = _find_confirmation_task(runtime, task["id"])
     await runtime.coordinator.async_skip_task(confirmation_task["id"])
     await runtime.coordinator.async_refresh()
+    await runtime.coordinator.async_refresh()
 
     status = runtime.coordinator.data.tasks[task["id"]]
     assert status.status == TASK_STATUS_PENDING
-    assert runtime.coordinator.data.members[timmy["id"]].points_today == 0
+    # An explicit rejection costs the child a small penalty (v0.2x).
+    assert (
+        runtime.coordinator.data.members[timmy["id"]].points_today
+        == -CONFIRMATION_REJECTION_PENALTY_POINTS
+    )
     assert confirmation_task["id"] not in runtime.tasks.data
 
     # The child can raise a fresh claim for the same occurrence.
     await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_refresh()
     await runtime.coordinator.async_refresh()
     assert (
         runtime.coordinator.data.tasks[task["id"]].status

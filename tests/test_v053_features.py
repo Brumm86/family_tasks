@@ -105,7 +105,7 @@ async def test_rejection_and_claim_expiry_penalties_also_appear(
     runtime = init_integration.runtime_data
     anna = await runtime.members.async_create_item({"name": "Anna"})
 
-    await runtime.completions.async_add_entry(
+    await runtime.coordinator.completions.async_add_entry(
         task_id=MANUAL_POINTS_TASK_ID,
         period_key=dt_util.utcnow().date().isoformat(),
         member_id=anna["id"],
@@ -113,7 +113,7 @@ async def test_rejection_and_claim_expiry_penalties_also_appear(
         task_name="Nicht freigegeben: Zimmer aufräumen",
         note="Bett noch nicht gemacht",
     )
-    await runtime.completions.async_add_entry(
+    await runtime.coordinator.completions.async_add_entry(
         task_id=MANUAL_POINTS_TASK_ID,
         period_key=dt_util.utcnow().date().isoformat(),
         member_id=anna["id"],
@@ -147,7 +147,7 @@ async def test_bonus_and_correction_sentinels_stay_excluded(
     anna = await runtime.members.async_create_item({"name": "Anna"})
 
     for task_id in (MILESTONE_BONUS_1_TASK_ID, POINTS_CORRECTION_TASK_ID, STREAK_BONUS_TASK_ID):
-        await runtime.completions.async_add_entry(
+        await runtime.coordinator.completions.async_add_entry(
             task_id=task_id,
             period_key=dt_util.utcnow().date().isoformat(),
             member_id=anna["id"],

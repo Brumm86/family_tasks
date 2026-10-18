@@ -258,6 +258,8 @@ async def test_state_trigger_auto_completes_when_sensor_normalizes(
     hass.states.async_set("binary_sensor.bin_full", "off")
     await hass.async_block_till_done()
 
+    await runtime.coordinator.async_refresh()
+
     assert runtime.trigger_state.get(task["id"]) is None
     assert runtime.coordinator.data.tasks[task["id"]].status == TASK_STATUS_IDLE
     assert runtime.coordinator.data.members[anna["id"]].points_today == 5
@@ -304,6 +306,8 @@ async def test_numeric_state_trigger_auto_completes_crossing_back(
     hass.states.async_set("sensor.bin_level", "50")
     await hass.async_block_till_done()
 
+    await runtime.coordinator.async_refresh()
+
     assert runtime.trigger_state.get(task["id"]) is None
     assert runtime.coordinator.data.members[anna["id"]].points_today == 5
 
@@ -326,9 +330,14 @@ async def test_auto_complete_on_normalize_skips_parent_confirmation_for_child(
     hass.states.async_set("binary_sensor.bin_full", "off")
     await hass.async_block_till_done()
 
+    await runtime.coordinator.async_refresh()
+
     status = runtime.coordinator.data.tasks[task["id"]]
     assert status.status == TASK_STATUS_IDLE
-    assert status.last_completed_by == timmy["id"]
+    # An idle trigger task no longer reports its last completion on the status
+    # (no open period), so check the completion log directly.
+    entries = [e for e in runtime.coordinator.completions.entries if e["task_id"] == task["id"]]
+    assert [e["completed_by_member_id"] for e in entries] == [timmy["id"]]
     assert runtime.coordinator.data.members[timmy["id"]].points_today == 5
     assert _find_confirmation_task(runtime, task["id"]) is None
 

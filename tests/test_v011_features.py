@@ -9,14 +9,14 @@
 - Every successful redemption (`family_tasks/reward_redemption/redeem`) fires
   a new `family_tasks_reward_redeemed` event on the event bus (see
   EVENT_REWARD_REDEEMED in const.py), carrying member_id/member_name/
-  reward_id/reward_name/points_cost/screen_time_minutes - this is the
+  reward_id/reward_name/coin_cost/screen_time_minutes - this is the
   integration's extension point for a household automation to react
   immediately (e.g. adding Google Family Link screen time for the redeeming
   child), instead of the integration calling a specific automation entity_id
   directly. The event fires for every redemption, not just screen-time ones;
   screen_time_minutes is simply None when the reward didn't set one.
 - The redemption record itself denormalizes screen_time_minutes (like it
-  already did for reward_name/points_cost) so history stays meaningful even
+  already did for reward_name/coin_cost) so history stays meaningful even
   if the catalog item's value later changes.
 """
 
@@ -29,7 +29,7 @@ async def _client_for_new_user(hass, hass_ws_client, *, is_admin: bool, name: st
     """Create a fresh HA user (admin or not) and return a connected ws client."""
     group_ids = [GROUP_ID_ADMIN] if is_admin else []
     user = await hass.auth.async_create_user(name, group_ids=group_ids)
-    refresh_token = await hass.auth.async_create_refresh_token(user)
+    refresh_token = await hass.auth.async_create_refresh_token(user, client_id="https://example.com")
     access_token = hass.auth.async_create_access_token(refresh_token)
     client = await hass_ws_client(hass, access_token)
     return user, client
@@ -56,7 +56,7 @@ async def test_reward_can_set_screen_time_minutes(hass, init_integration, hass_w
         {
             "type": "family_tasks/reward/create",
             "name": "Extra Bildschirmzeit",
-            "points_cost": 5,
+            "coin_cost": 5,
             "screen_time_minutes": 30,
         }
     )
@@ -72,7 +72,7 @@ async def test_reward_screen_time_minutes_absent_by_default(
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=True)
 
     await client.send_json_auto_id(
-        {"type": "family_tasks/reward/create", "name": "Filmabend", "points_cost": 5}
+        {"type": "family_tasks/reward/create", "name": "Filmabend", "coin_cost": 5}
     )
     response = await client.receive_json()
 
@@ -102,7 +102,7 @@ async def test_reward_update_can_clear_screen_time_minutes(
 ) -> None:
     runtime = init_integration.runtime_data
     reward = await runtime.rewards.async_create_item(
-        {"name": "Extra Bildschirmzeit", "points_cost": 5, "screen_time_minutes": 30}
+        {"name": "Extra Bildschirmzeit", "coin_cost": 5, "screen_time_minutes": 30}
     )
 
     _, client = await _client_for_new_user(hass, hass_ws_client, is_admin=True)
@@ -134,11 +134,11 @@ async def test_redeeming_a_screen_time_reward_fires_event_with_minutes(
         {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
     )
     reward = await runtime.rewards.async_create_item(
-        {"name": "Extra Bildschirmzeit", "points_cost": 5, "screen_time_minutes": 20}
+        {"name": "Extra Bildschirmzeit", "coin_cost": 5, "screen_time_minutes": 20}
     )
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=10)
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=10, coin_value=10)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -159,7 +159,7 @@ async def test_redeeming_a_screen_time_reward_fires_event_with_minutes(
     assert data["member_name"] == "Anna"
     assert data["reward_id"] == reward["id"]
     assert data["reward_name"] == "Extra Bildschirmzeit"
-    assert data["points_cost"] == 5
+    assert data["coin_cost"] == 5
     assert data["screen_time_minutes"] == 20
 
     # Denormalized onto the redemption record itself too, like reward_name.
@@ -182,10 +182,10 @@ async def test_redeeming_a_non_screen_time_reward_still_fires_event(
     anna = await runtime.members.async_create_item(
         {"name": "Anna", "role": "child", "person_entity_id": "person.anna"}
     )
-    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "points_cost": 5})
-    task = await _add_task(runtime, member_ids=[anna["id"]], points=10)
+    reward = await runtime.rewards.async_create_item({"name": "Filmabend", "coin_cost": 5})
+    task = await _add_task(runtime, member_ids=[anna["id"]], points=10, coin_value=10)
     await runtime.coordinator.async_refresh()
-    await runtime.coordinator.async_complete_task(task["id"])
+    await runtime.coordinator.async_complete_task(task["id"], skip_confirmation=True)
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
@@ -220,7 +220,7 @@ async def test_no_event_fired_when_redemption_is_rejected(
     await runtime.members.async_create_item(
         {"name": "Ben", "role": "child", "person_entity_id": "person.ben"}
     )
-    reward = await runtime.rewards.async_create_item({"name": "Konsole", "points_cost": 1000})
+    reward = await runtime.rewards.async_create_item({"name": "Konsole", "coin_cost": 1000})
     await runtime.coordinator.async_refresh()
 
     user, client = await _client_for_new_user(hass, hass_ws_client, is_admin=False)
