@@ -10,8 +10,12 @@ All notable changes to Family Tasks are documented here. Format loosely follows 
 - **Fortschrittsbalken**: Die Schwelle erscheint als Zahl unter dem Balken, darüber ein Spotify-Symbol (grau, bei erreichter Schwelle grün). Nur bei gesetztem Wochenziel und nur für Kinder.
 - **Handyzeit-Blueprint**: neue optionale Eingänge `spotify_unlock_sensor` und `spotify_package`. Montags um 00:20 setzt das Blueprint über `familylink.set_app_daily_limit` die App auf „Immer erlaubt" (-2) oder normal (-1). Manuelle Änderungen werden am nächsten Montag überschrieben.
 
+### Fixed
+- **Aufgaben-Status-Sensor im Urlaubsmodus**: Solange eine Aufgabe pausiert war, warf der Sensor bei jedem Update einen `KeyError`, weil Home Assistant den Namen auch von nicht verfügbaren Entities liest. Der Name kommt jetzt aus dem zuletzt bekannten Wert.
+
 ### Tests
 - Neue `tests/test_v070_features.py`.
+- Bestehende Tests an aktuelle Home-Assistant-Versionen und den heutigen Funktionsumfang angepasst; Tests zu entfernten Funktionen (Punkte-Shop-Guthaben, punktbasierter Meilenstein-/Streak-Bonus, Geschwister-Einspringen, Aufgaben-Anlegen durch Kinder, Checklisten-Aufgabentyp) gelöscht. Die Suite läuft vollständig durch.
 
 ## [0.69.1] - 2026-10-16
 
