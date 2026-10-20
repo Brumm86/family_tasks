@@ -1187,6 +1187,12 @@
       this._pendingAwardPointsMemberId = null;
       this._pendingAwardPoints = 1;
       this._pendingAwardNote = "";
+      // v0.71: "Münzen vergeben" - gleiches Muster wie "Punkte vergeben"
+      // oben (immer nur eine Bestätigungszeile gleichzeitig, auch
+      // gegenüber "Punkte vergeben"). Siehe WS_API_COINS_AWARD in const.py.
+      this._pendingAwardCoinsMemberId = null;
+      this._pendingAwardCoins = 1;
+      this._pendingAwardCoinsNote = "";
       // v0.45: "Handyzeit heute - Berechnung" info dialog, opened by clicking
       // a member's Handyzeit badge within a "Wochenfortschritt" row (see
       // _openScreenTimeInfo/_renderProgressSection) - purely local, no
@@ -2149,6 +2155,7 @@
     // wie das Einlösen einer Belohnung oben (_selectReward/_confirmRedeem).
 
     _selectAwardPoints(memberId) {
+      this._pendingAwardCoinsMemberId = null;
       this._pendingAwardPointsMemberId = memberId;
       this._pendingAwardPoints = 1;
       this._pendingAwardNote = "";
@@ -2170,6 +2177,38 @@
       this._pendingAwardPointsMemberId = null;
       this._pendingAwardPoints = 1;
       this._pendingAwardNote = "";
+      this._render();
+    }
+
+    // --- Münzen vergeben (v0.71) ------------------------------------------
+    //
+    // Wie "Punkte vergeben" oben, nur für Münzen: Eltern können einem
+    // Mitglied Münzen geben oder (negative Zahl) abziehen - der Saldo sinkt
+    // dabei nie unter 0, das erzwingt das Backend (ws_award_coins).
+
+    _selectAwardCoins(memberId) {
+      this._pendingAwardPointsMemberId = null;
+      this._pendingAwardCoinsMemberId = memberId;
+      this._pendingAwardCoins = 1;
+      this._pendingAwardCoinsNote = "";
+      this._render();
+    }
+
+    _cancelAwardCoins() {
+      this._pendingAwardCoinsMemberId = null;
+      this._render();
+    }
+
+    async _confirmAwardCoins(memberId) {
+      const coins = Math.trunc(Number(this._pendingAwardCoins)) || 0;
+      if (!coins) return;
+      const msg = { type: "family_tasks/coins/award", member_id: memberId, coins };
+      const note = (this._pendingAwardCoinsNote || "").trim();
+      if (note) msg.note = note;
+      await this._callWS(msg);
+      this._pendingAwardCoinsMemberId = null;
+      this._pendingAwardCoins = 1;
+      this._pendingAwardCoinsNote = "";
       this._render();
     }
 
@@ -3908,6 +3947,7 @@
           // Bearbeiten/Löschen (Eltern-only, serverseitig zusätzlich über
           // ws_award_points erzwungen).
           const isPending = this._pendingAwardPointsMemberId === id;
+          const isPendingCoins = this._pendingAwardCoinsMemberId === id;
           return `
             <div class="row-wrap">
               <div class="row">
@@ -3918,6 +3958,7 @@
                 ${canManageMembers ? `
                 <div class="row-actions">
                   ${iconActionButton("award-points", "mdi:star-plus-outline", "Punkte vergeben", { dataset: `data-member-id="${id}"` })}
+                  ${iconActionButton("award-coins", "mdi:hand-coin-outline", "Münzen vergeben", { dataset: `data-member-id="${id}"` })}
                   ${iconActionButton("edit-member", "mdi:pencil", "Bearbeiten", { dataset: `data-member-id="${id}"` })}
                   ${iconActionButton("delete-member", "mdi:delete", "Löschen", { dataset: `data-member-id="${id}"`, extraClass: "danger" })}
                 </div>` : ""}
@@ -3932,6 +3973,17 @@
                 </label>
                 <button data-action="confirm-award-points" data-member-id="${id}" ${Number(this._pendingAwardPoints) ? "" : "disabled"}>Bestätigen</button>
                 <button type="button" class="link" data-action="cancel-award-points">Abbrechen</button>
+              </div>` : ""}
+              ${isPendingCoins ? `
+              <div class="confirm-row">
+                <label>Münzen (negativ zum Abziehen)
+                  <input type="number" step="1" data-action="award-coins-value" data-member-id="${id}" value="${esc(this._pendingAwardCoins ?? 1)}">
+                </label>
+                <label>Grund (optional)
+                  <input type="text" data-action="award-coins-note" data-member-id="${id}" placeholder="z. B. Taschengeld-Bonus" value="${esc(this._pendingAwardCoinsNote ?? "")}">
+                </label>
+                <button data-action="confirm-award-coins" data-member-id="${id}" ${Number(this._pendingAwardCoins) ? "" : "disabled"}>Bestätigen</button>
+                <button type="button" class="link" data-action="cancel-award-coins">Abbrechen</button>
               </div>` : ""}
             </div>`;
         })
@@ -4045,7 +4097,11 @@
         let maxPoints = -1;
         let leaderIds = [];
         for (const { id } of members) {
-          const wp = Number(this._pointsSensorForMember(id)?.attributes?.points_week ?? 0);
+          // v0.71: verglichen wird, was tatsächlich verdient wurde (inkl.
+          // schon an die Folgewoche weitergegebenem Überschuss), nicht die
+          // an der Münz-Schwelle 2 gedeckelten Wochenpunkte.
+          const attrs = this._pointsSensorForMember(id)?.attributes;
+          const wp = Number(attrs?.points_week_earned ?? attrs?.points_week ?? 0);
           if (wp > maxPoints) {
             maxPoints = wp;
             leaderIds = [id];
@@ -4228,24 +4284,16 @@
                     ? " goal-reached"
                     : "";
               const pointsLine = goal > 0 ? `${esc(weekPoints)} / ${esc(goal)} Pkt. diese Woche` : `${esc(weekPoints)} Pkt. diese Woche`;
-              // v0.36: ein Streak kann jetzt für die 150%- und die
-              // 200%-Marke unabhängig voneinander laufen - siehe
-              // _streakWeeksFor.
-              //
-              // v0.52: statt als Text ("🔥 X Wochen (150%)") unter der
-              // Zeile wird der Streak-Bonus jetzt als eigenes Flammen-Badge
-              // direkt am Balken dargestellt - an der 200%-Position wie die
-              // Meilenstein-Münzbadges oben, nur unterhalb des Balkens statt
-              // oberhalb, damit sich beide nicht überlappen. Details
-              // (wievielte Woche in Folge, Bonushöhe) stehen weiterhin im
-              // title-Tooltip des Badges, ganz wie beim Meilenstein-Badge.
-              // v0.63: nur noch die eine 200%-Marke (die alte unabhängige
-              // 150%-Marke ist entfallen), Bonushöhe abhängig davon, ob die
-              // laufende Serie schon die 3-Wochen-Marke erreicht hat.
-              const streakWeeksNow = this._streakWeeksFor(id);
-              const streakBonusNow = streakWeeksNow >= 3 ? streak.bonus3Weeks : streak.bonus2Weeks;
-              const streakBadgesHtml = streakBonusNow > 0 && streakWeeksNow > 0
-                ? `<div class="bar-streak-badge" style="right:0" title="${esc(`${streakWeeksNow}. Woche in Folge ab ${milestone200Points} Pkt. → +${coinsLabel(streakBonusNow)}/Woche`)}"><span class="flame">🔥</span>${esc(streakWeeksNow)}</div>`
+              // v0.71: Übertrag - Punkte oberhalb der zweiten Münz-Schwelle
+              // zählen nicht mehr für diese Woche, sondern werden zu Beginn
+              // der nächsten Woche gutgeschrieben (siehe CompletionLogStore im
+              // Backend). Hier als Badge unter dem Balken, an der Stelle, an
+              // der bis v0.70 das Streak-Flammen-Badge saß (der Streak-Bonus
+              // steht seit v0.71 nur noch als Punkte + Münzzahl neben dem
+              // Namen, siehe streakDotsHtml).
+              const carryPoints = Number(sensor?.attributes?.points_carryover ?? 0);
+              const carryBadgeHtml = carryPoints > 0
+                ? `<div class="bar-carry-badge" style="right:0" title="${esc(`${carryPoints} Pkt. über der zweiten Münz-Schwelle - werden zu Beginn der nächsten Woche gutgeschrieben`)}">↪ +${esc(carryPoints)} Pkt. nächste Woche</div>`
                 : "";
               // v0.37: no longer shows the Münzen balance here - coins now
               // persist independently of the calendar week (see
@@ -4256,7 +4304,7 @@
               // each member's dedicated Münzen sensor. Just the remaining
               // goal distance - and only rendered at all when there's
               // actually something to say. v0.52: no longer also carries
-              // the streak text (moved to streakBadgesHtml above).
+              // the streak text (moved to streakDotsHtml above).
               const goalNote = goal > 0 && !goalReached
                 ? `noch ${esc(goal - weekPoints)} Pkt. bis zum Wochenziel`
                 : "";
@@ -4311,10 +4359,26 @@
               // keine Konkurrenz.
               const activeStreak = this._activeStreakTierFor(id);
               const streakDotThresholds = [1, 2, 3];
+              // v0.71: neben den drei Punkten steht (mit Münzsymbol) die
+              // Anzahl der Münzen, die der Streak-Bonus am Wochenende
+              // gutschreibt, wenn die Woche die zweite Münz-Schwelle
+              // erreicht: 2. Woche in Folge = Betrag "2 Wochen", ab der 3.
+              // Woche = Betrag "3 Wochen", davor (1. Woche) nichts. Gedimmt,
+              // solange die Schwelle diese Woche noch nicht erreicht ist.
+              // Ersetzt das bis v0.70 zusätzliche Flammen-Badge am Balken.
+              const streakNextWeek = activeStreak.currentWeeks + 1;
+              const streakWeekendCoins = streakNextWeek === 2
+                ? streak.bonus2Weeks
+                : streakNextWeek >= 3
+                  ? streak.bonus3Weeks
+                  : 0;
+              const streakCoinsHtml = activeStreak.enabled && streakWeekendCoins > 0
+                ? `<span class="streak-coins${milestone200Reached ? " reached" : ""}" title="${esc(`Am Wochenende +${coinsLabel(streakWeekendCoins)} Streak-Bonus (${streakNextWeek}. Woche in Folge)${milestone200Points ? `, sofern ${milestone200Points} Pkt. erreicht werden` : ""}`)}"><span class="coin">🪙</span>${esc(streakWeekendCoins)}</span>`
+                : "";
               const streakDotsHtml = activeStreak.enabled
                 ? `<span class="streak-dots" data-action="open-streak-info" data-member-id="${id}" role="button" tabindex="0" title="Streak-Bonus - Details antippen">${streakDotThresholds
                     .map((threshold, index) => `<span class="streak-dot${activeStreak.currentWeeks >= threshold ? ` streak-dot-${index + 1}` : ""}"></span>`)
-                    .join("")}</span>`
+                    .join("")}${streakCoinsHtml}</span>`
                 : "";
               return `
                 <div class="row clickable" data-action="open-member-completions" data-member-id="${id}" role="button" tabindex="0">
@@ -4333,7 +4397,7 @@
                       ${scaleLabelsHtml}
                       ${milestoneBadgesHtml}
                       ${spotifyBadgeHtml}
-                      ${streakBadgesHtml}
+                      ${carryBadgeHtml}
                     </div>
                     ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
                     ${screenTimeBadge}
@@ -4353,7 +4417,7 @@
       //
       // v0.52: dieselbe Umstellung jetzt auch für den Streak-Bonus - die
       // frühere Text-Legende ("Streak-Bonus: 150%: 2× in Folge → +X
-      // Münzen") entfällt ersatzlos, siehe streakBadgesHtml oben (pro
+      // Münzen") entfällt ersatzlos, siehe streakDotsHtml oben (pro
       // Mitglied direkt am Balken statt einmal zentral als Text).
 
       // v0.53: permanentes Info-Symbol neben der Überschrift, das denselben
@@ -5355,7 +5419,8 @@
            bleibt unverändert 6px hoch und "overflow: hidden" (für die
            abgerundete .bar-fill-Ecke), die Badges schweben stattdessen
            oberhalb davon in diesem eigenen, nicht abgeschnittenen Wrapper. */
-        /* v0.52: padding-bottom added to fit .bar-streak-badge below the
+        /* v0.52: padding-bottom added to fit .bar-carry-badge (v0.71; bis
+           v0.70 das Streak-Badge) below the
            bar, symmetric to the top padding .bar-milestone-badge already
            uses above it. */
         .bar-wrap { position: relative; padding-top: 15px; padding-bottom: 32px; }
@@ -5482,7 +5547,7 @@
            Reihen an derselben 150%/200%-Position nicht überlappen. Immer in
            der "erreicht"-Farbe (nie ein neutraler Zustand) - anders als das
            Meilenstein-Badge wird dieses Badge überhaupt nur gerendert,
-           solange der Streak diese Woche aktiv läuft (siehe streakBadgesHtml
+           solange der Streak diese Woche aktiv läuft (siehe streakDotsHtml
            in _renderProgressSection), es gibt also keinen "noch nicht
            erreicht"-Zustand, den es von einem "erreicht"-Zustand optisch zu
            unterscheiden gäbe. */
@@ -5492,12 +5557,11 @@
            sichtbar sein", explizite Nutzeranfrage. Der dünne 1px-Rand auf
            reinem Kartenhintergrund ging bisher leicht im übrigen
            Balken-Trubel (Meilenstein-Badges, Marken) unter. */
-        .bar-streak-badge { position: absolute; bottom: 0; display: inline-flex; align-items: center;
-                             gap: 1px; font-size: 0.75em; font-weight: 700; line-height: 1.4;
-                             color: var(--primary-text-color); background: rgba(255, 111, 0, 0.16);
-                             border: 2px solid #ff6f00; border-radius: 8px;
-                             padding: 0 5px; white-space: nowrap; cursor: default; }
-        .bar-streak-badge .flame { font-size: 1.2em; }
+        .bar-carry-badge { position: absolute; bottom: 0; display: inline-flex; align-items: center;
+                            font-size: 0.75em; font-weight: 700; line-height: 1.4;
+                            color: var(--primary-text-color); background: rgba(184, 134, 11, 0.16);
+                            border: 2px solid #b8860b; border-radius: 8px;
+                            padding: 0 5px; white-space: nowrap; cursor: default; }
         /* v0.52: "Wochensieger"-Krone neben dem Namen in der
            Wochenfortschritt-Zeile - siehe topScorerBadge in
            _renderProgressSection. */
@@ -5512,7 +5576,12 @@
            gediehen ist - Punkt 3 markiert den Eintritt in die dauerhaft
            verdoppelte Bonus-Stufe (v0.54: keine letzte/gedeckelte
            Auszahlung mehr, siehe _renderStreakInfo). */
-        .streak-dots { display: inline-flex; gap: 3px; margin-left: 4px; vertical-align: 1px; cursor: pointer; }
+        .streak-dots { display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; vertical-align: 1px; cursor: pointer; }
+        /* v0.71: Münzen, die der Streak-Bonus am Wochenende gutschreibt -
+           gedimmt, bis die zweite Münz-Schwelle diese Woche erreicht ist. */
+        .streak-coins { display: inline-flex; align-items: center; gap: 1px; margin-left: 3px;
+                        font-size: 0.8em; font-weight: 700; opacity: 0.6; }
+        .streak-coins.reached { opacity: 1; }
         .streak-dots:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
         /* v0.56: etwas größer (7px -> 9px) mit einem dünnen, kartenfarbenen
            Rand für Kontur gegen jeden Hintergrund/jedes Theme, sowie höhere
@@ -5660,6 +5729,13 @@
           this._cancelAwardPoints();
         } else if (action === "confirm-award-points") {
           if (this._isAdmin() && !this._isChildUser()) this._confirmAwardPoints(el.dataset.memberId)?.catch(() => {});
+        } else if (action === "award-coins") {
+          // v0.71: wie award-points - das Backend erzwingt es zusätzlich.
+          if (this._isAdmin() && !this._isChildUser()) this._selectAwardCoins(el.dataset.memberId);
+        } else if (action === "cancel-award-coins") {
+          this._cancelAwardCoins();
+        } else if (action === "confirm-award-coins") {
+          if (this._isAdmin() && !this._isChildUser()) this._confirmAwardCoins(el.dataset.memberId)?.catch(() => {});
         }
         else if (action === "toggle-hide-not-due") {
           this._hideNotDue = !this._hideNotDue;
@@ -5876,6 +5952,19 @@
         const awardNoteEl = ev.target.closest('[data-action="award-points-note"]');
         if (awardNoteEl) {
           this._pendingAwardNote = awardNoteEl.value;
+          this._render();
+          return;
+        }
+        // v0.71: "Münzen vergeben" - gleiches Muster wie oben.
+        const awardCoinsEl = ev.target.closest('[data-action="award-coins-value"]');
+        if (awardCoinsEl) {
+          this._pendingAwardCoins = Math.trunc(Number(awardCoinsEl.value)) || 0;
+          this._render();
+          return;
+        }
+        const awardCoinsNoteEl = ev.target.closest('[data-action="award-coins-note"]');
+        if (awardCoinsNoteEl) {
+          this._pendingAwardCoinsNote = awardCoinsNoteEl.value;
           this._render();
           return;
         }

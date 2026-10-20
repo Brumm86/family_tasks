@@ -104,11 +104,17 @@ async def test_parent_rejecting_returns_task_to_pending(hass, init_integration) 
 
     status = runtime.coordinator.data.tasks[task["id"]]
     assert status.status == TASK_STATUS_PENDING
-    # An explicit rejection costs the child a small penalty (v0.2x).
-    assert (
-        runtime.coordinator.data.members[timmy["id"]].points_today
-        == -CONFIRMATION_REJECTION_PENALTY_POINTS
-    )
+    # An explicit rejection costs the child a small penalty (v0.2x) - but
+    # since v0.71 points never drop below 0, so with nothing earned yet the
+    # penalty is logged as 0 deducted points (the requested amount is kept).
+    assert runtime.coordinator.data.members[timmy["id"]].points_today == 0
+    penalty_entry = [
+        e
+        for e in runtime.coordinator.completions.entries
+        if e["completed_by_member_id"] == timmy["id"] and e.get("points_requested")
+    ][-1]
+    assert penalty_entry["points_requested"] == -CONFIRMATION_REJECTION_PENALTY_POINTS
+    assert penalty_entry["points_awarded"] == 0
     assert confirmation_task["id"] not in runtime.tasks.data
 
     # The child can raise a fresh claim for the same occurrence.

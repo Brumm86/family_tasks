@@ -113,6 +113,7 @@ from .storage import (
     TopScorerBonusStateStore,
     TriggerStateStore,
     VacationModeStateStore,
+    week_bounds,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -391,6 +392,14 @@ class MemberSummaryData:
     # the bonus is unconfigured (both amounts <= 0) or the member hasn't
     # reached the checkpoint in their most recently judged week.
     streak_weeks_200: int = 0
+    # v0.71: points above the second coin threshold that this week already
+    # passed on to the *next* week (a pending carry-over, not yet part of
+    # points_week) - shown on the progress bar.
+    points_carryover: int = 0
+    # v0.71: what the member actually earned this week - points_week without
+    # the points carried in from last week, plus the overflow already passed
+    # on to next week. The basis of the (live) Wochensieger comparison.
+    points_week_earned: int = 0
 
 
 @dataclass(slots=True)
@@ -1498,6 +1507,10 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 member_id, datetime.min.replace(tzinfo=dt_util.UTC)
             )
             points_week = self.completions.points_since(member_id, start_of_week)
+            points_carryover = self.completions.pending_carryover(member_id)
+            points_week_earned = self.completions.earned_between(
+                member_id, start_of_week, week_bounds(local_now)[1]
+            )
             # v0.36: coins_available replaces the old spendable_points minus
             # redeemed_points computation entirely - self.coin_ledger.balance
             # nets out every credit *and* every past redemption debit on its
@@ -1596,6 +1609,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 streak_weeks_200=(self.streak_bonus_state.get(member_id, "200") or {}).get(
                     "streak_count", 0
                 ),
+                points_carryover=points_carryover,
+                points_week_earned=points_week_earned,
             )
 
         milestone_150_bonus_coins = DEFAULT_MILESTONE_150_BONUS_COINS
@@ -3024,8 +3039,11 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 and not member.get(CONF_MEMBER_PAUSED, False)
             ]
             if len(eligible_member_ids) >= 2:
+                # v0.71: judged on what was actually earned that week (before
+                # the cap at the second coin threshold), so two members who
+                # both reached the cap can still be told apart.
                 week_points = {
-                    member_id: self.completions.points_between(
+                    member_id: self.completions.earned_between(
                         member_id, cursor, cursor + timedelta(days=7)
                     )
                     for member_id in eligible_member_ids

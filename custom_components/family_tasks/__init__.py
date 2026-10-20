@@ -28,7 +28,9 @@ from .const import (
     CARD_URL_PATH,
     CONF_MEMBER_NOTIFY_SERVICE,
     CONF_VACATION_MODE_DEFAULT,
+    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
     DEFAULT_VACATION_MODE,
+    DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
     DOMAIN,
     EVENT_TASK_ASSIGNED,
     PLATFORMS,
@@ -38,6 +40,7 @@ from .const import (
     SERVICE_RESET_POINTS,
     SERVICE_SKIP_TASK,
     SERVICE_TOGGLE_SUBTASK,
+    resolve_progress_thresholds,
 )
 from .battery import BatteryStateListener
 from .coordinator import FamilyTasksCoordinator
@@ -159,6 +162,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     # available point balance (see ws_redeem_reward in storage.py).
     completions = CompletionLogStore(hass)
     await completions.async_load()
+
+    # v0.71: points above the second coin threshold do not count for the
+    # current week but are carried over to the next one - the store asks for
+    # the cap on every new entry, so a changed option applies immediately.
+    # 0 (no weekly goal configured) means no cap.
+    def _week_points_cap() -> int:
+        goal = entry.options.get(
+            CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+        )
+        if goal <= 0:
+            return 0
+        return resolve_progress_thresholds(entry.options, goal)[1][1]
+
+    completions.week_cap_provider = _week_points_cap
 
     # v0.36: created before the websocket API too, same reasoning as
     # completions above - ws_redeem_reward needs it to work out a member's

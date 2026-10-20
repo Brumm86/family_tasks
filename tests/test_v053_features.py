@@ -78,6 +78,14 @@ async def test_manual_deduction_without_note_uses_generic_label(
     """A manual deduction with no note falls back to the existing generic label."""
     runtime = init_integration.runtime_data
     anna = await runtime.members.async_create_item({"name": "Anna"})
+    # Since v0.71 points can't go below 0, so there must be something to deduct.
+    await runtime.coordinator.completions.async_add_entry(
+        task_id=MANUAL_POINTS_TASK_ID,
+        period_key=dt_util.utcnow().date().isoformat(),
+        member_id=anna["id"],
+        points_awarded=10,
+        task_name="Startguthaben",
+    )
 
     client = await hass_ws_client(hass)
     await client.send_json_auto_id(
@@ -90,7 +98,9 @@ async def test_manual_deduction_without_note_uses_generic_label(
         {"type": WS_API_MEMBER_WEEKLY_COMPLETIONS, "member_id": anna["id"]}
     )
     response = await client.receive_json()
-    completions = response["result"]["completions"]
+    completions = [
+        c for c in response["result"]["completions"] if c["task_name"] != "Startguthaben"
+    ]
     assert len(completions) == 1
     assert completions[0]["task_name"] == "Punkte abgezogen"
     assert completions[0]["points_awarded"] == -2
@@ -105,6 +115,14 @@ async def test_rejection_and_claim_expiry_penalties_also_appear(
     runtime = init_integration.runtime_data
     anna = await runtime.members.async_create_item({"name": "Anna"})
 
+    # Since v0.71 points can't go below 0, so there must be something to deduct.
+    await runtime.coordinator.completions.async_add_entry(
+        task_id=MANUAL_POINTS_TASK_ID,
+        period_key=dt_util.utcnow().date().isoformat(),
+        member_id=anna["id"],
+        points_awarded=10,
+        task_name="Startguthaben",
+    )
     await runtime.coordinator.completions.async_add_entry(
         task_id=MANUAL_POINTS_TASK_ID,
         period_key=dt_util.utcnow().date().isoformat(),
@@ -128,6 +146,7 @@ async def test_rejection_and_claim_expiry_penalties_also_appear(
     response = await client.receive_json()
     task_names = {c["task_name"] for c in response["result"]["completions"]}
     assert task_names == {
+        "Startguthaben",
         "Nicht freigegeben: Zimmer aufräumen",
         "Reservierung abgelaufen: Geschirrspüler ausräumen",
     }

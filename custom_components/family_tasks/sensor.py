@@ -197,6 +197,11 @@ class FamilyTasksMemberPointsSensor(
             "points_today": member.points_today,
             "points_week": member.points_week,
             "points_month": member.points_month,
+            # v0.71: pending carry-over to next week (points above the second
+            # coin threshold) and the week's actual earnings - see
+            # MemberSummaryData.points_carryover/points_week_earned.
+            "points_carryover": member.points_carryover,
+            "points_week_earned": member.points_week_earned,
             "person_entity_id": member.person_entity_id,
             # v0.36: this member's current "Münzen" balance - also the
             # native state of the dedicated FamilyTasksMemberCoinsSensor

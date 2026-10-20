@@ -308,6 +308,8 @@ COIN_REASON_STREAK_200: Final = "streak_200"
 COIN_REASON_TOP_SCORER: Final = "top_scorer"
 # A shop redemption (negative amount) - see ws_redeem_reward in storage.py.
 COIN_REASON_REDEMPTION: Final = "redemption"
+# v0.71: a parent manually giving (or deducting) coins - see WS_API_COINS_AWARD.
+COIN_REASON_MANUAL: Final = "manual"
 # v0.44: a completed task's own "Münzwert" (task.get("coin_value", 0)),
 # credited straight to CoinLedgerStore the moment the completion is logged -
 # see FamilyTasksCoordinator.async_complete_task/_async_finalize_confirmation
@@ -351,6 +353,14 @@ STREAK_BONUS_TASK_ID: Final = "__streak_bonus__"
 # Never itself credits coins directly - see COIN_REASON_TASK_COMPLETION
 # above for the only thing that does since v0.44.
 MANUAL_POINTS_TASK_ID: Final = "__manual_points_award__"
+
+# v0.71: sentinel task_id for the "Übertrag" log entry that carries points
+# earned above the second coin threshold (CONF_COIN_THRESHOLD_2_POINTS) over
+# to the next calendar week - see CompletionLogStore.async_add_entry in
+# storage.py. The entry is dated at the start of that next week (so it only
+# starts to count once that week begins) and, like MANUAL_POINTS_TASK_ID,
+# counts normally toward points_week/points_total once effective.
+CARRYOVER_TASK_ID: Final = "__week_carryover__"
 
 # v0.29: household-wide weekly point goal backing each child's
 # "Wochenfortschritt" progress bar (replaces the flat Bestenliste ranking -
@@ -1021,6 +1031,13 @@ EVENT_TASK_OVERDUE: Final = f"{DOMAIN}_task_overdue"
 # "_member_role_for_user != MEMBER_ROLE_CHILD" guard used throughout
 # storage.py), see ws_award_points in storage.py.
 WS_API_POINTS_AWARD: Final = f"{DOMAIN}/points/award"
+
+# v0.71: the coin counterpart of WS_API_POINTS_AWARD - lets a parent give a
+# member coins (or, with a negative amount, deduct them; the balance never
+# drops below 0) independent of any task or reward. Appends a
+# COIN_REASON_MANUAL entry to the coin ledger. Parent-only, see
+# ws_award_coins in storage.py.
+WS_API_COINS_AWARD: Final = f"{DOMAIN}/coins/award"
 
 # --- Coordinator --------------------------------------------------------------
 

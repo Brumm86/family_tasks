@@ -2,6 +2,21 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.71.0] - 2026-10-20
+
+### Added
+- **Münzen manuell vergeben**: Eltern können einem Mitglied in der Mitgliederliste der Karte („Münzen vergeben“, neben „Punkte vergeben“) Münzen geben oder - mit negativer Zahl - abziehen, optional mit Grund. Neuer Websocket-Befehl `family_tasks/coins/award` (nur Eltern, ein „Kind“-Konto wird auch mit Admin-Rechten abgelehnt). Der Eintrag landet als `manual` im Münz-Ledger. Ein Abzug ist auf den vorhandenen Saldo begrenzt; ist nichts abzuziehen, wird die Anfrage abgelehnt.
+- **Übertrag in die nächste Woche**: Punkte oberhalb der zweiten Münz-Schwelle zählen nicht mehr für die laufende Woche. Die Wochenpunkte stoppen an der Schwelle; der Überschuss wird als eigener Log-Eintrag („Übertrag aus der Vorwoche“) auf den Beginn der nächsten Woche (Montag 00:00 Ortszeit) datiert und zählt ab dann ganz normal als Wochenpunkte (Meilenstein-, Streak-, Spotify- und Malus-Auswertung eingeschlossen). Ohne Wochenziel gibt es keinen Deckel. Der Übertrag wird nicht auf mehrere Folgewochen verteilt: Ist er größer als die Schwelle, beginnt die nächste Woche entsprechend höher, und neu verdiente Punkte laufen dort sofort weiter in die Woche danach.
+- **Fortschrittsanzeige**: Ein Badge unter dem Balken zeigt den vorgemerkten Übertrag („↪ +N Pkt. nächste Woche“). Der Punkte-Sensor hat dafür die neuen Attribute `points_carryover` (vorgemerkter Übertrag) und `points_week_earned` (in der Woche tatsächlich verdiente Punkte, ohne hereingetragenen und mit weitergegebenem Überschuss).
+
+### Changed
+- **Punkte können nicht mehr negativ werden**: Ein Abzug (manuell, Ablehnungs- oder Reservierungs-Abzug) wird auf die aktuellen Wochenpunkte begrenzt. Der Log-Eintrag bleibt erhalten (mit den tatsächlich abgezogenen Punkten, ggf. 0, und der angefragten Menge in `points_requested`), es entsteht aber keine „versteckte Schuld“. Zusätzlich liefern `points_today`/`points_week`/`points_month`/`points_total` und die Vorwochenpunkte nie weniger als 0 (auch bei bereits vorhandenen negativen Altdaten). Ein Abzug wirkt auf die Punkte der laufenden Woche, nicht auf einen bereits vorgemerkten Übertrag.
+- **Streak-Bonus am Balken**: Das Flammen-Badge am Ende des Balkens entfällt. Stattdessen steht neben den drei Streak-Punkten ein Münzsymbol mit der Anzahl der Münzen, die der Streak-Bonus am Wochenende gutschreibt (2. Woche in Folge = Betrag „2 Wochen“, ab der 3. Woche = Betrag „3 Wochen“; in der 1. Woche nichts). Gedimmt, solange die zweite Münz-Schwelle in dieser Woche noch nicht erreicht ist.
+- **Wochensieger-Bonus** bewertet, was in der Woche tatsächlich verdient wurde (inkl. des in die Folgewoche weitergegebenen Überschusses, ohne hereingetragenen Übertrag), damit zwei Kinder an der Obergrenze nicht zwangsläufig gleichauf liegen. Die Krone in der Karte folgt derselben Rechnung.
+
+### Tests
+- Neue `tests/test_v071_features.py`. `test_v053_features.py` und `test_child_confirmation.py` angepasst, weil sie negative Punktstände vorausgesetzt hatten.
+
 ## [0.70.0] - 2026-10-18
 
 ### Added

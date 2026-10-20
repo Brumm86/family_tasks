@@ -11,7 +11,8 @@ StorageCollection (there is nothing to edit, only to append and prune).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -28,6 +29,8 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CARRYOVER_TASK_ID,
+    COIN_REASON_MANUAL,
     COIN_REASON_REDEMPTION,
     CONF_COMPLETION_BUTTON_ENTITY_ID,
     CONF_MEMBER_NOTIFY_SERVICE,
@@ -91,6 +94,7 @@ from .const import (
     TASK_TRIGGER_STATE,
     VACATION_BEHAVIOR_SHOW,
     VACATION_BEHAVIORS,
+    WS_API_COINS_AWARD,
     WS_API_FAVORITE_CLAIM,
     WS_API_FAVORITE_INSTANTIATE,
     WS_API_FAVORITE_LIST_CLAIMABLE,
@@ -1141,6 +1145,18 @@ AWARD_POINTS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     }
 )
 
+# v0.71 - see WS_API_COINS_AWARD in const.py. "coins" may be negative (a
+# deduction, limited to the member's current balance); zero is rejected in the
+# handler. Same sanity range as AWARD_POINTS_SCHEMA.
+AWARD_COINS_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_COINS_AWARD,
+        vol.Required("member_id"): str,
+        vol.Required("coins"): vol.All(int, vol.Range(min=-100000, max=100000)),
+        vol.Optional("note"): str,
+    }
+)
+
 # v0.49 - see WS_API_FAVORITE_CLAIM in const.py.
 CLAIM_FAVORITE_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     {
@@ -1532,6 +1548,68 @@ def async_setup_websocket_api(
     websocket_api.async_register_command(hass, WS_API_POINTS_AWARD, ws_award_points, AWARD_POINTS_SCHEMA)
 
     @websocket_api.async_response
+    async def ws_award_coins(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Let a parent give (or, with a negative amount, deduct) coins for a member (v0.71).
+
+        Coin counterpart of ws_award_points: independent of any task or
+        reward, parent-only (same "not a child, regardless of HA admin flag"
+        guard), appended to the coin ledger as a COIN_REASON_MANUAL entry
+        with the optional note. A deduction is limited to the member's
+        current balance so the balance can never drop below 0; if there is
+        nothing to deduct the request is rejected with an error.
+        """
+        role = _member_role_for_user(hass, members, connection.user)
+        if role == MEMBER_ROLE_CHILD:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Mitglieder mit der Rolle 'Kind' dürfen keine Münzen vergeben.",
+            )
+            return
+
+        if msg["member_id"] not in members.data:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Familienmitglied nicht gefunden."
+            )
+            return
+
+        coins = msg["coins"]
+        if coins == 0:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, "Münzanzahl darf nicht 0 sein."
+            )
+            return
+        if coins < 0:
+            balance = coin_ledger.balance(msg["member_id"])
+            if balance <= 0:
+                connection.send_error(
+                    msg["id"],
+                    websocket_api.ERR_INVALID_FORMAT,
+                    "Das Mitglied hat keine Münzen, die abgezogen werden könnten.",
+                )
+                return
+            coins = -min(-coins, balance)
+
+        note = (msg.get("note") or "").strip() or None
+        entry_item = await coin_ledger.async_add_entry(
+            member_id=msg["member_id"],
+            amount=coins,
+            reason=COIN_REASON_MANUAL,
+            note=note or ("Münzen erteilt" if coins > 0 else "Münzen abgezogen"),
+        )
+
+        runtime_data = getattr(entry, "runtime_data", None) if entry is not None else None
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is not None:
+            await coordinator.async_request_refresh()
+
+        connection.send_result(msg["id"], entry_item)
+
+    websocket_api.async_register_command(hass, WS_API_COINS_AWARD, ws_award_coins, AWARD_COINS_SCHEMA)
+
+    @websocket_api.async_response
     async def ws_create_own_task(
         hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
     ) -> None:
@@ -1700,6 +1778,10 @@ def async_setup_websocket_api(
                 continue
             completed_at = dt_util.parse_datetime(entry.get("completed_at", ""))
             if completed_at is None or completed_at < start_of_week:
+                continue
+            # v0.71: a carry-over entry is dated at the start of the *next*
+            # week - it only shows up here once that week has begun.
+            if completed_at > dt_util.utcnow():
                 continue
             # Prefer the denormalized name captured at completion time (v0.22)
             # - a "once" task is deleted the moment it's completed, so an
@@ -2090,11 +2172,49 @@ async def async_create_reward_redemptions_collection(
     return reward_redemptions
 
 
+def week_bounds(local_now: datetime) -> tuple[datetime, datetime]:
+    """Return (start of this week, start of next week) as UTC datetimes (v0.71).
+
+    ``local_now`` is a timezone-aware local datetime (``dt_util.now()``).
+    The start of the week is computed exactly like
+    FamilyTasksCoordinator._async_update_data does (Monday 00:00 local); the
+    start of the next week is derived from the local *date* rather than by
+    adding 7 x 24 h, so it stays Monday 00:00 local across a DST change.
+    """
+    start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
+    start_of_week = start_of_today - timedelta(days=local_now.weekday())
+    next_monday: date = local_now.date() - timedelta(days=local_now.weekday()) + timedelta(days=7)
+    return start_of_week, dt_util.as_utc(dt_util.start_of_local_day(next_monday))
+
+
+def _week_key(moment: datetime) -> str:
+    """ISO date of the local Monday a week boundary ``moment`` stands for.
+
+    Tolerates a boundary that is an hour off because of a DST change by
+    looking at the local date twelve hours later.
+    """
+    return dt_util.as_local(moment + timedelta(hours=12)).date().isoformat()
+
+
 class CompletionLogStore:
     """Append-only log of completed/skipped task occurrences.
 
     Not a StorageCollection: entries are never edited by the user, only
     appended by the coordinator and pruned once they age out.
+
+    v0.71 point rules, applied when an entry is added (so the stored log is
+    always consistent and every sum over it stays simple):
+
+    * Points never go below 0: a deduction is limited to the member's
+      current weekly points (``points_week``); the entry is still logged
+      (with the points actually deducted, possibly 0, and the requested
+      amount in ``points_requested``).
+    * Points above the second coin threshold (``week_cap_provider``, 0 =
+      off) do not count for the current week: the entry keeps only what
+      fits below the cap and the rest (``overflow_points``) is logged as a
+      separate CARRYOVER_TASK_ID entry dated at the start of the next week.
+      A carry-over entry dated in the future is ignored by every sum until then, so
+      the carried points become effective by themselves on Monday 00:00.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -2102,6 +2222,9 @@ class CompletionLogStore:
             hass, STORAGE_VERSION, STORAGE_KEY_COMPLETIONS, minor_version=STORAGE_VERSION_MINOR
         )
         self._entries: list[dict[str, Any]] = []
+        # Set by async_setup_entry (__init__.py); returns the current weekly
+        # points cap (second coin threshold) or 0 for "no cap".
+        self.week_cap_provider: Callable[[], int] | None = None
 
     async def async_load(self) -> None:
         """Load the log from disk."""
@@ -2149,6 +2272,10 @@ class CompletionLogStore:
         of it live via FamilyTasksCoordinator._async_notify_rejection, not by
         reading this back out of the log.
         """
+        requested_points = points_awarded
+        overflow = 0
+        if member_id is not None and not skipped and task_id != CARRYOVER_TASK_ID and points_awarded:
+            points_awarded, overflow = self._apply_point_rules(member_id, points_awarded)
         entry = {
             CONF_ID: uuid4().hex,
             "task_id": task_id,
@@ -2160,38 +2287,124 @@ class CompletionLogStore:
             "task_name": task_name,
             "note": note,
         }
+        if points_awarded != requested_points:
+            entry["points_requested"] = requested_points
+        if overflow:
+            entry["overflow_points"] = overflow
         self._entries.append(entry)
+        if overflow:
+            next_week_start = week_bounds(dt_util.now())[1]
+            self._entries.append(
+                {
+                    CONF_ID: uuid4().hex,
+                    "task_id": CARRYOVER_TASK_ID,
+                    "period_key": next_week_start.isoformat(),
+                    "completed_by_member_id": member_id,
+                    "completed_at": next_week_start.isoformat(),
+                    "points_awarded": overflow,
+                    "skipped": False,
+                    "task_name": "Übertrag aus der Vorwoche",
+                    "note": None,
+                    "carryover_for": _week_key(next_week_start),
+                }
+            )
         if len(self._entries) > MAX_COMPLETION_LOG_ENTRIES:
             self._entries = self._entries[-MAX_COMPLETION_LOG_ENTRIES:]
         await self._store.async_save(self._entries)
         return entry
 
+    def _apply_point_rules(self, member_id: str, points: int) -> tuple[int, int]:
+        """Return (points to log now, points to carry over) - see the class docstring."""
+        current = self.points_since(member_id, week_bounds(dt_util.now())[0])
+        if points < 0:
+            return -min(-points, current), 0
+        cap = self.week_cap_provider() if self.week_cap_provider else 0
+        if cap <= 0:
+            return points, 0
+        room = max(0, cap - current)
+        return min(points, room), max(0, points - room)
+
     def points_since(self, member_id: str, since: datetime) -> int:
-        """Sum awarded points for a member since a given UTC timestamp."""
+        """Sum awarded points for a member since a given UTC timestamp.
+
+        v0.71: never negative, and a carry-over entry that is dated in the
+        future (it only becomes effective when its week begins) is not
+        counted yet.
+        """
+        now = dt_util.utcnow()
         total = 0
         for entry in self._entries:
             if entry["completed_by_member_id"] != member_id or entry["skipped"]:
                 continue
-            if dt_util.parse_datetime(entry["completed_at"]) >= since:
+            completed_at = dt_util.parse_datetime(entry["completed_at"])
+            if completed_at is not None and since <= completed_at and self._is_effective(entry, completed_at, now):
                 total += entry["points_awarded"]
-        return total
+        return max(total, 0)
+
+    @staticmethod
+    def _is_effective(entry: dict[str, Any], completed_at: datetime, now: datetime) -> bool:
+        """False only for a carry-over entry whose week has not begun yet."""
+        return entry.get("task_id") != CARRYOVER_TASK_ID or completed_at <= now
 
     def points_between(self, member_id: str, start: datetime, end: datetime) -> int:
-        """Sum awarded points for a member within [start, end) UTC.
+        """Sum awarded points for a member within [start, end) UTC (never negative).
 
         Used by FamilyTasksCoordinator._async_process_streak_bonus to judge
         one specific, already-elapsed calendar week at a time - points_since
         above has no upper bound, so it can't isolate a single past week on
         its own.
         """
+        now = dt_util.utcnow()
         total = 0
         for entry in self._entries:
             if entry["completed_by_member_id"] != member_id or entry["skipped"]:
                 continue
             completed_at = dt_util.parse_datetime(entry["completed_at"])
-            if completed_at is not None and start <= completed_at < end:
+            if (
+                completed_at is not None
+                and start <= completed_at < end
+                and self._is_effective(entry, completed_at, now)
+            ):
+                total += entry["points_awarded"]
+        return max(total, 0)
+
+    def pending_carryover(self, member_id: str) -> int:
+        """Points already carried over to a future week and not yet effective (v0.71)."""
+        now = dt_util.utcnow()
+        total = 0
+        for entry in self._entries:
+            if entry["completed_by_member_id"] != member_id or entry.get("task_id") != CARRYOVER_TASK_ID:
+                continue
+            completed_at = dt_util.parse_datetime(entry["completed_at"])
+            if completed_at is not None and completed_at > now:
                 total += entry["points_awarded"]
         return total
+
+    def earned_between(self, member_id: str, start: datetime, end: datetime) -> int:
+        """Points a member actually earned in [start, end), independent of carry-over (v0.71).
+
+        points_between counts what was credited to the week: the carried-in
+        points from the week before (they count for this week) and without
+        the overflow this week passed on. This is the other view - used for
+        the Wochensieger-Bonus - removing the carried-in part and adding
+        the overflow that left the week again.
+        """
+        carry_in_key = _week_key(start)
+        carry_out_key = _week_key(end)
+        credited = self.points_between(member_id, start, end)
+        now = dt_util.utcnow()
+        adjustment = 0
+        for entry in self._entries:
+            if entry["completed_by_member_id"] != member_id or entry.get("task_id") != CARRYOVER_TASK_ID:
+                continue
+            key = entry.get("carryover_for")
+            if key == carry_in_key:
+                completed_at = dt_util.parse_datetime(entry["completed_at"])
+                if completed_at is not None and completed_at <= now:
+                    adjustment -= entry["points_awarded"]
+            elif key == carry_out_key:
+                adjustment += entry["points_awarded"]
+        return max(credited + adjustment, 0)
 
     async def async_reset(self, member_id: str | None = None) -> None:
         """Clear logged points history - see SERVICE_RESET_POINTS in const.py.
