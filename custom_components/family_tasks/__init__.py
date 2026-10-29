@@ -81,6 +81,7 @@ from .storage import (
     async_member_id_for_context,
     async_setup_websocket_api,
 )
+from .services import async_register_admin_services
 from .trigger import TaskTriggerListener
 
 _LOGGER = logging.getLogger(__name__)
@@ -306,6 +307,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: FamilyTasksConfigEntry) 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _async_register_services(hass)
+    # v0.72: administrative services (CRUD, points/coins, settings) - see services.py.
+    async_register_admin_services(hass)
     await _async_register_frontend(hass)
 
     return True

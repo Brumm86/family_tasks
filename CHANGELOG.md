@@ -2,6 +2,23 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.72.0] - 2026-10-29
+
+### Added
+- **Alle Funktionen der Karte auch als Services** (neues Modul `services.py`), damit Automatisierungen, Skripte, Sprachassistenten oder ein MCP-Server die Integration vollständig steuern können:
+  - Lesen (Service-Antwort): `list_tasks` (mit `include_status`), `list_members` (mit `include_summary`), `list_favorites`, `list_rewards`, `list_battery_overrides`, `list_reward_redemptions` (`only_open`), `get_settings`.
+  - Je Aufgabe, Mitglied, Favorit, Belohnung und Batterie-Override: `create_<x>`, `update_<x>` (nur die zu ändernden Felder in `changes`), `delete_<x>`. `create_`/`update_` liefern das gespeicherte Objekt inklusive ID zurück.
+  - `instantiate_favorite` (einmalige Aufgabe aus einem Favoriten, optional mit eigenen `member_ids`), `award_points`, `award_coins` (negativer Wert = Abzug, Münzabzug auf den Saldo begrenzt), `extend_task_deadline`, `fulfill_reward_redemption`, `update_settings` (einzelne Integrations-Optionen; `null` setzt zurück; gleiche Schwellen-Reihenfolge-Prüfung wie der Options-Flow).
+- Die Services verwenden dieselben Schemas, Storage Collections und Coordinator-Methoden wie die Websocket-API der Karte; Eingaben werden also genau wie dort geprüft.
+- **Rechte**: reine Admin-Services. Ein Konto, das mit einem Mitglied der Rolle „Kind“ verknüpft ist, wird auch mit Admin-Rechten abgelehnt; Aufrufe ohne Benutzer (Automatisierung, Skript) sind erlaubt.
+
+### Fixed
+- `reset_points` fehlte in `services.yaml` (der Service war registriert und übersetzt, aber nicht beschrieben). Jetzt ergänzt.
+
+### Tests
+- Neue `tests/test_v072_features.py` (CRUD-Rundlauf je Objekttyp, Punkte/Münzen, Favorit-Instanziierung, Einlösungen, Einstellungen inkl. Schwellen-Prüfung, Rechte-Prüfungen).
+- `test_v032_features.py::test_rejection_note_stored_on_original_task_and_completion_entry` an v0.71 angepasst: Bei 0 Wochenpunkten wird nichts abgezogen (`points_awarded` 0, `points_requested` -1). Die Suite läuft damit vollständig durch.
+
 ## [0.71.0] - 2026-10-20
 
 ### Added

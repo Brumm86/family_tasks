@@ -174,6 +174,310 @@
           "description": "Optional: only reset this member's points data. Left empty, every member is reset."
         }
       }
+    },
+    "create_task": {
+      "name": "Create task",
+      "description": "Creates a new task. Returns the stored item including its ID.",
+      "fields": {
+        "task": {
+          "name": "Task",
+          "description": "Task definition as an object. Required: name, recurrence, rotation. recurrence = {type: daily | weekly | interval_days | yearly | once | trigger | battery, weekdays: [0-6, 0 = Monday] (weekly), interval + anchor_date (interval_days), anchor_date (yearly/once), trigger (trigger)}. rotation = {member_ids: [...], strategy: round_robin | random | fixed | least_points}; an empty member_ids list makes it an Aufgabenpool task. Optional: icon, points, coin_value, enabled, due_time (HH:MM), overdue_time (HH:MM), requires_confirmation, kind (standard | mandatory), subtasks ([{id, name}]), vacation_behavior (show | pause), note, completion_button_entity_id."
+        }
+      }
+    },
+    "update_task": {
+      "name": "Update task",
+      "description": "Changes individual fields of an existing task. Returns the updated item.",
+      "fields": {
+        "task_id": {
+          "name": "ID",
+          "description": "ID of the task (see list_tasks)."
+        },
+        "changes": {
+          "name": "Changes",
+          "description": "Only the fields to change (same fields as create_task). A field is replaced as a whole, e.g. a new rotation replaces the old one. null clears overdue_time, completion_button_entity_id and note."
+        }
+      }
+    },
+    "delete_task": {
+      "name": "Delete task",
+      "description": "Permanently deletes a task.",
+      "fields": {
+        "task_id": {
+          "name": "ID",
+          "description": "ID of the task (see list_tasks)."
+        }
+      }
+    },
+    "list_tasks": {
+      "name": "List tasks",
+      "description": "Returns all tasks with their stored definition. With include_status, each task also carries its current computed state (open, overdue, done ...) under 'current'.",
+      "fields": {
+        "include_status": {
+          "name": "Include status",
+          "description": "Also return each task's current computed state."
+        }
+      }
+    },
+    "create_member": {
+      "name": "Create family member",
+      "description": "Creates a new family member. Returns the stored item including its ID.",
+      "fields": {
+        "member": {
+          "name": "Family member",
+          "description": "Member as an object. Required: name. Optional: person_entity_id, icon, active, role (parent | child), participates_in_rewards, paused, notify_service."
+        }
+      }
+    },
+    "update_member": {
+      "name": "Update family member",
+      "description": "Changes individual fields of an existing family member. Returns the updated item.",
+      "fields": {
+        "member_id": {
+          "name": "ID",
+          "description": "ID of the member (see list_members)."
+        },
+        "changes": {
+          "name": "Changes",
+          "description": "Only the fields to change (same fields as create_member). null clears notify_service."
+        }
+      }
+    },
+    "delete_member": {
+      "name": "Delete family member",
+      "description": "Permanently deletes a family member.",
+      "fields": {
+        "member_id": {
+          "name": "ID",
+          "description": "ID of the member (see list_members)."
+        }
+      }
+    },
+    "list_members": {
+      "name": "List family members",
+      "description": "Returns all members. With include_summary, each member also carries points (today, week, month, total), open tasks and the coin balance under 'current'.",
+      "fields": {
+        "include_summary": {
+          "name": "Include summary",
+          "description": "Also return each member's points, open tasks and coin balance."
+        }
+      }
+    },
+    "create_favorite": {
+      "name": "Create Favorit",
+      "description": "Creates a new Favorit. Returns the stored item including its ID.",
+      "fields": {
+        "favorite": {
+          "name": "Favorit",
+          "description": "Favorit (task template) as an object. Required: name. Optional: icon, points, coin_value, member_ids, kind (standard | mandatory), subtasks ([{id, name}]), note."
+        }
+      }
+    },
+    "update_favorite": {
+      "name": "Update Favorit",
+      "description": "Changes individual fields of an existing Favorit. Returns the updated item.",
+      "fields": {
+        "favorite_id": {
+          "name": "ID",
+          "description": "ID of the Favorit (see list_favorites)."
+        },
+        "changes": {
+          "name": "Changes",
+          "description": "Only the fields to change (same fields as create_favorite). null clears note."
+        }
+      }
+    },
+    "delete_favorite": {
+      "name": "Delete Favorit",
+      "description": "Permanently deletes a Favorit.",
+      "fields": {
+        "favorite_id": {
+          "name": "ID",
+          "description": "ID of the Favorit (see list_favorites)."
+        }
+      }
+    },
+    "list_favorites": {
+      "name": "List Favoriten",
+      "description": "Returns all Favoriten (task templates)."
+    },
+    "create_reward": {
+      "name": "Create reward",
+      "description": "Creates a new reward. Returns the stored item including its ID.",
+      "fields": {
+        "reward": {
+          "name": "Reward",
+          "description": "Reward as an object. Required: name. Optional: icon, coin_cost, screen_time_minutes, auto_fulfill, screen_time_investable, note_enabled, note_label."
+        }
+      }
+    },
+    "update_reward": {
+      "name": "Update reward",
+      "description": "Changes individual fields of an existing reward. Returns the updated item.",
+      "fields": {
+        "reward_id": {
+          "name": "ID",
+          "description": "ID of the reward (see list_rewards)."
+        },
+        "changes": {
+          "name": "Changes",
+          "description": "Only the fields to change (same fields as create_reward). null clears screen_time_minutes and note_label."
+        }
+      }
+    },
+    "delete_reward": {
+      "name": "Delete reward",
+      "description": "Permanently deletes a reward.",
+      "fields": {
+        "reward_id": {
+          "name": "ID",
+          "description": "ID of the reward (see list_rewards)."
+        }
+      }
+    },
+    "list_rewards": {
+      "name": "List rewards",
+      "description": "Returns the reward catalog."
+    },
+    "create_battery_override": {
+      "name": "Create battery override",
+      "description": "Creates a new battery override. Returns the stored item including its ID.",
+      "fields": {
+        "battery_override": {
+          "name": "Battery override",
+          "description": "Battery override as an object. Required: entity_id. Optional: excluded (true = ignore this battery), threshold (warning level in percent; leave out to use the default)."
+        }
+      }
+    },
+    "update_battery_override": {
+      "name": "Update battery override",
+      "description": "Changes individual fields of an existing battery override. Returns the updated item.",
+      "fields": {
+        "override_id": {
+          "name": "ID",
+          "description": "ID of the override (see list_battery_overrides)."
+        },
+        "changes": {
+          "name": "Changes",
+          "description": "Only the fields to change: excluded, threshold. null clears threshold (back to the default)."
+        }
+      }
+    },
+    "delete_battery_override": {
+      "name": "Delete battery override",
+      "description": "Permanently deletes a battery override.",
+      "fields": {
+        "override_id": {
+          "name": "ID",
+          "description": "ID of the override (see list_battery_overrides)."
+        }
+      }
+    },
+    "list_battery_overrides": {
+      "name": "List battery overrides",
+      "description": "Returns all battery overrides (excluded batteries and individual warning levels)."
+    },
+    "instantiate_favorite": {
+      "name": "Create task from Favorit",
+      "description": "Creates a new one-time task from a Favorit template. The Favorit itself stays unchanged. Returns the new task.",
+      "fields": {
+        "favorite_id": {
+          "name": "Favorit ID",
+          "description": "ID of the Favorit (see list_favorites)."
+        },
+        "member_ids": {
+          "name": "Members",
+          "description": "Optional: list of member IDs the task is assigned to instead of the Favorit's own members."
+        }
+      }
+    },
+    "award_points": {
+      "name": "Award points",
+      "description": "Gives a member points, or deducts them with a negative number. Counts towards the weekly progress like a completed task.",
+      "fields": {
+        "member_id": {
+          "name": "Member ID",
+          "description": "ID of the member (see list_members)."
+        },
+        "points": {
+          "name": "Points",
+          "description": "Points to award; negative to deduct. Not 0."
+        },
+        "note": {
+          "name": "Reason",
+          "description": "Optional reason shown in the log."
+        }
+      }
+    },
+    "award_coins": {
+      "name": "Award coins",
+      "description": "Gives a member coins, or deducts them with a negative number (limited to the current balance).",
+      "fields": {
+        "member_id": {
+          "name": "Member ID",
+          "description": "ID of the member (see list_members)."
+        },
+        "coins": {
+          "name": "Coins",
+          "description": "Coins to award; negative to deduct. Not 0."
+        },
+        "note": {
+          "name": "Reason",
+          "description": "Optional reason shown in the coin log."
+        }
+      }
+    },
+    "extend_task_deadline": {
+      "name": "Extend task deadline",
+      "description": "Gives the currently open occurrence of a task more time before it becomes overdue. The task definition is not changed. Returns the new deadline.",
+      "fields": {
+        "task_id": {
+          "name": "Task ID",
+          "description": "ID of the task (see list_tasks)."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "Extra time in minutes (1 to 10080)."
+        }
+      }
+    },
+    "list_reward_redemptions": {
+      "name": "List reward redemptions",
+      "description": "Returns the redeemed rewards.",
+      "fields": {
+        "only_open": {
+          "name": "Only open",
+          "description": "Only redemptions that are not yet marked as fulfilled."
+        }
+      }
+    },
+    "fulfill_reward_redemption": {
+      "name": "Mark redemption fulfilled",
+      "description": "Marks a redeemed reward as fulfilled (or open again).",
+      "fields": {
+        "redemption_id": {
+          "name": "Redemption ID",
+          "description": "ID of the redemption (see list_reward_redemptions)."
+        },
+        "fulfilled": {
+          "name": "Fulfilled",
+          "description": "true = fulfilled (default), false = open again."
+        }
+      }
+    },
+    "get_settings": {
+      "name": "Get settings",
+      "description": "Returns the household-wide options (weekly goal, bonuses, thresholds, Handyzeit values ...), the thresholds actually in effect and whether vacation mode is currently active."
+    },
+    "update_settings": {
+      "name": "Update settings",
+      "description": "Changes individual household-wide options. Options not mentioned stay as they are; null resets an option (thresholds fall back to the value derived from the weekly goal). Vacation mode itself is switched with the vacation mode switch entity.",
+      "fields": {
+        "settings": {
+          "name": "Settings",
+          "description": "Options to change. Keys: overdue_after_minutes, default_rotation_strategy, battery_warning_threshold, battery_alert_auto_complete_on_recovery, screen_time_minutes_per_point, screen_time_tick_minutes, screen_time_ticks_per_day, screen_time_malus_start_date (YYYY-MM-DD), weekly_progress_goal_points, malus_threshold_1_points .. malus_threshold_4_points, coin_threshold_1_points, coin_threshold_2_points, milestone_150_bonus_coins, milestone_200_bonus_coins, streak_bonus_2_weeks_coins, streak_bonus_3_weeks_coins, top_scorer_bonus_coins, spotify_threshold_points, vacation_mode_default. Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin 1 < coin 2."
+        }
+      }
     }
   }
 }

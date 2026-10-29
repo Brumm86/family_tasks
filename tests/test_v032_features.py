@@ -242,7 +242,11 @@ async def test_rejection_note_stored_on_original_task_and_completion_entry(
         if e["task_id"] == MANUAL_POINTS_TASK_ID and e["note"] == "Bett noch nicht gemacht"
     ]
     assert len(rejection_entries) == 1
-    assert rejection_entries[0]["points_awarded"] == -1
+    # Since v0.71 a deduction is limited to the member's current weekly points
+    # (none here), so the entry is kept but no points are actually removed;
+    # the requested deduction is recorded in "points_requested".
+    assert rejection_entries[0]["points_awarded"] == 0
+    assert rejection_entries[0]["points_requested"] == -1
 
 
 async def test_rejection_note_cleared_once_child_retries(hass, init_integration) -> None:

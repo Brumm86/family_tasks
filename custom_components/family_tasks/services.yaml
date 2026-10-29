@@ -48,3 +48,273 @@ release_task:
       required: false
       selector:
         text:
+
+reset_points:
+  fields:
+    member_id:
+      required: false
+      selector:
+        text:
+
+# --- Administrative services (v0.72, services.py) ---
+create_task:
+  fields:
+    task:
+      required: true
+      example:
+        name: "Take out the paper recycling"
+        points: 5
+        coin_value: 1
+        due_time: "18:00"
+        recurrence: {"type": "weekly", "weekdays": [2]}
+        rotation: {"member_ids": ["<member_id>"], "strategy": "fixed"}
+      selector:
+        object:
+
+update_task:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+    changes:
+      required: true
+      example:
+        points: 8
+        due_time: "17:30"
+      selector:
+        object:
+
+delete_task:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+
+list_tasks:
+  fields:
+    include_status:
+      selector:
+        boolean:
+
+create_member:
+  fields:
+    member:
+      required: true
+      example:
+        name: "Alex"
+        role: "child"
+        person_entity_id: "person.alex"
+      selector:
+        object:
+
+update_member:
+  fields:
+    member_id:
+      required: true
+      selector:
+        text:
+    changes:
+      required: true
+      example:
+        paused: true
+      selector:
+        object:
+
+delete_member:
+  fields:
+    member_id:
+      required: true
+      selector:
+        text:
+
+list_members:
+  fields:
+    include_summary:
+      selector:
+        boolean:
+
+create_favorite:
+  fields:
+    favorite:
+      required: true
+      example:
+        name: "Empty the dishwasher"
+        points: 3
+        coin_value: 0
+      selector:
+        object:
+
+update_favorite:
+  fields:
+    favorite_id:
+      required: true
+      selector:
+        text:
+    changes:
+      required: true
+      example:
+        points: 4
+      selector:
+        object:
+
+delete_favorite:
+  fields:
+    favorite_id:
+      required: true
+      selector:
+        text:
+
+list_favorites:
+
+create_reward:
+  fields:
+    reward:
+      required: true
+      example:
+        name: "Choose the movie"
+        coin_cost: 10
+      selector:
+        object:
+
+update_reward:
+  fields:
+    reward_id:
+      required: true
+      selector:
+        text:
+    changes:
+      required: true
+      example:
+        coin_cost: 12
+      selector:
+        object:
+
+delete_reward:
+  fields:
+    reward_id:
+      required: true
+      selector:
+        text:
+
+list_rewards:
+
+create_battery_override:
+  fields:
+    battery_override:
+      required: true
+      example:
+        entity_id: "sensor.example_battery"
+        threshold: 15
+      selector:
+        object:
+
+update_battery_override:
+  fields:
+    override_id:
+      required: true
+      selector:
+        text:
+    changes:
+      required: true
+      example:
+        excluded: true
+      selector:
+        object:
+
+delete_battery_override:
+  fields:
+    override_id:
+      required: true
+      selector:
+        text:
+
+list_battery_overrides:
+
+instantiate_favorite:
+  fields:
+    favorite_id:
+      required: true
+      selector:
+        text:
+    member_ids:
+      example: ["<member_id>"]
+      selector:
+        object:
+
+award_points:
+  fields:
+    member_id:
+      required: true
+      selector:
+        text:
+    points:
+      required: true
+      selector:
+        number:
+          min: -100000
+          max: 100000
+          mode: box
+    note:
+      selector:
+        text:
+
+award_coins:
+  fields:
+    member_id:
+      required: true
+      selector:
+        text:
+    coins:
+      required: true
+      selector:
+        number:
+          min: -100000
+          max: 100000
+          mode: box
+    note:
+      selector:
+        text:
+
+extend_task_deadline:
+  fields:
+    task_id:
+      required: true
+      selector:
+        text:
+    minutes:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 10080
+          mode: box
+
+list_reward_redemptions:
+  fields:
+    only_open:
+      selector:
+        boolean:
+
+fulfill_reward_redemption:
+  fields:
+    redemption_id:
+      required: true
+      selector:
+        text:
+    fulfilled:
+      selector:
+        boolean:
+
+get_settings:
+
+update_settings:
+  fields:
+    settings:
+      required: true
+      example:
+        weekly_progress_goal_points: 100
+        coin_threshold_1_points: 150
+      selector:
+        object:

@@ -174,6 +174,310 @@
           "description": "Optional: setzt nur die Punkte-Daten dieses Mitglieds zurück. Leer gelassen werden alle Mitglieder zurückgesetzt."
         }
       }
+    },
+    "create_task": {
+      "name": "Aufgabe anlegen",
+      "description": "Legt eine neue Aufgabe an. Liefert das gespeicherte Objekt inklusive ID zurück.",
+      "fields": {
+        "task": {
+          "name": "Aufgabe",
+          "description": "Aufgabendefinition als Objekt. Pflicht: name, recurrence, rotation. recurrence = {type: daily | weekly | interval_days | yearly | once | trigger | battery, weekdays: [0-6, 0 = Montag] (weekly), interval + anchor_date (interval_days), anchor_date (yearly/once), trigger (trigger)}. rotation = {member_ids: [...], strategy: round_robin | random | fixed | least_points}; eine leere member_ids-Liste ergibt eine Aufgabenpool-Aufgabe. Optional: icon, points, coin_value, enabled, due_time (HH:MM), overdue_time (HH:MM), requires_confirmation, kind (standard | mandatory), subtasks ([{id, name}]), vacation_behavior (show | pause), note, completion_button_entity_id."
+        }
+      }
+    },
+    "update_task": {
+      "name": "Aufgabe ändern",
+      "description": "Ändert einzelne Felder einer bestehenden Aufgabe. Liefert das aktualisierte Objekt zurück.",
+      "fields": {
+        "task_id": {
+          "name": "ID",
+          "description": "ID der Aufgabe (siehe list_tasks)."
+        },
+        "changes": {
+          "name": "Änderungen",
+          "description": "Nur die zu ändernden Felder (dieselben wie bei create_task). Ein Feld wird als Ganzes ersetzt, z. B. ersetzt eine neue rotation die bisherige. null löscht overdue_time, completion_button_entity_id und note."
+        }
+      }
+    },
+    "delete_task": {
+      "name": "Aufgabe löschen",
+      "description": "Löscht eine Aufgabe endgültig.",
+      "fields": {
+        "task_id": {
+          "name": "ID",
+          "description": "ID der Aufgabe (siehe list_tasks)."
+        }
+      }
+    },
+    "list_tasks": {
+      "name": "Aufgaben auflisten",
+      "description": "Liefert alle Aufgaben mit ihrer gespeicherten Definition. Mit include_status enthält jede Aufgabe unter 'current' zusätzlich den aktuell berechneten Zustand (offen, überfällig, erledigt ...).",
+      "fields": {
+        "include_status": {
+          "name": "Status einschließen",
+          "description": "Liefert zusätzlich den aktuell berechneten Zustand jeder Aufgabe."
+        }
+      }
+    },
+    "create_member": {
+      "name": "Familienmitglied anlegen",
+      "description": "Legt ein neues Familienmitglied an. Liefert das gespeicherte Objekt inklusive ID zurück.",
+      "fields": {
+        "member": {
+          "name": "Familienmitglied",
+          "description": "Mitglied als Objekt. Pflicht: name. Optional: person_entity_id, icon, active, role (parent | child), participates_in_rewards, paused, notify_service."
+        }
+      }
+    },
+    "update_member": {
+      "name": "Familienmitglied ändern",
+      "description": "Ändert einzelne Felder eines bestehenden Familienmitglieds. Liefert das aktualisierte Objekt zurück.",
+      "fields": {
+        "member_id": {
+          "name": "ID",
+          "description": "ID des Mitglieds (siehe list_members)."
+        },
+        "changes": {
+          "name": "Änderungen",
+          "description": "Nur die zu ändernden Felder (dieselben wie bei create_member). null löscht notify_service."
+        }
+      }
+    },
+    "delete_member": {
+      "name": "Familienmitglied löschen",
+      "description": "Löscht ein Familienmitglied endgültig.",
+      "fields": {
+        "member_id": {
+          "name": "ID",
+          "description": "ID des Mitglieds (siehe list_members)."
+        }
+      }
+    },
+    "list_members": {
+      "name": "Familienmitglieder auflisten",
+      "description": "Liefert alle Mitglieder. Mit include_summary enthält jedes Mitglied unter 'current' zusätzlich Punkte (heute, Woche, Monat, gesamt), offene Aufgaben und den Münzsaldo.",
+      "fields": {
+        "include_summary": {
+          "name": "Übersicht einschließen",
+          "description": "Liefert zusätzlich Punkte, offene Aufgaben und Münzsaldo jedes Mitglieds."
+        }
+      }
+    },
+    "create_favorite": {
+      "name": "Favorit anlegen",
+      "description": "Legt einen neuen Favoriten (Aufgabenvorlage) an. Liefert das gespeicherte Objekt inklusive ID zurück.",
+      "fields": {
+        "favorite": {
+          "name": "Favorit",
+          "description": "Favorit (Aufgabenvorlage) als Objekt. Pflicht: name. Optional: icon, points, coin_value, member_ids, kind (standard | mandatory), subtasks ([{id, name}]), note."
+        }
+      }
+    },
+    "update_favorite": {
+      "name": "Favorit ändern",
+      "description": "Ändert einzelne Felder eines bestehenden Favoriten. Liefert das aktualisierte Objekt zurück.",
+      "fields": {
+        "favorite_id": {
+          "name": "ID",
+          "description": "ID des Favoriten (siehe list_favorites)."
+        },
+        "changes": {
+          "name": "Änderungen",
+          "description": "Nur die zu ändernden Felder (dieselben wie bei create_favorite). null löscht note."
+        }
+      }
+    },
+    "delete_favorite": {
+      "name": "Favorit löschen",
+      "description": "Löscht einen Favoriten endgültig.",
+      "fields": {
+        "favorite_id": {
+          "name": "ID",
+          "description": "ID des Favoriten (siehe list_favorites)."
+        }
+      }
+    },
+    "list_favorites": {
+      "name": "Favoriten auflisten",
+      "description": "Liefert alle Favoriten (Aufgabenvorlagen)."
+    },
+    "create_reward": {
+      "name": "Belohnung anlegen",
+      "description": "Legt eine neue Belohnung im Katalog an. Liefert das gespeicherte Objekt inklusive ID zurück.",
+      "fields": {
+        "reward": {
+          "name": "Belohnung",
+          "description": "Belohnung als Objekt. Pflicht: name. Optional: icon, coin_cost, screen_time_minutes, auto_fulfill, screen_time_investable, note_enabled, note_label."
+        }
+      }
+    },
+    "update_reward": {
+      "name": "Belohnung ändern",
+      "description": "Ändert einzelne Felder einer bestehenden Belohnung. Liefert das aktualisierte Objekt zurück.",
+      "fields": {
+        "reward_id": {
+          "name": "ID",
+          "description": "ID der Belohnung (siehe list_rewards)."
+        },
+        "changes": {
+          "name": "Änderungen",
+          "description": "Nur die zu ändernden Felder (dieselben wie bei create_reward). null löscht screen_time_minutes und note_label."
+        }
+      }
+    },
+    "delete_reward": {
+      "name": "Belohnung löschen",
+      "description": "Löscht eine Belohnung endgültig.",
+      "fields": {
+        "reward_id": {
+          "name": "ID",
+          "description": "ID der Belohnung (siehe list_rewards)."
+        }
+      }
+    },
+    "list_rewards": {
+      "name": "Belohnungen auflisten",
+      "description": "Liefert den Belohnungskatalog."
+    },
+    "create_battery_override": {
+      "name": "Batterie-Override anlegen",
+      "description": "Legt einen neuen Batterie-Override an. Liefert das gespeicherte Objekt inklusive ID zurück.",
+      "fields": {
+        "battery_override": {
+          "name": "Batterie-Override",
+          "description": "Batterie-Override als Objekt. Pflicht: entity_id. Optional: excluded (true = diese Batterie ignorieren), threshold (Warnschwelle in Prozent; weglassen = Standardwert)."
+        }
+      }
+    },
+    "update_battery_override": {
+      "name": "Batterie-Override ändern",
+      "description": "Ändert einen bestehenden Batterie-Override. Liefert das aktualisierte Objekt zurück.",
+      "fields": {
+        "override_id": {
+          "name": "ID",
+          "description": "ID des Overrides (siehe list_battery_overrides)."
+        },
+        "changes": {
+          "name": "Änderungen",
+          "description": "Nur die zu ändernden Felder: excluded, threshold. null löscht threshold (zurück zum Standardwert)."
+        }
+      }
+    },
+    "delete_battery_override": {
+      "name": "Batterie-Override löschen",
+      "description": "Löscht einen Batterie-Override endgültig.",
+      "fields": {
+        "override_id": {
+          "name": "ID",
+          "description": "ID des Overrides (siehe list_battery_overrides)."
+        }
+      }
+    },
+    "list_battery_overrides": {
+      "name": "Batterie-Overrides auflisten",
+      "description": "Liefert alle Batterie-Overrides (ausgeschlossene Batterien und individuelle Warnschwellen)."
+    },
+    "instantiate_favorite": {
+      "name": "Aufgabe aus Favorit erstellen",
+      "description": "Erstellt aus einer Favoriten-Vorlage eine neue, einmalige Aufgabe. Der Favorit selbst bleibt unverändert. Liefert die neue Aufgabe zurück.",
+      "fields": {
+        "favorite_id": {
+          "name": "Favoriten-ID",
+          "description": "ID des Favoriten (siehe list_favorites)."
+        },
+        "member_ids": {
+          "name": "Mitglieder",
+          "description": "Optional: Liste von Mitglieds-IDs, denen die Aufgabe statt den Mitgliedern des Favoriten zugewiesen wird."
+        }
+      }
+    },
+    "award_points": {
+      "name": "Punkte vergeben",
+      "description": "Gibt einem Mitglied Punkte oder zieht sie mit einer negativen Zahl ab. Zählt wie eine erledigte Aufgabe für den Wochenfortschritt.",
+      "fields": {
+        "member_id": {
+          "name": "Mitglieds-ID",
+          "description": "ID des Mitglieds (siehe list_members)."
+        },
+        "points": {
+          "name": "Punkte",
+          "description": "Zu vergebende Punkte; negativ zum Abziehen. Nicht 0."
+        },
+        "note": {
+          "name": "Grund",
+          "description": "Optionaler Grund, der im Protokoll erscheint."
+        }
+      }
+    },
+    "award_coins": {
+      "name": "Münzen vergeben",
+      "description": "Gibt einem Mitglied Münzen oder zieht sie mit einer negativen Zahl ab (begrenzt auf den aktuellen Saldo).",
+      "fields": {
+        "member_id": {
+          "name": "Mitglieds-ID",
+          "description": "ID des Mitglieds (siehe list_members)."
+        },
+        "coins": {
+          "name": "Münzen",
+          "description": "Zu vergebende Münzen; negativ zum Abziehen. Nicht 0."
+        },
+        "note": {
+          "name": "Grund",
+          "description": "Optionaler Grund, der im Münzprotokoll erscheint."
+        }
+      }
+    },
+    "extend_task_deadline": {
+      "name": "Frist verlängern",
+      "description": "Gibt der aktuell offenen Ausführung einer Aufgabe mehr Zeit, bevor sie überfällig wird. Die Aufgabendefinition bleibt unverändert. Liefert die neue Frist zurück.",
+      "fields": {
+        "task_id": {
+          "name": "Aufgaben-ID",
+          "description": "ID der Aufgabe (siehe list_tasks)."
+        },
+        "minutes": {
+          "name": "Minuten",
+          "description": "Zusätzliche Zeit in Minuten (1 bis 10080)."
+        }
+      }
+    },
+    "list_reward_redemptions": {
+      "name": "Einlösungen auflisten",
+      "description": "Liefert die eingelösten Belohnungen.",
+      "fields": {
+        "only_open": {
+          "name": "Nur offene",
+          "description": "Nur Einlösungen, die noch nicht als erledigt markiert sind."
+        }
+      }
+    },
+    "fulfill_reward_redemption": {
+      "name": "Einlösung als erledigt markieren",
+      "description": "Markiert eine eingelöste Belohnung als erledigt (oder wieder als offen).",
+      "fields": {
+        "redemption_id": {
+          "name": "Einlösungs-ID",
+          "description": "ID der Einlösung (siehe list_reward_redemptions)."
+        },
+        "fulfilled": {
+          "name": "Erledigt",
+          "description": "true = erledigt (Standard), false = wieder offen."
+        }
+      }
+    },
+    "get_settings": {
+      "name": "Einstellungen lesen",
+      "description": "Liefert die haushaltsweiten Optionen (Wochenziel, Boni, Schwellen, Handyzeit-Werte ...), die tatsächlich geltenden Schwellen und ob der Urlaubsmodus aktuell aktiv ist."
+    },
+    "update_settings": {
+      "name": "Einstellungen ändern",
+      "description": "Ändert einzelne haushaltsweite Optionen. Nicht genannte Optionen bleiben unverändert; null setzt eine Option zurück (Schwellen fallen auf den aus dem Wochenziel abgeleiteten Wert zurück). Der Urlaubsmodus selbst wird über die Urlaubsmodus-Schalter-Entität geschaltet.",
+      "fields": {
+        "settings": {
+          "name": "Einstellungen",
+          "description": "Zu ändernde Optionen. Schlüssel: overdue_after_minutes, default_rotation_strategy, battery_warning_threshold, battery_alert_auto_complete_on_recovery, screen_time_minutes_per_point, screen_time_tick_minutes, screen_time_ticks_per_day, screen_time_malus_start_date (JJJJ-MM-TT), weekly_progress_goal_points, malus_threshold_1_points .. malus_threshold_4_points, coin_threshold_1_points, coin_threshold_2_points, milestone_150_bonus_coins, milestone_200_bonus_coins, streak_bonus_2_weeks_coins, streak_bonus_3_weeks_coins, top_scorer_bonus_coins, spotify_threshold_points, vacation_mode_default. Die Schwellen müssen streng aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2."
+        }
+      }
     }
   }
 }
