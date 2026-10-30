@@ -181,7 +181,7 @@
       "fields": {
         "task": {
           "name": "Task",
-          "description": "Task definition as an object. Required: name, recurrence, rotation. recurrence = {type: daily | weekly | interval_days | yearly | once | trigger | battery, weekdays: [0-6, 0 = Monday] (weekly), interval + anchor_date (interval_days), anchor_date (yearly/once), trigger (trigger)}. rotation = {member_ids: [...], strategy: round_robin | random | fixed | least_points}; an empty member_ids list makes it an Aufgabenpool task. Optional: icon, points, coin_value, enabled, due_time (HH:MM), overdue_time (HH:MM), requires_confirmation, kind (standard | mandatory), subtasks ([{id, name}]), vacation_behavior (show | pause), note, completion_button_entity_id."
+          "description": "Task definition as an object. Required: name, recurrence, rotation. recurrence = {type: daily | weekly | interval_days | yearly | once | trigger | battery, weekdays: [0-6, 0 = Monday] (weekly), interval + anchor_date (interval_days), anchor_date (yearly/once), trigger ({kind: state, entity_id, to_state, from_state (optional: only on the transition from this state), auto_complete_on_normalize} or {kind: numeric_state, entity_id, above | below, buffer_minutes, auto_complete_on_normalize})}. rotation = {member_ids: [...], strategy: round_robin | random | fixed | least_points}; an empty member_ids list makes it an Aufgabenpool task. Optional: icon, points, coin_value, enabled, due_time (HH:MM), overdue_time (HH:MM), requires_confirmation, kind (standard | mandatory), subtasks ([{id, name}]), vacation_behavior (show | pause), note, completion_button_entity_id."
         }
       }
     },

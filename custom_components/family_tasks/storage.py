@@ -147,6 +147,13 @@ TASK_TRIGGER_STATE_SCHEMA = vol.Schema(
         vol.Required("kind"): TASK_TRIGGER_STATE,
         vol.Required("entity_id"): cv.entity_id,
         vol.Optional("to_state", default="on"): str,
+        # v0.73: optional "coming from" state. When set, the occurrence only
+        # opens on the transition from_state -> to_state (e.g. a dryer
+        # sensor going "running" -> "on"), not when the entity reaches
+        # to_state from any other state (e.g. a brief "on" at program start).
+        # Absent/empty keeps the pre-v0.73 behavior (any transition into
+        # to_state).
+        vol.Optional("from_state"): str,
         vol.Optional("auto_complete_on_normalize", default=False): bool,
     }
 )

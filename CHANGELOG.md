@@ -2,6 +2,15 @@
 
 All notable changes to Family Tasks are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.73.0] - 2026-10-30
+
+### Added
+- **Sensor-Trigger „Wechsel von Zustand A nach Zustand B“**: ein „Sensor-Zustand“-Auslöser kann jetzt zusätzlich einen `from_state` (Vorheriger Zustand, optional) tragen. Die Aufgabe öffnet sich dann nur beim Übergang `from_state` → `to_state`, nicht mehr, wenn die Entity `to_state` aus einem anderen Zustand erreicht. Beispiel: ein Trocknersensor meldet beim Programmstart kurz „on“, bevor er auf „running“ wechselt - mit `from_state: running`, `to_state: on` öffnet sich die Aufgabe erst am Programmende. Ohne `from_state` bleibt das Verhalten unverändert. Ist der vorherige Zustand `unknown`/`unavailable`, gilt `from_state` als nicht erfüllt.
+- Das Aufgabenformular der Karte hat dafür das Feld „Vorheriger Zustand (optional)“ (ohne das Feld würde ein Bearbeiten in der Karte den Wert verlieren); die Service-Beschreibung von `create_task` nennt das Feld.
+
+### Tests
+- Neue `tests/test_v073_features.py` (Speichern des Feldes, Programmstart-Blip löst nicht aus, Wechsel running → on löst aus, unverändertes Verhalten ohne `from_state`, `unavailable` als Vorzustand).
+
 ## [0.72.0] - 2026-10-29
 
 ### Added

@@ -8,7 +8,11 @@ soil moisture sensor goes dry". Tasks with recurrence type ``"trigger"`` (see
 Home Assistant's own automation triggers:
 
 - ``{"kind": "state", "entity_id": ..., "to_state": "on"}`` - a binary_sensor
-  (or any entity) reaching a given state.
+  (or any entity) reaching a given state. v0.73: an optional ``"from_state"``
+  restricts this to the transition *from* that state (``"running"`` ->
+  ``"on"``), so a sensor that briefly passes through ``to_state`` on its way
+  to another state (e.g. a dryer reporting "on" for a moment at program start
+  before switching to "running") does not open the task.
 - ``{"kind": "numeric_state", "entity_id": ..., "above": ..., "below": ...}``
   - a numeric sensor crossing a threshold.
 
@@ -82,6 +86,19 @@ def _matches(hass: HomeAssistant, trigger: dict, state: State | None) -> bool:
         )
     except ConditionError:
         # e.g. a numeric_state trigger against a non-numeric sensor value.
+        return False
+
+
+def _from_state_allows(hass: HomeAssistant, trigger: dict, old_state: State | None) -> bool:
+    """Return whether the state before the change satisfies the optional ``from_state`` (v0.73)."""
+    from_state = trigger.get("from_state")
+    if not from_state:
+        return True
+    if old_state is None or old_state.state in _UNAVAILABLE_STATES:
+        return False
+    try:
+        return condition.state(hass, old_state, from_state)
+    except ConditionError:
         return False
 
 
@@ -186,7 +203,11 @@ class TaskTriggerListener:
             now_matches = _matches(self._hass, trigger, new_state)
             was_matching = _matches(self._hass, trigger, old_state)
 
-            if now_matches and not was_matching:
+            if (
+                now_matches
+                and not was_matching
+                and _from_state_allows(self._hass, trigger, old_state)
+            ):
                 # v0.42: "buffer_minutes" (numeric_state triggers only - see
                 # TASK_TRIGGER_NUMERIC_STATE_SCHEMA in storage.py) delays the
                 # actual open by that many minutes instead of firing on this

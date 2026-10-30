@@ -792,6 +792,8 @@
       kind: "state",
       entity_id: "",
       to_state: "on",
+      // v0.73: optional "coming from" state - see TASK_TRIGGER_STATE_SCHEMA in storage.py.
+      from_state: "",
       direction: "above",
       value: "",
       // v0.34: see the matching field on TASK_TRIGGER_STATE_SCHEMA/
@@ -953,6 +955,7 @@
             kind: t?.kind ?? "state",
             entity_id: t?.entity_id ?? "",
             to_state: t?.to_state ?? "on",
+            from_state: t?.from_state ?? "",
             direction: hasBelow ? "below" : "above",
             value: hasBelow ? t.below : t?.above ?? "",
             // v0.34: see the matching field on TASK_TRIGGER_STATE_SCHEMA/
@@ -1989,6 +1992,10 @@
             entity_id: t.entity_id.trim(),
             to_state: (t.to_state || "on").trim(),
           };
+          // v0.73: optional "coming from" state; omitted when empty.
+          if ((t.from_state || "").trim()) {
+            recurrence.trigger.from_state = t.from_state.trim();
+          }
         } else {
           const value = t.value === "" ? undefined : Number(t.value);
           if (value === undefined || Number.isNaN(value)) {
@@ -5173,6 +5180,7 @@
           </label>
           ${t.kind === "state" ? `
             <label>Ziel-Zustand<input type="text" data-field="recurrence.trigger.to_state" placeholder="on" value="${esc(t.to_state)}"></label>
+            <label>Vorheriger Zustand (optional)<input type="text" data-field="recurrence.trigger.from_state" placeholder="nur beim Wechsel von diesem Zustand" value="${esc(t.from_state)}"></label>
           ` : `
             <div class="grid2">
               <label>Richtung
