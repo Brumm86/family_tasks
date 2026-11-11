@@ -1,0 +1,3315 @@
+"""DataUpdateCoordinator for the Family Tasks integration.
+
+There is no external API to poll. The coordinator's job is to periodically
+(and on-demand after a completion) recompute derived, time-dependent state
+from the stored task/member definitions and the completion log: which
+occurrence of each recurring task is currently due, who it is assigned to,
+whether it is overdue, and each member's point totals.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+
+from homeassistant.components import persistent_notification
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
+
+from .battery import LowBattery, async_compute_low_batteries
+from .const import (
+    CLAIM_PENALTY_POINTS,
+    CLAIM_RESERVATION_MINUTES,
+    COIN_REASON_MILESTONE_150,
+    COIN_REASON_MILESTONE_200,
+    COIN_REASON_STREAK_200,
+    COIN_REASON_TASK_COMPLETION,
+    COIN_REASON_TOP_SCORER,
+    CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+    CONF_BATTERY_WARNING_THRESHOLD,
+    CONF_COMPLETION_BUTTON_ENTITY_ID,
+    CONF_DEFAULT_ROTATION_STRATEGY,
+    CONF_MEMBER_NOTIFY_SERVICE,
+    CONF_MEMBER_PAUSED,
+    CONF_MEMBER_REWARDS_OPT_IN,
+    CONF_MILESTONE_150_BONUS_COINS,
+    CONF_MILESTONE_200_BONUS_COINS,
+    CONF_SCREEN_TIME_MALUS_START_DATE,
+    CONF_SCREEN_TIME_TICK_MINUTES,
+    CONF_SCREEN_TIME_TICKS_PER_DAY,
+    CONF_STREAK_BONUS_2_WEEKS_COINS,
+    CONF_STREAK_BONUS_3_WEEKS_COINS,
+    CONF_TASK_CREATED_BY_MEMBER_ID,
+    CONF_SPOTIFY_THRESHOLD_POINTS,
+    CONF_TOP_SCORER_BONUS_COINS,
+    CONF_TASK_REQUIRES_CONFIRMATION,
+    CONF_TASK_VACATION_BEHAVIOR,
+    CONF_WEEKLY_PROGRESS_GOAL_POINTS,
+    CONFIRMATION_REJECTION_PENALTY_POINTS,
+    COORDINATOR_UPDATE_INTERVAL,
+    DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+    DEFAULT_SPOTIFY_THRESHOLD_POINTS,
+    DEFAULT_BATTERY_WARNING_THRESHOLD,
+    DEFAULT_MILESTONE_150_BONUS_COINS,
+    DEFAULT_MILESTONE_200_BONUS_COINS,
+    DEFAULT_OVERDUE_AFTER_MINUTES,
+    DEFAULT_ROTATION_STRATEGY,
+    DEFAULT_SCREEN_TIME_TICK_MINUTES,
+    DEFAULT_SCREEN_TIME_TICKS_PER_DAY,
+    DEFAULT_STREAK_BONUS_2_WEEKS_COINS,
+    DEFAULT_STREAK_BONUS_3_WEEKS_COINS,
+    DEFAULT_TOP_SCORER_BONUS_COINS,
+    DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS,
+    DOMAIN,
+    EVENT_TASK_DUE,
+    EVENT_TASK_OVERDUE,
+    EVENT_TASK_POOL_ADDED,
+    EVENT_TASK_REJECTED,
+    MANUAL_POINTS_TASK_ID,
+    MEMBER_ROLE_CHILD,
+    MEMBER_ROLE_PARENT,
+    MALUS_STAGE_ADJUSTMENT_MINUTES,
+    RECURRENCE_BATTERY,
+    RECURRENCE_CONFIRMATION,
+    RECURRENCE_ONCE,
+    RECURRENCE_TRIGGER,
+    ROTATION_ONLY_CHILDREN,
+    ROTATION_STRATEGY_FIXED,
+    ROTATION_STRATEGY_LEAST_POINTS,
+    ROTATION_STRATEGY_RANDOM,
+    ROTATION_STRATEGY_ROUND_ROBIN,
+    TASK_KIND_MANDATORY,
+    TASK_KIND_STANDARD,
+    TASK_STATUS_AWAITING_CONFIRMATION,
+    TASK_STATUS_DONE,
+    TASK_STATUS_IDLE,
+    TASK_STATUS_OVERDUE,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_UPCOMING,
+    VACATION_BEHAVIOR_PAUSE,
+    VACATION_BEHAVIOR_SHOW,
+)
+from .const import resolve_progress_thresholds
+from .storage import (
+    BatteryOverrideStorageCollection,
+    ChecklistStateStore,
+    ClaimStateStore,
+    CoinLedgerStore,
+    CompletionLogStore,
+    DeadlineExtensionStateStore,
+    DeadlineNotificationStateStore,
+    MemberStorageCollection,
+    MilestoneBonusStateStore,
+    RewardRedemptionStorageCollection,
+    StreakBonusStateStore,
+    TaskStorageCollection,
+    TopScorerBonusStateStore,
+    TriggerStateStore,
+    VacationModeStateStore,
+    week_bounds,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+# v0.36: MILESTONE_BONUS_1_TASK_ID/MILESTONE_BONUS_2_TASK_ID/
+# POINTS_CORRECTION_TASK_ID/STREAK_BONUS_TASK_ID are retired (the coin-bonus
+# system below credits CoinLedgerStore directly instead of logging a
+# completion-log entry) but still live in const.py so storage.py's
+# ws_list_member_weekly_completions can keep excluding old entries under
+# those sentinels from a household's pre-v0.36 history - see the constants'
+# docstrings there. Nothing in this module needs them directly any more.
+
+
+@dataclass(slots=True)
+class TaskStatusData:
+    """Computed, current-period status of a single recurring task."""
+
+    task_id: str
+    name: str
+    icon: str | None
+    points: int
+    status: str  # idle / pending / overdue / awaiting_confirmation / done
+    period_key: str
+    due_at: datetime | None
+    assigned_member_id: str | None
+    last_completed_by: str | None = None
+    last_completed_at: datetime | None = None
+    # v0.27: the actual clock moment this occurrence flips from pending to
+    # TASK_STATUS_OVERDUE (see the `now > deadline_at` check and
+    # _deadline_at() in _async_update_data) - since v0.39 usually the task's
+    # own absolute "Überfällig ab" time-of-day (task["overdue_time"]) on the
+    # period's date, falling back to the legacy Karenzzeit *duration*
+    # (overdue_after_minutes) added to due_at for a task that predates that
+    # field. Exposed as a real timestamp so the card can show each task's
+    # "Zu erledigen bis HH:MM" without working it out by hand. None wherever
+    # due_at itself is None (recurrence "trigger"/"confirmation" with no open
+    # occurrence yet).
+    deadline_at: datetime | None = None
+    # v0.57: whether deadline_at above reflects a parent's "Verlängern"
+    # grant (DeadlineExtensionStateStore) rather than the task's own
+    # unmodified due_time/overdue_time/overdue_after_minutes computation -
+    # see FamilyTasksCoordinator.async_extend_task_deadline. Purely
+    # informational (deadline_at itself already carries the extended value,
+    # every overdue/pause/notification check reads that directly) - lets the
+    # card show e.g. "Frist verlängert" next to the deadline without having
+    # to guess from the timestamp alone.
+    deadline_extended: bool = False
+    # v0.27: "Annehmen" reservation state - see ClaimStateStore in storage.py
+    # and FamilyTasksCoordinator.async_claim_task/_async_expire_claim. While
+    # claimed_by_member_id is set, eligible_member_ids above is narrowed down
+    # to exactly that one member (see the claim handling in
+    # _async_update_data) - nobody else may claim or complete the occurrence
+    # until claim_expires_at passes, at which point the claimant loses
+    # CLAIM_PENALTY_POINTS and the next refresh finds no active claim again,
+    # reopening it for the normal eligible_member_ids set. Both None
+    # whenever there is no active claim.
+    claimed_by_member_id: str | None = None
+    claim_expires_at: datetime | None = None
+    # Whether "Annehmen" should be offered at all right now - true only when
+    # nobody has already claimed this occurrence *and* more than one member
+    # is currently eligible to act on it (see eligible_member_ids); claiming
+    # a task only one person could ever do anyway would reserve nothing.
+    claimable: bool = False
+    # Only populated for recurrence type "battery" (see RECURRENCE_BATTERY):
+    # every currently monitored battery at/below its warning threshold, as
+    # dicts {entity_id, name, level, threshold} - see battery.LowBattery.
+    battery_entities: list[dict] = field(default_factory=list)
+    # Every member currently responsible for this occurrence. For every
+    # rotation strategy except a "fixed" one with more than one member this
+    # is just [assigned_member_id] (or [] if unassigned) - see
+    # FamilyTasksCoordinator._assigned_member_ids. A fixed multi-assignee task
+    # never actually rotates, so it's shared between all of them at once
+    # instead of "belonging" to whichever one happens to sit at
+    # rotation.current_index.
+    assigned_member_ids: list[str] = field(default_factory=list)
+    # v0.25: who may currently act on (complete) this occurrence - normally
+    # identical to assigned_member_ids, but with one addition layered on
+    # top, which doesn't change assigned_member_ids itself (that field stays
+    # the "whose turn/responsibility is this" display value used for the
+    # assignee label, per-member open-task counts, and new-task
+    # notifications):
+    # - a parent completing a task currently assigned to a child is *always*
+    #   allowed (not only once overdue) - this needs no special entry here
+    #   since async_complete_task never actually checked eligible_member_ids
+    #   to begin with (see its docstring); a parent is simply never blocked
+    #   server-side. eligible_member_ids only drives the card's UI (which
+    #   "Erledigt" buttons/rows it shows), see canAct in
+    #   family-tasks-card.js, which separately allows any non-child admin to
+    #   act on a child-assigned task regardless of this list.
+    # - v0.30: every active MEMBER_ROLE_CHILD member, for the entire time an
+    #   "Aufgabenpool" occurrence is pending or overdue (not just once
+    #   overdue) - see is_pool_task in _async_update_data. Such an occurrence
+    #   starts with assigned_member_ids always empty (no fixed assignee, no
+    #   rotation), so without this nobody would ever be eligible to claim or
+    #   complete it at all.
+    #
+    # v0.50: previously (v0.25-v0.49) a third addition let every other active
+    # MEMBER_ROLE_CHILD sibling step in on a child's own occurrence once it
+    # went TASK_STATUS_OVERDUE ("ein Geschwisterkind einspringen lassen").
+    # Removed on explicit user request - "Einem Kind zugewiesene Aufgaben
+    # sollen nie einem anderen Kind angezeigt werden, solange die Zuweisung
+    # fortbesteht" - so a task assigned to one child (fixed or rotation) is
+    # now visible/actionable only for that child (and, as always, any
+    # parent) for as long as that assignment stands, overdue or not. See
+    # _async_update_data, where the sibling-widening loop was deleted
+    # outright rather than just disabled.
+    eligible_member_ids: list[str] = field(default_factory=list)
+    # Only populated for recurrence type "trigger" (see RECURRENCE_TRIGGER):
+    # the bound sensor's current state/value and unit of measurement, so the
+    # card can show e.g. "aktuell: 18.4 °C" alongside the trigger definition
+    # instead of just the entity_id.
+    trigger_sensor_value: str | None = None
+    trigger_sensor_unit: str | None = None
+    # Only populated for a task that has a checklist (task["subtasks"] is
+    # non-empty - see const.py's "Task kinds / checklists" section; no longer
+    # tied to a "kind" of its own since v0.39): every sub-item with its
+    # current checked state for this period, as dicts {id, name, checked} -
+    # see FamilyTasksCoordinator.async_toggle_subtask.
+    subtasks: list[dict] = field(default_factory=list)
+    # standard / checklist / mandatory - see TASK_KINDS in const.py. Exposed
+    # here (and as a sensor attribute) mainly so an automation can identify a
+    # TASK_KIND_MANDATORY task without needing the raw stored task object.
+    kind: str = TASK_KIND_STANDARD
+    # v0.22: set only for a task a "child" member created for themselves (see
+    # CONF_TASK_CREATED_BY_MEMBER_ID in const.py) - the card uses this to
+    # hide such a task from everyone except the member it names.
+    created_by_member_id: str | None = None
+    # v0.32: "show"/"pause" - what this task does while the household-wide
+    # Urlaubsmodus switch is on, see CONF_TASK_VACATION_BEHAVIOR in const.py.
+    # Exposed so the card's task-edit form can pre-fill the current choice.
+    vacation_behavior: str = VACATION_BEHAVIOR_SHOW
+    # v0.32: a parent's free-text note left the last time this task's claim
+    # was rejected ("Ablehnen"), and when - see async_skip_task in
+    # coordinator.py. Both None once the child has acted on the task again
+    # (a fresh completion or confirmation request clears them).
+    last_rejection_note: str | None = None
+    last_rejection_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class MemberSummaryData:
+    """Computed summary for a family member."""
+
+    member_id: str
+    name: str
+    person_entity_id: str | None
+    points_today: int
+    points_week: int
+    points_month: int
+    points_total: int
+    open_tasks: int
+    # v0.36: current balance in the reward-shop currency, "Münzen" -
+    # replaces the old points_available entirely (points now only ever drive
+    # the weekly-progress bar, see points_week below - see
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS). v0.44: simply
+    # FamilyTasksCoordinator.coin_ledger's balance for this member - every
+    # completed task's own "coin_value" (async_complete_task/
+    # _async_finalize_confirmation, reason COIN_REASON_TASK_COMPLETION),
+    # every Meilenstein-/Streak-coin-bonus credited, and every past reward
+    # redemption debited (see CoinLedgerStore in storage.py). Before v0.44
+    # this also included a live "points earned beyond the weekly goal"
+    # component (storage.coins_from_task_points) - removed along with that
+    # mechanic; a task now earns coins only via its own coin_value,
+    # independent of the weekly goal entirely. Never a separately stored/
+    # mutated value itself, always computed fresh from the ledger so it can
+    # never drift out of sync. Drives the reward-shop balance display and
+    # whether a given catalog reward is affordable (WS_API_REWARD_REDEEM in
+    # const.py / ws_redeem_reward in storage.py re-derives the same thing
+    # server-side before letting a redemption through).
+    coins_available: int = 0
+    # v0.14: whether tick-based screen-time granting should currently be
+    # active for this member - True unless they have at least one
+    # TASK_KIND_MANDATORY task assigned whose deadline (due_at +
+    # overdue_after_minutes) has passed and that isn't TASK_STATUS_DONE yet
+    # (see the screen_time_paused_members computation in
+    # FamilyTasksCoordinator._async_update_data). Exposed via a per-member
+    # binary_sensor (see binary_sensor.py) for a household's own tick-granting
+    # automation to gate on - this integration never grants screen time
+    # itself, only this flag. Resumes automatically (no explicit "resume"
+    # action) the moment none of their mandatory tasks are overdue anymore;
+    # ticks missed while paused are never made up.
+    # v0.34: this also covers a mandatory task a child has already marked
+    # done but that's still TASK_STATUS_AWAITING_CONFIRMATION past its
+    # deadline - a child's own completion claim doesn't lift the pause by
+    # itself, only an actual parent confirmation (or a task that needed none
+    # to begin with) does.
+    screen_time_grant_active: bool = True
+    # v0.36: how many minutes to ADD to the household's Handyzeit blueprint's
+    # own configured per-tick increment (a negative number reduces it, 0
+    # leaves it unchanged) - see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in
+    # const.py and FamilyTasksCoordinator._screen_time_tick_adjustment_minutes.
+    # Banded on this member's progress percent against
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS: -2 at the 0% band (no progress at all
+    # that week), -1 at the 50% band, 0 from the 100% band up. Exposed as
+    # a plain attribute on FamilyTasksMemberPointsSensor (see sensor.py, same
+    # "no dedicated entity for a single number" reasoning as the other
+    # options-derived attributes on FamilyTasksData below) rather than a new
+    # entity, for the blueprint's optional
+    # screen_time_tick_adjustment_source_entity input to read via
+    # state_attr(...) and apply only to its "plus_tick" trigger path.
+    #
+    # v0.45.1: judged against *last* week's progress, not the still-running
+    # current week - a shortfall only ever bites the week after it happened,
+    # never mid-week against a goal that by definition can't be reached yet
+    # until the week is over.
+    #
+    # v0.46: 0 whenever CONF_SCREEN_TIME_MALUS_START_DATE (const.py) is
+    # unset, or the previous week to judge starts before it - a household
+    # explicitly marks when it actually started using family_tasks rather
+    # than this being inferred per member (see
+    # FamilyTasksCoordinator._async_update_data and that constant's
+    # docstring for why the old per-member inference was replaced).
+    screen_time_tick_adjustment_minutes: int = 0
+    # v0.70: this member's role (MEMBER_ROLE_CHILD/MEMBER_ROLE_PARENT) - the
+    # Spotify unlock sensor only exists for children.
+    role: str = MEMBER_ROLE_PARENT
+    # v0.70: points of the already-final previous calendar week (always
+    # computed - unlike the Handyzeit malus above it is not gated on
+    # CONF_SCREEN_TIME_MALUS_START_DATE) and whether that reached the
+    # household's Spotify threshold, i.e. whether Spotify is unlocked for the
+    # *current* week. False whenever the threshold is 0 (feature off). See
+    # CONF_SPOTIFY_THRESHOLD_POINTS in const.py and
+    # FamilyTasksSpotifyUnlockedSensor in binary_sensor.py.
+    last_week_points: int = 0
+    spotify_unlocked: bool = False
+    # v0.45: this member's own estimated total Handyzeit for today, in
+    # minutes - screen_time_ticks_per_day * max(screen_time_tick_minutes +
+    # screen_time_tick_adjustment_minutes above, 0), the same per-tick malus
+    # math the household's Handyzeit-Verwaltung blueprint itself already
+    # applies (see PROGRESS_BAND_TICK_ADJUSTMENT_MINUTES in const.py and
+    # FamilyTasksCoordinator._screen_time_tick_adjustment_minutes). Computed
+    # once here (not in the card) so the card never has to redo the
+    # multiplication itself - same "single source of truth" reasoning as
+    # milestone_150_threshold_points below. Always 0 whenever a household
+    # hasn't entered CONF_SCREEN_TIME_TICK_MINUTES/
+    # CONF_SCREEN_TIME_TICKS_PER_DAY yet (both default to 0) - the card then
+    # hides the estimate entirely rather than showing a guessed number. A
+    # live snapshot, not a running total already granted today - but as of
+    # v0.45.1 the malus feeding it is fixed for the whole week (it's judged
+    # against last week's already-final points), so unlike before, this
+    # value no longer moves within a week as more points are earned; it only
+    # changes at the next calendar-week rollover.
+    screen_time_daily_minutes: int = 0
+    # v0.60: a forward-looking counterpart to screen_time_daily_minutes
+    # above - what the per-tick malus (and therefore the daily Handyzeit
+    # estimate) would be for the *coming* week if the currently still-
+    # running week ended right now. Computed with the exact same
+    # _screen_time_tick_adjustment_minutes banding function, just fed this
+    # week's own (still incomplete) points_week instead of last week's
+    # already-final total - i.e. it answers "if nothing changes for the
+    # rest of this week, what will next week's Handyzeit-Tick-Malus be?".
+    # Gated on screen_time_malus_start_date the same way
+    # screen_time_tick_adjustment_minutes is, just one week later: this
+    # week (start_of_week) is the week that will become "last week" once
+    # the malus for the coming week is judged, so it's start_of_week (not
+    # last_week_start) that has to be on/after the configured start date.
+    # A live projection, not a fixed value - unlike
+    # screen_time_daily_minutes/_adjustment_minutes it keeps moving as more
+    # points are earned this week, right up until the week rolls over, at
+    # which point it becomes the new (now fixed) screen_time_daily_minutes.
+    screen_time_tick_adjustment_minutes_next_week: int = 0
+    # v0.60: see screen_time_tick_adjustment_minutes_next_week above -
+    # screen_time_ticks_per_day * max(screen_time_tick_minutes +
+    # screen_time_tick_adjustment_minutes_next_week, 0), same formula as
+    # screen_time_daily_minutes just fed the projected adjustment. 0
+    # whenever screen_time_daily_minutes itself would be 0 (feature
+    # unconfigured), same as that field.
+    screen_time_daily_minutes_next_week: int = 0
+    # v0.32: current consecutive-week bonus streak length against the 200%
+    # weekly-progress checkpoint (v0.36: was a single counter tied to the
+    # then-configurable CONF_STREAK_BONUS_THRESHOLD_POINTS; v0.36-v0.62 also
+    # tracked an independent 150% tier here, removed in v0.63's Streak-Bonus
+    # simplification - see CONF_STREAK_BONUS_2_WEEKS_COINS/
+    # CONF_STREAK_BONUS_3_WEEKS_COINS in const.py and
+    # FamilyTasksCoordinator._async_process_streak_coin_bonus). 0 whenever
+    # the bonus is unconfigured (both amounts <= 0) or the member hasn't
+    # reached the checkpoint in their most recently judged week.
+    streak_weeks_200: int = 0
+    # v0.71: points above the second coin threshold that this week already
+    # passed on to the *next* week (a pending carry-over, not yet part of
+    # points_week) - shown on the progress bar.
+    points_carryover: int = 0
+    # v0.71: what the member actually earned this week - points_week without
+    # the points carried in from last week, plus the overflow already passed
+    # on to next week. The basis of the (live) Wochensieger comparison.
+    points_week_earned: int = 0
+
+
+@dataclass(slots=True)
+class FamilyTasksData:
+    """Snapshot produced on every coordinator refresh."""
+
+    tasks: dict[str, TaskStatusData] = field(default_factory=dict)
+    members: dict[str, MemberSummaryData] = field(default_factory=dict)
+    # v0.36: household-wide Meilensteinbonus coin amounts (see
+    # CONF_MILESTONE_150_BONUS_COINS/CONF_MILESTONE_200_BONUS_COINS in
+    # const.py), read fresh from the config entry's options on every refresh.
+    # Replaces v0.30's configurable-threshold milestone_bonus_enabled/
+    # milestone_1_*/milestone_2_* fields entirely - the two checkpoints are
+    # now the fixed 150%/200% weekly-progress bands (PROGRESS_THRESHOLD_PERCENTS
+    # in const.py) rather than a household-chosen percent, and the bonus
+    # itself is coins credited to CoinLedgerStore rather than points logged
+    # to the completion log (see
+    # FamilyTasksCoordinator._async_process_milestone_coin_bonus). A tier is
+    # off exactly when its bonus is <= 0. Exposed as sensor attributes (see
+    # FamilyTasksMemberPointsSensor in sensor.py) purely so the card can draw
+    # the two fixed threshold markers on each member's "Wochenfortschritt"
+    # progress bar and label them with their bonus - there is no
+    # coordinator-level entity to attach this to otherwise, so it rides along
+    # on every member's points sensor (the value is identical on all of them,
+    # the card just reads it off whichever one).
+    milestone_150_bonus_coins: int = DEFAULT_MILESTONE_150_BONUS_COINS
+    milestone_200_bonus_coins: int = DEFAULT_MILESTONE_200_BONUS_COINS
+    # v0.32: the *absolute* point value each fixed 150%/200% checkpoint above
+    # works out to this week (round(weekly_progress_goal_points * percent /
+    # 100), the exact same computation
+    # FamilyTasksCoordinator._async_process_milestone_coin_bonus itself
+    # awards against, and also the per-week target the Streak-Bonus judges
+    # against (v0.63: only against the 200% one now - see
+    # streak_bonus_2_weeks_coins/streak_bonus_3_weeks_coins below)
+    # - computed once, here, in Python and exposed so the card can show/label
+    # the markers with these numbers directly instead of recomputing
+    # percent -> points itself in JS. Python's round() (banker's rounding)
+    # and JS's Math.round() (always rounds .5 up) can disagree on an exact
+    # .5 - recomputing independently in the card could then show a marker at
+    # a slightly different point value than the one the backend actually
+    # awards at. 0 whenever weekly_progress_goal_points is 0 (nothing to take
+    # a percentage of).
+    milestone_150_threshold_points: int = 0
+    milestone_200_threshold_points: int = 0
+    # v0.68: absolute-point malus thresholds 1-4 (the weekly goal itself is
+    # the fifth boundary), shown as numbers on the progress bar.
+    malus_threshold_points: tuple[int, int, int, int] = (0, 0, 0, 0)
+    # v0.70: household-wide Spotify threshold (absolute points of the
+    # previous week; 0 = feature off), drawn on the weekly progress bar and
+    # backing the per-child Spotify unlock binary sensor.
+    spotify_threshold_points: int = DEFAULT_SPOTIFY_THRESHOLD_POINTS
+    # v0.23: household-wide default rotation strategy for new tasks (see
+    # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
+    # same reason the milestone-bonus settings above do (no dedicated entity
+    # to attach a plain options value to). The card reads this to pre-select
+    # the right "Rotationstyp" when opening the "+ Aufgabe hinzufügen" form
+    # instead of always defaulting to "Reihum".
+    default_rotation_strategy: str = DEFAULT_ROTATION_STRATEGY
+    # v0.29: household-wide weekly point goal (see
+    # CONF_WEEKLY_PROGRESS_GOAL_POINTS in const.py) backing the card's
+    # "Wochenfortschritt" progress bars - rides along here for the same
+    # reason default_rotation_strategy does (no dedicated entity to attach a
+    # plain options value to). 0 means the goal/surplus mechanic is off; the
+    # card then renders each bar as a plain "points earned this week" tally
+    # with no target to reach.
+    weekly_progress_goal_points: int = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+    # v0.36: household-wide Streak-Bonus coin amounts - rides along here
+    # for the same "no dedicated entity for a plain options value" reason
+    # the milestone/weekly-goal settings above do.
+    #
+    # v0.63: simplified to a single tier at the fixed 200% weekly-progress
+    # checkpoint with two fixed-week milestones (see
+    # CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS in
+    # const.py) - streak_bonus_2_weeks_coins is paid the week a member's
+    # streak first reaches 2 consecutive qualifying weeks at the 200%
+    # checkpoint, streak_bonus_3_weeks_coins from the 3rd consecutive
+    # qualifying week onward, repeated every further week the streak holds -
+    # see FamilyTasksCoordinator._async_process_streak_coin_bonus. Off
+    # exactly when both are <= 0. Replaces the old independent 150%/200%
+    # tiers and the configurable CONF_STREAK_BONUS_REQUIRED_WEEKS (see git
+    # history for the v0.36-v0.54 evolution of this feature).
+    streak_bonus_2_weeks_coins: int = DEFAULT_STREAK_BONUS_2_WEEKS_COINS
+    streak_bonus_3_weeks_coins: int = DEFAULT_STREAK_BONUS_3_WEEKS_COINS
+    # v0.52: "Wochensieger-Bonus" coin amount (see
+    # CONF_TOP_SCORER_BONUS_COINS in const.py) - rides along here for the
+    # same "no dedicated entity for a plain options value" reason the
+    # milestone/streak settings above do. 0 means the feature is off; the
+    # card then hides the live leader indicator entirely. Purely
+    # informational for the card (labels the crown's tooltip) - the actual
+    # awarding is FamilyTasksCoordinator._async_process_top_scorer_coin_bonus,
+    # which reads the option itself rather than this snapshot.
+    top_scorer_bonus_coins: int = DEFAULT_TOP_SCORER_BONUS_COINS
+    # v0.32: whether the household-wide Urlaubsmodus switch
+    # (switch.FamilyTasksVacationModeSwitch) is currently on - rides along
+    # here (not a dedicated attribute on the switch's own entity state, which
+    # already exposes it as its native on/off state) purely so the card can
+    # read it off the same per-refresh snapshot as everything else, without
+    # having to separately track the switch entity's state too. See
+    # VacationModeStateStore in storage.py.
+    vacation_mode_active: bool = False
+    # v0.38: how many "Aufgabenpool" occurrences are currently unclaimed and
+    # actionable - see pool_tasks_open in _async_update_data for exactly
+    # which occurrences count (matches the card's own
+    # _renderTaskPoolSection). Unlike the options-derived fields above this
+    # is a primary, at-a-glance household figure, so it gets its own
+    # dedicated entity (FamilyTasksPoolTasksSensor in sensor.py) rather than
+    # riding along as a plain attribute somewhere.
+    pool_tasks_open: int = 0
+    # v0.45: household-wide Handyzeit-Verwaltung blueprint mirror values (see
+    # CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY in
+    # const.py) - rides along here for the same "no dedicated entity for a
+    # plain options value" reason default_rotation_strategy/
+    # weekly_progress_goal_points above do. Identical for every member; the
+    # per-member estimate itself is
+    # MemberSummaryData.screen_time_daily_minutes.
+    screen_time_tick_minutes: int = DEFAULT_SCREEN_TIME_TICK_MINUTES
+    screen_time_ticks_per_day: int = DEFAULT_SCREEN_TIME_TICKS_PER_DAY
+
+
+def _yearly_anchor_date(year: int, month: int, day: int) -> date:
+    """Resolve a "yearly" recurrence's month/day within a given year.
+
+    Falls back to February 28th for a February 29th anchor in a non-leap
+    year, rather than raising - a "29.02." yearly task should still resolve
+    to a sensible date every single year, not just leap ones. Every other
+    month/day combination is always valid for any year (they were already a
+    real calendar date once, when the anchor itself was saved), so this is
+    the only case that can ever need the fallback.
+    """
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return date(year, month, day - 1)
+
+
+def _yearly_occurrences(
+    recurrence: dict, today: date, created_at: date | None
+) -> tuple[date | None, date]:
+    """Shared "yearly" resolution for _current_period_date/_pool_period_date.
+
+    v0.65: factored out of a first version that lived directly in
+    _current_period_date and (bug, see its own CHANGELOG entry) mirrored
+    "interval_days" unconditionally - anchor_date only ever carries a
+    "yearly" task's month/day (the year is never read back, see
+    RECURRENCE_YEARLY in const.py), so unlike interval_days (whose anchor
+    normally *is* the task's own creation date) that always resolved to
+    *some* date from the current or previous calendar year regardless of
+    whether the task had even existed yet, or whether that date had even
+    arrived: a task created any time after its own month/day had already
+    passed this year showed up immediately "überfällig" for a date before
+    it was ever created (the exact v0.39 "weekly" bug, reproduced here),
+    and one created *before* its date resolved to *last* year's already-past
+    occurrence instead of simply "not due yet" - so a brand-new "yearly"
+    task was, in practice, never idle/"nicht fällig" at all.
+
+    Returns ``(due_or_overdue, next_occurrence)``:
+
+    - ``due_or_overdue`` is this year's occurrence once it has arrived
+      (today included) *and* it doesn't predate the task's own creation -
+      the current, possibly-overdue-until-completed period, same semantics
+      "interval_days" already has - or ``None`` if neither holds yet (not
+      arrived this year, or the only candidate so far predates created_at).
+    - ``next_occurrence`` is always the earliest occurrence that is both
+      still upcoming and not itself before ``created_at`` - the date either
+      caller previews going forward.
+
+    ``created_at`` mirrors the same guard "weekly" has had since v0.39: a
+    candidate date before the task's own creation is never treated as "the"
+    period - the caller instead falls through to whatever comes next.
+    """
+    anchor = date.fromisoformat(recurrence["anchor_date"])
+    this_year_date = _yearly_anchor_date(today.year, anchor.month, anchor.day)
+
+    due_or_overdue: date | None = None
+    if today >= this_year_date and (created_at is None or this_year_date >= created_at):
+        due_or_overdue = this_year_date
+
+    next_occurrence = (
+        this_year_date
+        if today < this_year_date
+        else _yearly_anchor_date(today.year + 1, anchor.month, anchor.day)
+    )
+    while created_at is not None and next_occurrence < created_at:
+        next_occurrence = _yearly_anchor_date(next_occurrence.year + 1, anchor.month, anchor.day)
+
+    return due_or_overdue, next_occurrence
+
+
+def _current_period_date(
+    recurrence: dict,
+    today: date,
+    created_at: date | None = None,
+    is_completed: Callable[[date], bool] | None = None,
+) -> date | None:
+    """Return the date identifying the current occurrence's period.
+
+    ``created_at`` (v0.39): the date the task itself was created, if known -
+    ``None`` for a task saved before this field existed. Affects "weekly"
+    (without it, a task created e.g. on a Sunday for a Monday-only schedule
+    would resolve to *last* Monday - a date before the task ever existed -
+    and show up immediately as overdue, even though it has never actually
+    had a chance to be completed; see the v0.39 CHANGELOG entry) and, since
+    v0.65, "yearly" for the same reason (see _yearly_occurrences).
+
+    v0.40: "weekly" was the only branch that could return ``None``, for a
+    task too new to have had a chance at any of its configured weekdays yet
+    this week. v0.65: "yearly" can return ``None`` too, for the analogous
+    "too new/too far ahead" case - see its own branch below and
+    _yearly_occurrences. Every other recurrence type still always resolves
+    to a concrete date.
+
+    ``is_completed`` (v0.42): for "weekly" only, see that branch's comment -
+    lets a caller with access to the completion log (``_async_update_data``/
+    ``_current_period_key``, both via ``FamilyTasksCoordinator``) tell this
+    otherwise-pure function whether a given candidate date's occurrence has
+    already been completed. ``None`` (the default, and every call site other
+    than the two above) treats every candidate as not completed, i.e. the
+    original pre-v0.42 backward-search behavior.
+    """
+    rtype = recurrence["type"]
+
+    if rtype == "daily" or rtype == RECURRENCE_BATTERY:
+        # A battery task's period is daily, same as "daily" - but see
+        # _async_update_data, which downgrades a due occurrence back to
+        # TASK_STATUS_IDLE unless a monitored battery is currently low.
+        return today
+
+    if rtype == "weekly":
+        # v0.40: bounded to the *current* calendar week (Monday-Sunday) -
+        # same window _pool_period_date already uses, but, unlike that one,
+        # this never reaches beyond it. Previously (v0.39) a task too new to
+        # have had a chance at any of its configured weekdays yet searched
+        # forward *unbounded*, which could land on a date days away while
+        # still being reported as TASK_STATUS_PENDING ("offen") - there was
+        # no separate "not due yet" status for a weekly task, so the card
+        # showed it as already open. _async_update_data now treats a future
+        # date returned from here as TASK_STATUS_UPCOMING instead (visible
+        # with its weekday, not completable yet - "Es sollen immer alle
+        # bereits vorhersehbaren Aufgaben der jeweils laufenden Woche
+        # angezeigt werden"), and ``None`` (nothing left to show *this*
+        # week) as idle, same as an untriggered sensor task - it starts
+        # appearing again once its weekday actually falls within a week it
+        # existed for.
+        weekdays = recurrence.get("weekdays") or [0]
+        week_start = today - timedelta(days=today.weekday())
+
+        # v0.42 walked every past-or-today match in *ascending* order and
+        # returned the earliest one that wasn't yet completed, so that a
+        # fixed weekly task with e.g. Monday+Friday configured would
+        # "advance" from a done Monday to Friday within the same week
+        # instead of freezing on Monday all week (see the CHANGELOG). But
+        # that meant a *missed* (not completed) earlier weekday stayed "the"
+        # current period for the rest of the week too - only completing it
+        # advanced past it, so a task due Monday+Thursday whose Monday
+        # occurrence was never done kept reporting Monday (and, once
+        # Monday's own overdue_time had passed, "überfällig") straight
+        # through Thursday, even though Thursday - today, its own distinct,
+        # not-yet-due-let-alone-overdue occurrence - is what should actually
+        # determine the task's state by then. v0.43: walk the same matches
+        # in *descending* order instead and return the most recent one
+        # (today's own match, if today itself matches) unless *that one* is
+        # already completed, in which case fall through to the forward
+        # search below exactly as before - so the task's state always comes
+        # from its nearest due date, never a stale uncompleted one from
+        # earlier in the same week. A task with only one configured weekday
+        # behaves exactly as before either way, since there's only ever at
+        # most one past-or-today candidate to consider.
+        passed_candidates: list[date] = []
+        for offset in range(today.weekday() + 1):
+            candidate = week_start + timedelta(days=offset)
+            if candidate.weekday() in weekdays and (
+                created_at is None or candidate >= created_at
+            ):
+                passed_candidates.append(candidate)
+        if passed_candidates:
+            most_recent_candidate = passed_candidates[-1]
+            if is_completed is None or not is_completed(most_recent_candidate):
+                return most_recent_candidate
+
+        # Nothing this week is still open (the most recent past-or-today
+        # match is already completed, or none has happened yet, or every
+        # match so far predates created_at) - look forward to the earliest
+        # still-upcoming matching weekday, but only through the *end of
+        # this same week*. Beyond that there is nothing "already
+        # foreseeable" about it yet - it simply isn't shown at all until
+        # the week it falls in actually starts.
+        for offset in range(today.weekday() + 1, 7):
+            candidate = week_start + timedelta(days=offset)
+            if candidate.weekday() in weekdays and (
+                created_at is None or candidate >= created_at
+            ):
+                return candidate
+        return None
+
+    if rtype == "interval_days":
+        anchor = date.fromisoformat(recurrence["anchor_date"])
+        interval = max(1, recurrence.get("interval", 1))
+        delta_days = (today - anchor).days
+        period_index = delta_days // interval if delta_days >= 0 else 0
+        return anchor + timedelta(days=period_index * interval)
+
+    if rtype == "yearly":
+        # Fixed calendar date every year (e.g. "29.07.") - see
+        # _yearly_occurrences for why this needs its own bounded-preview
+        # handling (v0.65) instead of interval_days' simpler "most recent
+        # anchor <= today" model. Due/overdue (today's-or-a-not-too-old
+        # occurrence, gated on created_at) takes priority; otherwise preview
+        # the next occurrence only once it falls within the current
+        # calendar week - same bounded "Bald fällig" window every other
+        # type gets (see the generic TASK_STATUS_UPCOMING check further
+        # below in _async_update_data) - and stay idle/hidden ("nicht
+        # fällig") for the rest of the year otherwise, exactly like a
+        # "weekly" task whose weekday hasn't fallen within a week it existed
+        # for yet.
+        due_or_overdue, next_occurrence = _yearly_occurrences(recurrence, today, created_at)
+        if due_or_overdue is not None:
+            return due_or_overdue
+        week_end_date = today + timedelta(days=6 - today.weekday())
+        return next_occurrence if next_occurrence <= week_end_date else None
+
+    if rtype == RECURRENCE_ONCE:
+        # A single, never-repeating occurrence: the period is always the
+        # task's anchor date itself, regardless of "today" - so once it's
+        # completed/skipped for that date, the (task_id, period_key) pair
+        # never comes up again and the task stays "done" for good.
+        return date.fromisoformat(recurrence["anchor_date"])
+
+    return today
+
+
+def _pool_period_date(recurrence: dict, today: date, created_at: date | None = None) -> date:
+    """Like _current_period_date, but for an "Aufgabenpool" task (see below).
+
+    v0.40: _current_period_date's own "weekly" backward search is now
+    bounded to the current calendar week too (see its docstring) - both
+    functions agree on which matching weekday within *this* week is "the"
+    current occurrence. They still differ once nothing has happened yet
+    this week: _current_period_date only looks forward through the
+    *remaining* days of this same week and returns ``None`` if that finds
+    nothing (surfaced by _async_update_data as TASK_STATUS_UPCOMING while
+    still within the week, or as idle/not-shown otherwise - "a normally
+    assigned/rotated task only needs to be seen once its own week starts",
+    not weeks ahead), while this function keeps reaching into the following
+    week(s) as needed and never returns ``None`` - an Aufgabenpool
+    occurrence (see the "Aufgabenpool" section in _async_update_data: nobody
+    is assigned and there is no rotation) has no other way of ever being
+    noticed at all except by showing up here, so it must always resolve to
+    *some* upcoming date for a child to see and reserve, however far out
+    that ends up being for a brand-new task.
+
+    v0.65: "yearly" gained the same never-return-``None`` special-case (see
+    _yearly_occurrences and its own branch below) once _current_period_date
+    started bounding "yearly" to a preview window too, for the exact same
+    reason as "weekly".
+
+    Normally bounded to the *current* calendar week (Monday-Sunday, the same
+    boundary start_of_week uses): prefers the most recent matching weekday
+    within this week if one has already occurred (today included), and
+    otherwise looks *forward* to the earliest still-upcoming matching
+    weekday. ``created_at`` (v0.39, see _current_period_date) excludes any
+    candidate before the task's own creation date from that backward search
+    - a task created on, say, a Sunday for a Monday-only schedule then has
+    no matching weekday left *this* week at all (Monday already happened
+    before it existed, and there are no more matching days before Sunday,
+    the last day of the week), so the forward search below is no longer
+    bounded to the rest of the current week either in that case, and instead
+    looks into the following week(s) as needed.
+    """
+    if recurrence["type"] == "yearly":
+        # v0.65: mirrors the "weekly" special-case below - _current_period_
+        # date can return None for "yearly" now (see _yearly_occurrences),
+        # which would leave an unassigned Aufgabenpool occurrence of this
+        # type with no date to ever be noticed/claimed by. due_or_overdue
+        # already covers "arrived, whether or not still uncompleted";
+        # next_occurrence is always resolvable and used as-is otherwise -
+        # unlike _current_period_date's own preview, not bounded to the
+        # current week, for the same "must always resolve to *some* date"
+        # reason the "weekly" branch below isn't either.
+        due_or_overdue, next_occurrence = _yearly_occurrences(recurrence, today, created_at)
+        return due_or_overdue if due_or_overdue is not None else next_occurrence
+
+    if recurrence["type"] != "weekly":
+        return _current_period_date(recurrence, today, created_at)
+
+    weekdays = recurrence.get("weekdays") or [0]
+    week_start = today - timedelta(days=today.weekday())
+
+    latest_so_far: date | None = None
+    for offset in range(today.weekday() + 1):  # Monday of this week .. today
+        candidate = week_start + timedelta(days=offset)
+        if candidate.weekday() in weekdays and (created_at is None or candidate >= created_at):
+            latest_so_far = candidate
+    if latest_so_far is not None:
+        return latest_so_far
+
+    search_from = max(today, created_at) if created_at else today
+    for offset in range(1, 15):  # up to two weeks out - a weekly match is always within 7
+        candidate = search_from + timedelta(days=offset)
+        if candidate.weekday() in weekdays and (created_at is None or candidate >= created_at):
+            return candidate
+
+    return today
+
+
+def _due_at(period_start: date, due_time: str | None) -> datetime:
+    """Combine a period's date with an optional time-of-day into a datetime.
+
+    due_time is stored (and documented, see storage.py) as "HH:MM", but the
+    card's due-time field has used the frontend's own `ha-time-input`
+    component since v0.26 instead of a native `<input type="time">` (see
+    CHANGELOG) - that component always reports a value with seconds
+    ("HH:MM:SS"), and the card normalizes it back down to "HH:MM" before
+    saving. Splitting on ":" and only looking at the first two parts (instead
+    of the previous str.partition-based parsing, which put everything from
+    the second ":" onward - including a "SS" suffix - into what it treated as
+    the minutes component and passed to int()) keeps this tolerant of a
+    "HH:MM:SS" value too, in case one ever reaches storage directly via the
+    websocket API rather than through the card.
+    """
+    if due_time:
+        hour_str, _, rest = due_time.partition(":")
+        minute_str = rest.partition(":")[0]
+        naive = datetime.combine(
+            period_start,
+            datetime.min.time().replace(hour=int(hour_str), minute=int(minute_str or 0)),
+        )
+    else:
+        naive = datetime.combine(period_start, datetime.max.time().replace(microsecond=0))
+    # as_utc treats a naive datetime as being in the configured local time zone.
+    return dt_util.as_utc(naive)
+
+
+def _deadline_at(due_at: datetime, period_start: date, task: dict) -> datetime:
+    """Return the datetime after which an occurrence counts as overdue.
+
+    v0.39: the card's task form now sets an absolute "Überfällig ab"
+    time-of-day (``task["overdue_time"]``, same "HH:MM" shape as
+    ``due_time``) instead of a "Karenzzeit" grace-period *duration*
+    (``task["overdue_after_minutes"]``) - see the CHANGELOG entry. A task
+    saved before this version (or never re-saved since) has no
+    ``overdue_time`` at all, so it keeps behaving exactly as before:
+    ``due_at`` plus its stored (or the default) grace-period duration.
+
+    If a stored ``overdue_time`` would land *before* ``due_at`` on the same
+    date (e.g. due at 20:00 but "overdue_time" is 08:00 - not achievable via
+    the card's own form, which only offers a time on/after due_time, but
+    reachable via the websocket API directly, or a due_time edited after the
+    fact), the deadline rolls to the next day instead of claiming an
+    occurrence was already overdue before it was even due.
+    """
+    overdue_time = task.get("overdue_time")
+    if overdue_time:
+        deadline = _due_at(period_start, overdue_time)
+        if deadline < due_at:
+            deadline += timedelta(days=1)
+        return deadline
+    overdue_after = timedelta(
+        minutes=task.get("overdue_after_minutes", DEFAULT_OVERDUE_AFTER_MINUTES)
+    )
+    return due_at + overdue_after
+
+
+class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
+    """Coordinates computed task/member state for one config entry."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        tasks: TaskStorageCollection,
+        members: MemberStorageCollection,
+        completions: CompletionLogStore,
+        trigger_state: TriggerStateStore,
+        battery_overrides: BatteryOverrideStorageCollection,
+        checklist_state: ChecklistStateStore,
+        reward_redemptions: RewardRedemptionStorageCollection,
+        milestone_bonus_state: MilestoneBonusStateStore,
+        claim_state: ClaimStateStore,
+        streak_bonus_state: StreakBonusStateStore,
+        vacation_mode_state: VacationModeStateStore,
+        coin_ledger: CoinLedgerStore,
+        deadline_notification_state: DeadlineNotificationStateStore,
+        top_scorer_bonus_state: TopScorerBonusStateStore,
+        deadline_extension_state: DeadlineExtensionStateStore,
+    ) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            config_entry=entry,
+            name=DOMAIN,
+            update_interval=COORDINATOR_UPDATE_INTERVAL,
+        )
+        self.tasks = tasks
+        self.members = members
+        self.completions = completions
+        self.trigger_state = trigger_state
+        self.battery_overrides = battery_overrides
+        self.checklist_state = checklist_state
+        self.reward_redemptions = reward_redemptions
+        self.milestone_bonus_state = milestone_bonus_state
+        self.claim_state = claim_state
+        self.streak_bonus_state = streak_bonus_state
+        self.vacation_mode_state = vacation_mode_state
+        # v0.36: see CoinLedgerStore in storage.py. v0.44: this is now the
+        # household's only source of coin balance - see coins_available in
+        # _async_update_data below.
+        self.coin_ledger = coin_ledger
+        # v0.41: see DeadlineNotificationStateStore in storage.py -
+        # idempotency for the "fällig"/"überfällig"/Aufgabenpool-"appeared"
+        # notifications raised from _async_notify_task_status below.
+        self.deadline_notification_state = deadline_notification_state
+        # v0.52: see TopScorerBonusStateStore in storage.py - idempotency
+        # cursor for _async_process_top_scorer_coin_bonus below.
+        self.top_scorer_bonus_state = top_scorer_bonus_state
+        # v0.57: see DeadlineExtensionStateStore in storage.py - a parent's
+        # "Verlängern" grants for a task's currently open occurrence, read
+        # in _async_update_data below to push back deadline_at, and written
+        # by async_extend_task_deadline.
+        self.deadline_extension_state = deadline_extension_state
+
+    async def _async_update_data(self) -> FamilyTasksData:
+        now = dt_util.utcnow()
+        today = dt_util.now().date()
+        # v0.42: last day of the current calendar week (Monday-Sunday) -
+        # used by the TASK_STATUS_UPCOMING ("Bald fällig") check below to
+        # bound how far ahead a non-weekly occurrence may fall and still
+        # count as "this week", the same boundary the "weekly" branch has
+        # always used implicitly via _current_period_date's own week bound.
+        week_end_date = today + timedelta(days=6 - today.weekday())
+
+        # Moved up from further down (was only computed just before the
+        # member-summaries loop) so _async_process_milestone_coin_bonus/
+        # _async_process_streak_coin_bonus below can use start_of_week and
+        # weekly_progress_goal_points too.
+        local_now = dt_util.now()
+        start_of_today = dt_util.as_utc(dt_util.start_of_local_day(local_now))
+        # v0.50 bugfix: this used to be
+        # "start_of_today - timedelta(days=start_of_today.weekday())" -
+        # start_of_today is a UTC-converted instant, and for any timezone
+        # with a positive UTC offset (e.g. Europe/Berlin, UTC+1/+2) local
+        # midnight converts to the *previous* UTC calendar day, so
+        # start_of_today.weekday() silently returned the wrong weekday
+        # (always one day behind the actual local weekday, wrapping around
+        # on Mondays) - the week was then bounded from the wrong day,
+        # permanently excluding Monday's own points from "this week" every
+        # day from Tuesday on (and, on Mondays themselves, reaching 6 days
+        # too far back into the *previous* week instead of starting fresh).
+        # local_now.weekday() is computed on the local-timezone-aware
+        # datetime itself, before any UTC conversion, so it always reflects
+        # the real local weekday (Monday=0) regardless of offset.
+        start_of_week = start_of_today - timedelta(days=local_now.weekday())
+        start_of_month = dt_util.as_utc(
+            dt_util.start_of_local_day(local_now.replace(day=1))
+        )
+        weekly_progress_goal_points = DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+        if self.config_entry:
+            weekly_progress_goal_points = self.config_entry.options.get(
+                CONF_WEEKLY_PROGRESS_GOAL_POINTS, DEFAULT_WEEKLY_PROGRESS_GOAL_POINTS
+            )
+
+        # v0.45: household-wide Handyzeit-Verwaltung blueprint mirror values -
+        # see CONF_SCREEN_TIME_TICK_MINUTES/CONF_SCREEN_TIME_TICKS_PER_DAY in
+        # const.py. Read once per refresh, same pattern as
+        # weekly_progress_goal_points just above; used in the member-summaries
+        # loop below to compute each member's screen_time_daily_minutes.
+        screen_time_tick_minutes = DEFAULT_SCREEN_TIME_TICK_MINUTES
+        screen_time_ticks_per_day = DEFAULT_SCREEN_TIME_TICKS_PER_DAY
+        if self.config_entry:
+            screen_time_tick_minutes = self.config_entry.options.get(
+                CONF_SCREEN_TIME_TICK_MINUTES, DEFAULT_SCREEN_TIME_TICK_MINUTES
+            )
+            screen_time_ticks_per_day = self.config_entry.options.get(
+                CONF_SCREEN_TIME_TICKS_PER_DAY, DEFAULT_SCREEN_TIME_TICKS_PER_DAY
+            )
+
+        # v0.46: household-wide "malus considered active from" date - see
+        # CONF_SCREEN_TIME_MALUS_START_DATE in const.py for the full
+        # reasoning (replaces v0.45.1's per-member earliest_completed_at
+        # heuristic, which could disagree between siblings). Stored as an
+        # ISO date string (JSON-serializable config-entry options); parsed
+        # once here, same pattern as the values above. None whenever unset
+        # (the default) or unparsable - the malus then never applies at all,
+        # same as before a household has ever set it.
+        screen_time_malus_start_date = None
+        if self.config_entry:
+            malus_start_date_str = self.config_entry.options.get(
+                CONF_SCREEN_TIME_MALUS_START_DATE
+            )
+            if malus_start_date_str:
+                screen_time_malus_start_date = dt_util.parse_date(malus_start_date_str)
+
+        # Computed once per refresh and shared by every recurrence-"battery"
+        # task below (see RECURRENCE_BATTERY in const.py) - which batteries
+        # currently count as "low" doesn't depend on any single task.
+        default_battery_threshold = DEFAULT_BATTERY_WARNING_THRESHOLD
+        if self.config_entry:
+            default_battery_threshold = self.config_entry.options.get(
+                CONF_BATTERY_WARNING_THRESHOLD, DEFAULT_BATTERY_WARNING_THRESHOLD
+            )
+        low_batteries = async_compute_low_batteries(
+            self.hass, self.battery_overrides, default_battery_threshold
+        )
+        # Raised *before* the main loop below so a newly-created alert task
+        # is already reflected in this same refresh's task_statuses, instead
+        # of only appearing after the change-set listener triggers a second
+        # one (see _async_raise_battery_alerts).
+        await self._async_raise_battery_alerts(low_batteries)
+
+        # Also raised before the main loop, same reasoning: a coin bonus
+        # credited this refresh should already be reflected in this same
+        # refresh's member_summaries below, not just after a second refresh.
+        # v0.36: the old _async_correct_negative_balances one-time fixup is
+        # gone along with points_available itself - a member's coin balance
+        # can never go negative from a redemption (ws_redeem_reward in
+        # storage.py validates against it up front, same as before), so there
+        # is nothing left for it to correct.
+        await self._async_process_milestone_coin_bonus(start_of_week, weekly_progress_goal_points)
+        await self._async_process_streak_coin_bonus(start_of_week, weekly_progress_goal_points)
+        await self._async_process_top_scorer_coin_bonus(start_of_week, weekly_progress_goal_points)
+
+        # v0.32: household-wide Urlaubsmodus - see VacationModeStateStore in
+        # storage.py. Read once per refresh, same pattern as
+        # weekly_progress_goal_points above; consulted below to skip any task
+        # whose CONF_TASK_VACATION_BEHAVIOR is "pause" while it's on.
+        vacation_mode_active = self.vacation_mode_state.is_active
+
+        task_statuses: dict[str, TaskStatusData] = {}
+        open_tasks_by_member: dict[str, int] = {}
+        # v0.38: how many "Aufgabenpool" occurrences (is_pool_task below) are
+        # currently unclaimed and actionable - backs
+        # FamilyTasksData.pool_tasks_open / the dedicated
+        # FamilyTasksPoolTasksSensor (sensor.py). Mirrors exactly which ids
+        # the card's own _renderTaskPoolSection (family-tasks-card.js) would
+        # show: incremented below for a pool task that is neither claimed
+        # (claimed_by_member_id) nor TASK_STATUS_DONE nor - the one
+        # recurrence-specific case, see _isPoolTask/_renderTaskPoolSection -
+        # a "trigger" pool task still TASK_STATUS_IDLE (nothing open yet).
+        pool_tasks_open = 0
+        # Every member with at least one TASK_KIND_MANDATORY task currently
+        # TASK_STATUS_OVERDUE and assigned to them - see
+        # MemberSummaryData.screen_time_grant_active below.
+        screen_time_paused_members: set[str] = set()
+
+        # Original (task_id, period_key) occurrences that currently have an
+        # open, not-yet-resolved parent confirmation task raised against them
+        # (see RECURRENCE_CONFIRMATION in const.py / async_complete_task
+        # below). Precomputed so the main loop below can flag those
+        # occurrences as "awaiting_confirmation" regardless of which order
+        # tasks happen to be iterated in.
+        pending_confirmations: dict[tuple[str, str], str] = {}
+        for confirmation_task_id, confirmation_task in self.tasks.data.items():
+            confirms = confirmation_task.get("confirms")
+            if confirms and self.trigger_state.get(confirmation_task_id) is not None:
+                pending_confirmations[(confirms["task_id"], confirms["period_key"])] = (
+                    confirmation_task_id
+                )
+
+        for task_id, task in self.tasks.data.items():
+            if not task.get("enabled", True):
+                continue
+            # v0.32: paused for the duration of Urlaubsmodus - treated exactly
+            # like "enabled: false" above (no status entry at all, not due,
+            # not shown), except conditional on the household-wide switch
+            # instead of permanent. A task left at the default "show"
+            # (VACATION_BEHAVIOR_SHOW) is completely unaffected.
+            if (
+                vacation_mode_active
+                and task.get(CONF_TASK_VACATION_BEHAVIOR, VACATION_BEHAVIOR_SHOW)
+                == VACATION_BEHAVIOR_PAUSE
+            ):
+                continue
+
+            recurrence = task["recurrence"]
+            # v0.39: the date this task definition was created, if known -
+            # every period-date/overdue computation below treats a task
+            # saved before this field existed exactly like before (see
+            # _current_period_date/_pool_period_date).
+            created_date = self._task_created_date(task)
+
+            rotation = task["rotation"]
+            member_ids = rotation.get("member_ids") or []
+            # v0.37: a member marked "paused" (CONF_MEMBER_PAUSED - away for
+            # a while, see that constant's docstring in const.py) shouldn't
+            # receive new task assignments for the duration. If *every*
+            # current assignee of a fixed/rotating task is paused, treat the
+            # whole task exactly like a household-wide Urlaubsmodus-paused
+            # one above: skipped entirely, no status entry, not due - there
+            # is nobody around to act on it anyway. member_ids being empty
+            # (an Aufgabenpool task, see is_pool_task below) never matches
+            # here (all() of an empty rotation.member_ids would otherwise be
+            # vacuously true) - a pool task stays governed purely by which
+            # *other*, non-paused members are eligible to claim it, handled
+            # separately below.
+            if member_ids and all(self._member_paused(mid) for mid in member_ids):
+                continue
+            # For a *partially* paused rotation/fixed assignment, the
+            # non-paused subset stands in for member_ids when picking who
+            # this occurrence actually belongs to - round-robin/least-points
+            # rotate only among whoever's actually around, and a fixed
+            # multi-assignee task is carried solely by its non-paused
+            # members. Falls back to the full member_ids (the branch above
+            # already ruled out "every assignee paused") only in the
+            # impossible case that filtering left nothing.
+            rotation_member_ids = [
+                mid for mid in member_ids if not self._member_paused(mid)
+            ] or member_ids
+            assigned_member_id = self._assigned_member_id(rotation, rotation_member_ids)
+            assigned_member_ids = self._assigned_member_ids(rotation, rotation_member_ids)
+            # v0.30: "Aufgabenpool" - a task with no fixed assignee(s) *and*
+            # no rotation at all (member_ids empty either way, regardless of
+            # "strategy" - see ROTATION_SCHEMA in storage.py). Nobody is
+            # responsible for it by default; instead any active child may
+            # reserve ("Annehmen") it via the existing claim mechanism - see
+            # the eligible_member_ids/_pool_period_date handling below and
+            # the card's "Aufgabenpool" section (family-tasks-card.js), which
+            # shows these regardless of the normal due/filter settings.
+            # Excludes an auto-generated parent-confirmation task (see
+            # RECURRENCE_CONFIRMATION in const.py) even in the degenerate
+            # case of a household with no active parent at all (member_ids
+            # would then also be empty there) - that task is never something
+            # a child should see offered up for "Annehmen".
+            is_pool_task = not member_ids and not task.get("confirms")
+
+            trigger_sensor_value: str | None = None
+            trigger_sensor_unit: str | None = None
+            if recurrence["type"] == RECURRENCE_TRIGGER:
+                trigger_entity_id = (recurrence.get("trigger") or {}).get("entity_id")
+                if trigger_entity_id:
+                    trigger_entity_state = self.hass.states.get(trigger_entity_id)
+                    if trigger_entity_state is not None:
+                        trigger_sensor_value = trigger_entity_state.state
+                        trigger_sensor_unit = trigger_entity_state.attributes.get(
+                            "unit_of_measurement"
+                        )
+
+            if recurrence["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
+                open_occurrence = self.trigger_state.get(task_id)
+                if open_occurrence is None:
+                    # Never triggered yet (or resolved and waiting for the
+                    # next trigger event): nothing due, not counted as open.
+                    task_statuses[task_id] = TaskStatusData(
+                        task_id=task_id,
+                        name=task["name"],
+                        icon=task.get("icon"),
+                        points=task.get("points", 0),
+                        status=TASK_STATUS_IDLE,
+                        period_key="",
+                        due_at=None,
+                        assigned_member_id=assigned_member_id,
+                        assigned_member_ids=assigned_member_ids,
+                        # Nothing open yet, so no occurrence can be overdue -
+                        # eligible_member_ids is just assigned_member_ids,
+                        # same as every other idle/non-overdue occurrence.
+                        eligible_member_ids=assigned_member_ids,
+                        trigger_sensor_value=trigger_sensor_value,
+                        trigger_sensor_unit=trigger_sensor_unit,
+                        kind=task.get("kind", TASK_KIND_STANDARD),
+                        created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
+                    )
+                    continue
+                period_key = open_occurrence["period_key"]
+                due_at = dt_util.parse_datetime(open_occurrence["triggered_at"])
+                # A trigger/confirmation occurrence's "period" is whenever it
+                # was actually triggered, not a calendar period_start - use
+                # that same date as the reference day for combining with an
+                # absolute overdue_time below (see _deadline_at).
+                period_start = dt_util.as_local(due_at).date()
+            else:
+                period_start = (
+                    _pool_period_date(recurrence, today, created_date)
+                    if is_pool_task
+                    else _current_period_date(
+                        recurrence,
+                        today,
+                        created_date,
+                        # v0.42: lets a multi-weekday task's already-done
+                        # earlier occurrence this week be skipped in favor of
+                        # a still-open later one - see the "weekly" branch's
+                        # comment in _current_period_date.
+                        is_completed=lambda candidate: self.completions.get_last_entry(
+                            task_id, candidate.isoformat()
+                        )
+                        is not None,
+                    )
+                )
+                # v0.40: only reachable for a non-pool "weekly" task whose
+                # configured weekday(s) don't fall within the current week
+                # at all for it yet (see _current_period_date) - e.g. a
+                # brand-new task created after its only weekday already
+                # passed this week. v0.65: also reachable for a non-pool
+                # "yearly" task whose date is more than a week away (see
+                # _yearly_occurrences). Nothing to show, act on, or claim
+                # right now either way; treated exactly like an untriggered
+                # sensor task until its next occurrence actually falls
+                # within a week it existed for.
+                if period_start is None:
+                    task_statuses[task_id] = TaskStatusData(
+                        task_id=task_id,
+                        name=task["name"],
+                        icon=task.get("icon"),
+                        points=task.get("points", 0),
+                        status=TASK_STATUS_IDLE,
+                        period_key="",
+                        due_at=None,
+                        assigned_member_id=assigned_member_id,
+                        assigned_member_ids=assigned_member_ids,
+                        eligible_member_ids=assigned_member_ids,
+                        kind=task.get("kind", TASK_KIND_STANDARD),
+                        created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
+                    )
+                    continue
+                period_key = period_start.isoformat()
+                due_at = _due_at(period_start, task.get("due_time"))
+
+            deadline_at = _deadline_at(due_at, period_start, task)
+
+            # v0.57: a parent's "Verlängern" grant for this exact occurrence
+            # (DeadlineExtensionStateStore, keyed on task_id + period_key,
+            # same staleness handling as claim_state right below - an entry
+            # left over from an earlier period is simply ignored) pushes the
+            # deadline back further still. Every downstream check in this
+            # method (TASK_STATUS_OVERDUE below, the mandatory-task
+            # screen-time pause further down, deadline_at itself as exposed
+            # to the card) reads deadline_at, so overriding it once here is
+            # enough - nothing needs to special-case an extension separately.
+            deadline_extended = False
+            extension_entry = self.deadline_extension_state.get(task_id, period_key)
+            if extension_entry is not None:
+                extended_until = dt_util.parse_datetime(extension_entry["until"])
+                if extended_until is not None and extended_until > deadline_at:
+                    deadline_at = extended_until
+                    deadline_extended = True
+
+            last_entry = self.completions.get_last_entry(task_id, period_key)
+            if last_entry is not None:
+                status = TASK_STATUS_DONE
+            elif (task_id, period_key) in pending_confirmations:
+                status = TASK_STATUS_AWAITING_CONFIRMATION
+            elif (
+                not is_pool_task
+                and recurrence["type"] not in (RECURRENCE_BATTERY, RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION)
+                and today < period_start <= week_end_date
+            ):
+                # v0.40, extended v0.42: the occurrence's date is already
+                # known but its day hasn't arrived yet, and it still falls
+                # within the *current* calendar week - "Es sollen immer alle
+                # bereits vorhersehbaren Aufgaben der jeweils laufenden Woche
+                # angezeigt werden. Die Aufgaben sollen bis zur Fälligkeit
+                # mit einem grünen Label dargestellt werden." v0.40 scoped
+                # this to "weekly" only; v0.42 widens it to every non-pool,
+                # non-battery recurrence type ("once"/"interval_days" get the
+                # same green "Bald fällig" preview once their date lands in
+                # this week, not just weekly tasks) - "Bald fällig" is a
+                # property of "how soon is this due", not of which
+                # recurrence type produced the date. Still bounded to the
+                # current week, same as the "weekly" branch always was: a
+                # one-time task scheduled for next month keeps showing up
+                # immediately PENDING/completable rather than gaining a
+                # premature green label weeks in advance. Never reached for
+                # an Aufgabenpool task (is_pool_task) - _pool_period_date
+                # already returns future dates *by design* so a pool
+                # occurrence can be reserved from the start of the week, and
+                # it stays TASK_STATUS_PENDING/claimable for that entire
+                # window, not TASK_STATUS_UPCOMING. Also excluded for
+                # RECURRENCE_BATTERY, whose period_start is always today
+                # (see _current_period_date) and which uses its own
+                # idle-unless-a-battery-is-actually-low downgrade further
+                # below instead.
+                status = TASK_STATUS_UPCOMING
+            elif now > deadline_at:
+                status = TASK_STATUS_OVERDUE
+            else:
+                status = TASK_STATUS_PENDING
+
+            battery_entities: list[dict] = []
+            if recurrence["type"] == RECURRENCE_BATTERY:
+                battery_entities = [low_battery.as_dict() for low_battery in low_batteries]
+                if status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE) and not battery_entities:
+                    # Nothing to charge/swap right now - the task isn't
+                    # "due", it's idle until a monitored battery drops to or
+                    # below its warning threshold.
+                    status = TASK_STATUS_IDLE
+
+            # v0.41: "fällig"/"überfällig" reminders (assigned tasks) and
+            # the Aufgabenpool "appeared" broadcast (pool tasks) - see
+            # _async_notify_task_status's own docstring. status has its
+            # final value for this refresh at this point (including the
+            # battery-idle override just above).
+            await self._async_notify_task_status(
+                task_id, task["name"], period_key, status, is_pool_task, assigned_member_ids
+            )
+
+            # v0.50: previously widened to every other active child sibling
+            # once this occurrence went overdue (see the removed v0.25
+            # comment on TaskStatusData.eligible_member_ids for the old
+            # reasoning) - removed on explicit user request, a task assigned
+            # to a child is now only ever eligible for that child (a parent
+            # can still always act on it regardless, per
+            # async_complete_task/canAct in family-tasks-card.js - that was
+            # never gated on eligible_member_ids to begin with).
+            eligible_member_ids = list(assigned_member_ids)
+
+            # v0.30: an Aufgabenpool task (is_pool_task, see above) starts
+            # with nobody assigned at all - assigned_member_ids is always
+            # empty, so the overdue-only expansion just above never triggers
+            # for it. Every active member is eligible for as long as it's
+            # actionable (pending or overdue), not just once overdue -
+            # letting a member reserve ("Annehmen") it from the very start of
+            # the week, before it's even due, is the entire point of the
+            # pool - see _pool_period_date.
+            #
+            # v0.33: this used to only add active *children* - a parent could
+            # never claim ("sich melden") a pool task, and (since canAct in
+            # the card, and claimable in general, are both keyed off
+            # eligible_member_ids) could not complete one directly either
+            # unless it happened to also be assigned to a child (which a pool
+            # task, by definition, never is - see is_pool_task above). Every
+            # active member, parent or child, is now eligible - a parent can
+            # both claim and complete an Aufgabenpool occurrence without
+            # anyone claiming it first, exactly like they always could for a
+            # task assigned to a child.
+            if is_pool_task and status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE):
+                for other_id, other_member in self.members.data.items():
+                    if (
+                        other_id not in eligible_member_ids
+                        and other_member.get("active", True)
+                        # v0.37: a paused member isn't offered pool work
+                        # either - see CONF_MEMBER_PAUSED.
+                        and not self._member_paused(other_id)
+                    ):
+                        eligible_member_ids.append(other_id)
+
+            # v0.27: "Annehmen" reservation - see ClaimStateStore in
+            # storage.py, CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in
+            # const.py, and claimed_by_member_id/claim_expires_at/claimable on
+            # TaskStatusData. "claimable" reflects the *pre-claim*
+            # eligible_member_ids (more than one possible actor right now) -
+            # claiming a task only one person could ever act on anyway would
+            # reserve nothing, so it's not offered there at all. A checklist
+            # has no single "erledigt" action to reserve (it completes
+            # sub-item by sub-item), and an auto-generated parent-
+            # confirmation task ("confirms" set) isn't a chore to claim
+            # either, so neither ever qualifies.
+            claimed_by_member_id: str | None = None
+            claim_expires_at: datetime | None = None
+            claimable = (
+                not task.get("confirms")
+                and not task.get("subtasks")
+                and status in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE)
+                and len(eligible_member_ids) > 1
+            )
+            claim_entry = self.claim_state.get(task_id, period_key)
+            if claim_entry is not None:
+                claimed_at = dt_util.parse_datetime(claim_entry["claimed_at"])
+                expires_at = claimed_at + timedelta(minutes=CLAIM_RESERVATION_MINUTES)
+                if status in (TASK_STATUS_DONE, TASK_STATUS_AWAITING_CONFIRMATION):
+                    # Done, or acted on in time and now just waiting on a
+                    # parent's sign-off (async_complete_task already clears
+                    # the claim itself the moment that happens - this is only
+                    # a defensive fallback for whatever briefly hasn't caught
+                    # up yet) - either way the claimant held up their end, so
+                    # there is nothing left to expire/penalize. A parent
+                    # taking a while to confirm must never itself cost the
+                    # child a point via this path - see the separate,
+                    # explicit-"Ablehnen" penalty in async_skip_task instead.
+                    await self.claim_state.async_clear(task_id)
+                elif now >= expires_at:
+                    # Reservation ran out with the occurrence still not done
+                    # - the claimant loses CLAIM_PENALTY_POINTS and it
+                    # reopens for everyone in eligible_member_ids again (left
+                    # untouched above) - see _async_expire_claim.
+                    await self._async_expire_claim(task_id, task, claim_entry["member_id"])
+                else:
+                    claimed_by_member_id = claim_entry["member_id"]
+                    claim_expires_at = expires_at
+                    # Nobody but the claimant may act on - or claim - this
+                    # occurrence while the reservation is active; see
+                    # async_complete_task/async_claim_task, which enforce
+                    # this server-side too, not just via what the card shows.
+                    eligible_member_ids = [claimed_by_member_id]
+                    claimable = False
+
+            # v0.32: once a child reserves ("Annehmen") an Aufgabenpool
+            # occurrence, it is firmly theirs for as long as the reservation
+            # holds - not just in terms of who *may* complete it
+            # (eligible_member_ids above already narrows to just them), but
+            # also in terms of how the occurrence displays: assigned_member_id/
+            # assigned_member_ids feed the card's assignee label and per-
+            # member open-task counts, and the card's "Aufgabenpool" section
+            # (_isClaimedPoolTask in family-tasks-card.js) now reads
+            # claimed_by_member_id to move a claimed occurrence out of that
+            # section and into the claimant's normal task list instead of
+            # leaving it looking unclaimed there. Only while the claim is
+            # actually active - an expired/never-claimed pool occurrence is
+            # untouched.
+            if is_pool_task and claimed_by_member_id:
+                assigned_member_id = claimed_by_member_id
+                assigned_member_ids = [claimed_by_member_id]
+
+            # v0.38: count this occurrence towards pool_tasks_open (see its
+            # declaration above) under exactly the same conditions the
+            # card's own _renderTaskPoolSection uses to decide whether to
+            # show it in the "Aufgabenpool" section: an unclaimed pool task,
+            # not already done, and - the one recurrence-specific exception,
+            # see _isPoolTask/_renderTaskPoolSection in
+            # family-tasks-card.js - not a still-"idle" "trigger" task (its
+            # sensor hasn't opened an occurrence yet, so there is nothing to
+            # "Annehmen"). Every other pool task has no "due" concept of its
+            # own and counts here for the entire week, matching the card.
+            if (
+                is_pool_task
+                and not claimed_by_member_id
+                and status != TASK_STATUS_DONE
+                and not (recurrence["type"] == RECURRENCE_TRIGGER and status == TASK_STATUS_IDLE)
+            ):
+                pool_tasks_open += 1
+
+            subtasks_status: list[dict] = []
+            if task.get("subtasks"):
+                checked_ids = self.checklist_state.checked_ids(task_id, period_key)
+                subtasks_status = [
+                    {"id": s["id"], "name": s["name"], "checked": s["id"] in checked_ids}
+                    for s in task.get("subtasks", [])
+                ]
+
+            # v0.40: TASK_STATUS_UPCOMING is deliberately excluded here too -
+            # FamilyTasksMemberOpenTasksSensor documents itself as "currently
+            # open (pending/overdue)", and a task that isn't due yet (just
+            # previewed with its weekday, not completable) isn't that.
+            if status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE, TASK_STATUS_UPCOMING):
+                for member_id in assigned_member_ids:
+                    open_tasks_by_member[member_id] = open_tasks_by_member.get(member_id, 0) + 1
+
+            # v0.34: pausing must survive a child's own completion claim,
+            # not just resolve the instant TASK_STATUS_OVERDUE is computed.
+            # Once a child marks an overdue mandatory task done, its status
+            # becomes TASK_STATUS_AWAITING_CONFIRMATION (see the elif chain
+            # above) rather than staying TASK_STATUS_OVERDUE - a plain
+            # `status == TASK_STATUS_OVERDUE` check would then read as
+            # "resolved" and resume screen time before a parent has actually
+            # signed off, even though nothing about the task is done yet as
+            # far as the household's points/history are concerned. due_at
+            # (computed further up, independently of completion/confirmation
+            # state - see the RECURRENCE_TRIGGER/RECURRENCE_CONFIRMATION
+            # branch above and _due_at for calendar-based tasks) still
+            # reflects the *original* occurrence's deadline regardless of
+            # status, so re-deriving "is this occurrence past its deadline"
+            # from due_at directly - instead of trusting the OVERDUE status
+            # label alone - keeps the pause active through
+            # AWAITING_CONFIRMATION too. TASK_STATUS_DONE (a parent actually
+            # confirmed it, or it needed no confirmation to begin with) and
+            # TASK_STATUS_IDLE (nothing open at all, e.g. an untriggered
+            # "trigger"-recurrence mandatory task) are the only statuses that
+            # still lift the pause.
+            if (
+                task.get("kind") == TASK_KIND_MANDATORY
+                and status not in (TASK_STATUS_DONE, TASK_STATUS_IDLE)
+                and due_at is not None
+                and now > deadline_at
+            ):
+                # See MemberSummaryData.screen_time_grant_active: an overdue
+                # mandatory task pauses tick-based screen-time granting for
+                # exactly whoever it's currently assigned to, not the whole
+                # household.
+                screen_time_paused_members.update(assigned_member_ids)
+
+            task_statuses[task_id] = TaskStatusData(
+                task_id=task_id,
+                name=task["name"],
+                icon=task.get("icon"),
+                points=task.get("points", 0),
+                status=status,
+                period_key=period_key,
+                due_at=due_at,
+                deadline_at=deadline_at,
+                deadline_extended=deadline_extended,
+                assigned_member_id=assigned_member_id,
+                assigned_member_ids=assigned_member_ids,
+                eligible_member_ids=eligible_member_ids,
+                claimed_by_member_id=claimed_by_member_id,
+                claim_expires_at=claim_expires_at,
+                claimable=claimable,
+                kind=task.get("kind", TASK_KIND_STANDARD),
+                last_completed_by=last_entry.get("completed_by_member_id")
+                if last_entry
+                else None,
+                last_completed_at=dt_util.parse_datetime(last_entry["completed_at"])
+                if last_entry
+                else None,
+                battery_entities=battery_entities,
+                trigger_sensor_value=trigger_sensor_value,
+                trigger_sensor_unit=trigger_sensor_unit,
+                subtasks=subtasks_status,
+                created_by_member_id=task.get(CONF_TASK_CREATED_BY_MEMBER_ID),
+                vacation_behavior=task.get(CONF_TASK_VACATION_BEHAVIOR, VACATION_BEHAVIOR_SHOW),
+                last_rejection_note=task.get("last_rejection_note"),
+                last_rejection_at=dt_util.parse_datetime(task["last_rejection_at"])
+                if task.get("last_rejection_at")
+                else None,
+            )
+
+        member_summaries: dict[str, MemberSummaryData] = {}
+        for member_id, member in self.members.data.items():
+            points_total = self.completions.points_since(
+                member_id, datetime.min.replace(tzinfo=dt_util.UTC)
+            )
+            points_week = self.completions.points_since(member_id, start_of_week)
+            points_carryover = self.completions.pending_carryover(member_id)
+            points_week_earned = self.completions.earned_between(
+                member_id, start_of_week, week_bounds(local_now)[1]
+            )
+            # v0.36: coins_available replaces the old spendable_points minus
+            # redeemed_points computation entirely - self.coin_ledger.balance
+            # nets out every credit *and* every past redemption debit on its
+            # own (see ws_redeem_reward in storage.py, which appends the
+            # debit at redemption time) - see MemberSummaryData.coins_available's
+            # docstring.
+            #
+            # v0.44: coins are credited straight to the ledger the moment a
+            # task with a "coin_value" is completed (see
+            # async_complete_task/_async_finalize_confirmation below), so
+            # coins_available is simply the ledger balance now - no more
+            # live "points beyond the weekly goal" computation on top (that
+            # mechanic, and the weekly goal itself, no longer have anything
+            # to do with coins - see COIN_REASON_WEEKLY_CONVERSION in
+            # const.py for what this replaces).
+            coins_available = self.coin_ledger.balance(member_id)
+            # v0.45: computed once here (not in the card) so it can never
+            # disagree with the malus the household's own Handyzeit-Verwaltung
+            # blueprint applies - see
+            # MemberSummaryData.screen_time_daily_minutes's docstring.
+            #
+            # v0.45.1: banded on *last* week's progress, not this week's still-
+            # running one - see _screen_time_tick_adjustment_minutes's
+            # docstring for why. last_week_start..start_of_week is the most
+            # recently fully-elapsed calendar week.
+            #
+            # v0.46: whether that previous week is judged at all no longer
+            # depends on this member's own completion history (v0.45.1's
+            # earliest_completed_at heuristic - it could disagree between
+            # siblings who onboarded on slightly different days/hours even
+            # though the household as a whole started at the same time) but
+            # on the single household-wide screen_time_malus_start_date
+            # above - the same for every member, so two children with the
+            # same lack of real history now always show the same (absent)
+            # malus. Unset entirely (None) means the malus never applies.
+            last_week_start = start_of_week - timedelta(days=7)
+            # v0.70: computed unconditionally now - the Spotify unlock below
+            # judges the same, already-final previous week but is independent
+            # of the malus start date.
+            last_week_points = self.completions.points_between(
+                member_id, last_week_start, start_of_week
+            )
+            spotify_threshold_points = self._spotify_threshold_points()
+            if (
+                screen_time_malus_start_date is not None
+                and dt_util.as_local(last_week_start).date() >= screen_time_malus_start_date
+            ):
+                screen_time_tick_adjustment = self._screen_time_tick_adjustment_minutes(
+                    last_week_points, weekly_progress_goal_points
+                )
+            else:
+                screen_time_tick_adjustment = 0
+            screen_time_daily_minutes = screen_time_ticks_per_day * max(
+                screen_time_tick_minutes + screen_time_tick_adjustment, 0
+            )
+            # v0.60: same banding function, but judged on this week's own
+            # still-running points_week instead of last week's already-final
+            # total - a live projection of what the malus (and therefore the
+            # daily Handyzeit estimate) will be for the coming week if this
+            # week ended right now. See
+            # MemberSummaryData.screen_time_tick_adjustment_minutes_next_week
+            # for why the gate below uses start_of_week rather than
+            # last_week_start.
+            if (
+                screen_time_malus_start_date is not None
+                and dt_util.as_local(start_of_week).date() >= screen_time_malus_start_date
+            ):
+                screen_time_tick_adjustment_next_week = self._screen_time_tick_adjustment_minutes(
+                    points_week, weekly_progress_goal_points
+                )
+            else:
+                screen_time_tick_adjustment_next_week = 0
+            screen_time_daily_minutes_next_week = screen_time_ticks_per_day * max(
+                screen_time_tick_minutes + screen_time_tick_adjustment_next_week, 0
+            )
+            member_summaries[member_id] = MemberSummaryData(
+                member_id=member_id,
+                name=member["name"],
+                person_entity_id=member.get("person_entity_id"),
+                points_today=self.completions.points_since(member_id, start_of_today),
+                points_week=points_week,
+                points_month=self.completions.points_since(member_id, start_of_month),
+                points_total=points_total,
+                coins_available=coins_available,
+                open_tasks=open_tasks_by_member.get(member_id, 0),
+                screen_time_grant_active=member_id not in screen_time_paused_members,
+                screen_time_tick_adjustment_minutes=screen_time_tick_adjustment,
+                role=member.get("role", MEMBER_ROLE_PARENT),
+                last_week_points=last_week_points,
+                spotify_unlocked=(
+                    spotify_threshold_points > 0 and last_week_points >= spotify_threshold_points
+                ),
+                screen_time_daily_minutes=screen_time_daily_minutes,
+                screen_time_tick_adjustment_minutes_next_week=screen_time_tick_adjustment_next_week,
+                screen_time_daily_minutes_next_week=screen_time_daily_minutes_next_week,
+                streak_weeks_200=(self.streak_bonus_state.get(member_id, "200") or {}).get(
+                    "streak_count", 0
+                ),
+                points_carryover=points_carryover,
+                points_week_earned=points_week_earned,
+            )
+
+        milestone_150_bonus_coins = DEFAULT_MILESTONE_150_BONUS_COINS
+        milestone_200_bonus_coins = DEFAULT_MILESTONE_200_BONUS_COINS
+        # Household-wide default rotation strategy (see
+        # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - read fresh from the
+        # config entry's options every refresh, same pattern as the
+        # Meilensteinbonus settings right below. Previously this option was
+        # only ever written by the options flow and never actually read
+        # anywhere, so the card's "+ Aufgabe hinzufügen" form always
+        # pre-selected "Reihum" regardless of what a household had configured
+        # here - see default_rotation_strategy below and
+        # FamilyTasksMemberPointsSensor in sensor.py for how it now reaches
+        # the card.
+        default_rotation_strategy = DEFAULT_ROTATION_STRATEGY
+        streak_bonus_2_weeks_coins = DEFAULT_STREAK_BONUS_2_WEEKS_COINS
+        streak_bonus_3_weeks_coins = DEFAULT_STREAK_BONUS_3_WEEKS_COINS
+        top_scorer_bonus_coins = DEFAULT_TOP_SCORER_BONUS_COINS
+        if self.config_entry:
+            options = self.config_entry.options
+            milestone_150_bonus_coins = options.get(
+                CONF_MILESTONE_150_BONUS_COINS, DEFAULT_MILESTONE_150_BONUS_COINS
+            )
+            milestone_200_bonus_coins = options.get(
+                CONF_MILESTONE_200_BONUS_COINS, DEFAULT_MILESTONE_200_BONUS_COINS
+            )
+            default_rotation_strategy = options.get(
+                CONF_DEFAULT_ROTATION_STRATEGY, DEFAULT_ROTATION_STRATEGY
+            )
+            streak_bonus_2_weeks_coins = options.get(
+                CONF_STREAK_BONUS_2_WEEKS_COINS, DEFAULT_STREAK_BONUS_2_WEEKS_COINS
+            )
+            streak_bonus_3_weeks_coins = options.get(
+                CONF_STREAK_BONUS_3_WEEKS_COINS, DEFAULT_STREAK_BONUS_3_WEEKS_COINS
+            )
+            top_scorer_bonus_coins = options.get(
+                CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
+            )
+
+        # See FamilyTasksData.milestone_150_threshold_points's docstring -
+        # the exact same round() the awarding logic
+        # (_async_process_milestone_coin_bonus) uses, computed once here too
+        # so the card never has to redo it (and risk disagreeing on a .5
+        # case).
+        # v0.68: no longer 150%/200% of the goal but the household's own
+        # absolute coin thresholds (CONF_COIN_THRESHOLD_1/2_POINTS), still
+        # defaulting to the old percentages when unset. The attribute names
+        # keep their historical "150"/"200" suffix (slot 1/slot 2).
+        _, coin_thresholds = resolve_progress_thresholds(
+            self.config_entry.options if self.config_entry else {},
+            weekly_progress_goal_points,
+        )
+        milestone_150_threshold_points, milestone_200_threshold_points = (
+            coin_thresholds if weekly_progress_goal_points > 0 else (0, 0)
+        )
+        malus_thresholds, _ = resolve_progress_thresholds(
+            self.config_entry.options if self.config_entry else {},
+            weekly_progress_goal_points,
+        )
+
+        return FamilyTasksData(
+            tasks=task_statuses,
+            members=member_summaries,
+            milestone_150_bonus_coins=milestone_150_bonus_coins,
+            milestone_200_bonus_coins=milestone_200_bonus_coins,
+            milestone_150_threshold_points=milestone_150_threshold_points,
+            milestone_200_threshold_points=milestone_200_threshold_points,
+            malus_threshold_points=malus_thresholds if weekly_progress_goal_points > 0 else (0, 0, 0, 0),
+            spotify_threshold_points=self._spotify_threshold_points(),
+            default_rotation_strategy=default_rotation_strategy,
+            weekly_progress_goal_points=weekly_progress_goal_points,
+            streak_bonus_2_weeks_coins=streak_bonus_2_weeks_coins,
+            streak_bonus_3_weeks_coins=streak_bonus_3_weeks_coins,
+            top_scorer_bonus_coins=top_scorer_bonus_coins,
+            vacation_mode_active=vacation_mode_active,
+            pool_tasks_open=pool_tasks_open,
+            screen_time_tick_minutes=screen_time_tick_minutes,
+            screen_time_ticks_per_day=screen_time_ticks_per_day,
+        )
+
+    def _current_period_key(self, task_id: str, task: dict) -> str | None:
+        """Return the id of the occurrence currently due, if any.
+
+        For trigger-based (and confirmation) tasks this is ``None`` while
+        idle (no sensor event / confirmation request has opened an occurrence
+        yet). For calendar-based tasks there is *usually* a current period,
+        except - v0.40 - a non-pool "weekly" task with nothing foreseeable
+        yet this week (see _current_period_date): ``None`` there too, same
+        as an untriggered sensor task, since TASK_STATUS_UPCOMING/idle both
+        mean "nothing to claim/complete/skip/toggle right now" either way.
+
+        v0.30: an Aufgabenpool task (no fixed assignee(s), no rotation - see
+        is_pool_task in _async_update_data) uses _pool_period_date instead of
+        _current_period_date, exactly like _async_update_data itself does -
+        this must stay in lockstep with that computation, since every
+        claim/complete/skip/release/toggle-subtask call site below resolves
+        "the current occurrence" through this method. Using the wrong one
+        here would let a claim/completion be recorded against a different
+        period_key than the one the last refresh actually showed the card.
+        v0.40: now also passes the task's own created_at (_task_created_date)
+        through to that computation for the same reason - before this, a
+        brand-new task's "current occurrence" here could silently disagree
+        with what _async_update_data had just displayed for it.
+        v0.42: for a non-pool "weekly" task, also passes the same
+        is_completed callback _async_update_data uses, for the same
+        lockstep reason - see _current_period_date's "weekly" branch.
+        """
+        if task["recurrence"]["type"] in (RECURRENCE_TRIGGER, RECURRENCE_CONFIRMATION):
+            open_occurrence = self.trigger_state.get(task_id)
+            return open_occurrence["period_key"] if open_occurrence else None
+        is_pool_task = not (task["rotation"].get("member_ids") or [])
+        created_at = self._task_created_date(task)
+        today = dt_util.now().date()
+        if is_pool_task:
+            period_start = _pool_period_date(task["recurrence"], today, created_at)
+        else:
+            period_start = _current_period_date(
+                task["recurrence"],
+                today,
+                created_at,
+                is_completed=lambda candidate: self.completions.get_last_entry(
+                    task_id, candidate.isoformat()
+                )
+                is not None,
+            )
+        return period_start.isoformat() if period_start is not None else None
+
+    def _task_created_date(self, task: dict) -> date | None:
+        """The local date a task definition was created, if known.
+
+        v0.39: set by TaskStorageCollection._process_create_data in
+        storage.py - a task saved before this field existed has none, and
+        every period-date/overdue computation treats that exactly like
+        before (see _current_period_date/_pool_period_date).
+        """
+        created_at_raw = task.get("created_at")
+        if not created_at_raw:
+            return None
+        parsed_created_at = dt_util.parse_datetime(created_at_raw)
+        if parsed_created_at is None:
+            return None
+        return dt_util.as_local(parsed_created_at).date()
+
+    async def async_complete_task(
+        self, task_id: str, member_id: str | None = None, *, skip_confirmation: bool = False
+    ) -> None:
+        """Mark the current occurrence of a task as done and advance rotation.
+
+        Two special cases:
+        - If ``task_id`` is itself an auto-generated parent confirmation task
+          (``task["confirms"]`` is set), completing it finalizes the child's
+          original claim instead of logging a completion for itself.
+        - If the member who would act on a normal task has role "child", the
+          completion is not logged yet; instead a confirmation task is raised
+          for the household's parents (see ``_async_request_confirmation``) -
+          unless ``skip_confirmation`` is set (see below).
+
+        ``member_id`` should be who *actually* completed the task whenever
+        that's known (see _async_register_services in __init__.py, which
+        resolves it from the calling service call's Context via
+        storage.async_member_id_for_context before landing here). Left as
+        ``None``, this falls back to ``_assigned_member_id`` - fine for a
+        task with a single assignee or a rotation that only ever has one
+        "current" member, but for a "fixed" rotation shared by several
+        members (see _assigned_member_ids) that fallback always resolves to
+        member_ids[0], regardless of which of the assignees actually did it -
+        so a caller that *can* identify the acting member (any real user
+        action) should always pass it explicitly instead of relying on the
+        fallback.
+
+        ``skip_confirmation`` (v0.34): bypasses the child-assignee parent-
+        confirmation step entirely, regardless of the task's own
+        ``requires_confirmation`` setting - the completion is logged (and
+        points awarded/rotation advanced) exactly as it would be for a
+        "parent"-role assignee. Used by ``async_handle_sensor_normalized``,
+        for a "trigger" task whose bound sensor's own state change is the
+        proof the task was actually done, and (v0.35) by
+        ``_async_raise_battery_alerts`` when
+        ``CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY`` is on, for an
+        auto-generated battery-alert task whose battery recovered - in both
+        cases there is nothing left for a parent to attest to that the
+        sensor/battery state hasn't already confirmed. Never set for a real
+        user action (a claimed "Erledigt" tap is always the child's own
+        self-report and still needs sign-off).
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+
+        confirms = task.get("confirms")
+        if confirms:
+            await self._async_finalize_confirmation(task_id, confirms)
+            await self.async_request_refresh()
+            return
+
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            _LOGGER.debug("Task %s has no open occurrence to complete", task_id)
+            return
+
+        # v0.40: server-side half of "Diese Aufgaben sollen erst am Tag
+        # ihrer Fälligkeit erledigt werden können" - the card already hides/
+        # disables the "Erledigt" button for TASK_STATUS_UPCOMING (see
+        # disableComplete in family-tasks-card.js), this is the same rule
+        # enforced here too, same "silent no-op" pattern as every other
+        # guard clause in this method. Read off the last refresh's own
+        # status for this task rather than recomputing it - self.data always
+        # reflects at most COORDINATOR_UPDATE_INTERVAL-old state, same
+        # staleness async_claim_task's eligible_member_ids read above has.
+        current_status = self.data.tasks.get(task_id) if self.data else None
+        if current_status is not None and current_status.status == TASK_STATUS_UPCOMING:
+            _LOGGER.debug(
+                "Task %s is not due until %s yet - ignoring early completion",
+                task_id,
+                current_status.due_at,
+            )
+            return
+
+        if self.completions.get_last_entry(task_id, period_key) is not None:
+            _LOGGER.debug("Task %s already completed for period %s", task_id, period_key)
+            return
+
+        if self._has_open_confirmation(task_id, period_key):
+            _LOGGER.debug(
+                "Task %s already has an open parent confirmation for period %s",
+                task_id,
+                period_key,
+            )
+            return
+
+        # v0.27: an active "Annehmen" reservation (see ClaimStateStore in
+        # storage.py) blocks completion by anyone but the claimant - the
+        # card never shows the "Erledigt" button to anyone else while
+        # claimed_by_member_id is set (see eligible_member_ids in
+        # _async_update_data), this is the server-side half of that same
+        # rule. A None member_id (unresolvable acting member) never matches
+        # an active claim either, same as it never matches anyone's id.
+        claim_entry = self.claim_state.get(task_id, period_key)
+        if claim_entry is not None and claim_entry["member_id"] != member_id:
+            _LOGGER.debug(
+                "Task %s is reserved by %s - ignoring completion by %s",
+                task_id,
+                claim_entry["member_id"],
+                member_id,
+            )
+            return
+
+        rotation = task["rotation"]
+        member_ids = rotation.get("member_ids") or []
+        index = rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
+        acting_member_id = member_id or self._assigned_member_id(rotation, member_ids)
+
+        if (
+            acting_member_id
+            and not skip_confirmation
+            and self._member_role(acting_member_id) == MEMBER_ROLE_CHILD
+        ):
+            requires_confirmation = task.get(CONF_TASK_REQUIRES_CONFIRMATION)
+            if requires_confirmation is None:
+                # Legacy/default behavior: a task assigned to a child always
+                # needs a parent's sign-off unless the task explicitly says
+                # otherwise (see CONF_TASK_REQUIRES_CONFIRMATION in const.py -
+                # only self-created child tasks currently set this to False).
+                requires_confirmation = True
+            if requires_confirmation:
+                # v0.27: the child *did* act in time - clear any active claim
+                # right away (same reasoning as the direct-completion path
+                # below) so a parent taking a while to confirm never counts
+                # as the reservation itself lapsing (see the AWAITING_
+                # CONFIRMATION handling in _async_update_data, which treats a
+                # still-present claim here defensively the same way, but
+                # this is the normal path).
+                await self.claim_state.async_clear(task_id)
+                # v0.57: same reasoning for a "Verlängern" extension, if
+                # any - the child met their (possibly extended) deadline, so
+                # there is nothing left for the extension to protect against
+                # for this period.
+                await self.deadline_extension_state.async_clear(task_id)
+                await self._async_request_confirmation(
+                    task, task_id, period_key, acting_member_id
+                )
+                await self.async_request_refresh()
+                return
+
+        await self.completions.async_add_entry(
+            task_id=task_id,
+            period_key=period_key,
+            member_id=acting_member_id,
+            points_awarded=task.get("points", 0),
+            task_name=task.get("name"),
+        )
+        await self._async_credit_task_coins(task, acting_member_id)
+        # v0.27: done in time - drop the now-moot claim (if any) right away
+        # instead of waiting for _async_update_data's DONE-status cleanup on
+        # the next refresh, so a stale "reserved" state can't briefly show
+        # for anyone reading coordinator data before that refresh happens.
+        await self.claim_state.async_clear(task_id)
+        # v0.57: same for a "Verlängern" extension, if any - the occurrence
+        # is done, so there is nothing left for it to protect.
+        await self.deadline_extension_state.async_clear(task_id)
+
+        await self._async_advance_rotation(task_id, task, rotation, member_ids, index)
+        if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+            await self.trigger_state.async_clear(task_id)
+        await self._async_press_completion_button(task)
+        if task["recurrence"]["type"] == RECURRENCE_ONCE:
+            # A single, never-repeating occurrence stays permanently resolved
+            # the moment it's done - see RECURRENCE_ONCE in const.py - so
+            # there is nothing left for it to do sitting around forever
+            # showing "Erledigt". Deleting it also lets a battery-alert task
+            # (also RECURRENCE_ONCE, see _async_raise_battery_alerts) raise a
+            # fresh one the next time that battery goes low again, same as
+            # before this cleanup - see _async_raise_battery_alerts's
+            # open_alert_entities check, which only looks at tasks still in
+            # self.tasks.data.
+            await self.checklist_state.async_clear(task_id)
+            await self.tasks.async_delete_item(task_id)
+        await self.async_request_refresh()
+
+    async def async_skip_task(self, task_id: str, note: str | None = None) -> None:
+        """Skip the current occurrence without awarding points or rotating.
+
+        For an auto-generated parent confirmation task, skipping means the
+        parent *rejects* the child's claim: the confirmation task is dropped
+        without finalizing anything, so the original task falls back to its
+        normal pending/overdue state and the child can complete it again.
+
+        ``note`` (v0.32) only applies to that rejection case - see ATTR_NOTE
+        in const.py: an optional explanation a parent leaves for why the
+        completion wasn't accepted (e.g. "Bett noch nicht gemacht"). Stored
+        on the deduction's completion-log entry for the permanent record,
+        *and* written onto the original task as "last_rejection_note"/
+        "last_rejection_at" so the card can show it to the child right on the
+        task itself (see TaskStatusData.last_rejection_note/...at, cleared
+        again the next time the child retries - see
+        _async_request_confirmation above). The child is also notified live,
+        the same way a new task assignment is - see _async_notify_rejection.
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+
+        confirms = task.get("confirms")
+        if confirms:
+            # v0.27: a parent explicitly rejecting a child's claimed
+            # completion costs that child CONFIRMATION_REJECTION_PENALTY_POINTS
+            # point(s), logged the same way a manual points/award adjustment
+            # is (see const.py) - "Sollten Eltern die Aufgabenerledigung nicht
+            # freigeben, verliert das Kind ebenfalls einen Punkt." The
+            # confirmation task's own name ("Bestätigen: <Aufgabe> (<Kind>)",
+            # see _async_request_confirmation) already identifies which task
+            # and child this was for, so it's reused as-is here.
+            await self.completions.async_add_entry(
+                task_id=MANUAL_POINTS_TASK_ID,
+                period_key=dt_util.utcnow().date().isoformat(),
+                member_id=confirms["member_id"],
+                points_awarded=-CONFIRMATION_REJECTION_PENALTY_POINTS,
+                task_name=f"Nicht freigegeben: {task.get('name', 'Aufgabe')}",
+                note=note,
+            )
+            original_task_id = confirms.get("task_id")
+            original_task_name = task.get("name", "Aufgabe")
+            if original_task_id and original_task_id in self.tasks.data:
+                original_task_name = self.tasks.data[original_task_id].get(
+                    "name", original_task_name
+                )
+                await self.tasks.async_update_item(
+                    original_task_id,
+                    {
+                        "last_rejection_note": note,
+                        "last_rejection_at": dt_util.utcnow().isoformat(),
+                    },
+                )
+            await self._async_notify_rejection(confirms["member_id"], original_task_name, note)
+            await self.trigger_state.async_clear(task_id)
+            await self.tasks.async_delete_item(task_id)
+            await self.async_request_refresh()
+            return
+
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            _LOGGER.debug("Task %s has no open occurrence to skip", task_id)
+            return
+
+        if self.completions.get_last_entry(task_id, period_key) is not None:
+            return
+
+        await self.completions.async_add_entry(
+            task_id=task_id,
+            period_key=period_key,
+            member_id=None,
+            points_awarded=0,
+            skipped=True,
+        )
+        if task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+            await self.trigger_state.async_clear(task_id)
+        await self.async_request_refresh()
+
+    async def _async_notify_task_status(
+        self,
+        task_id: str,
+        task_name: str,
+        period_key: str,
+        status: str,
+        is_pool_task: bool,
+        assigned_member_ids: list[str],
+    ) -> None:
+        """Fire the Aufgabenpool/"fällig"/"überfällig" reminders, once each.
+
+        Called once per task from the main loop in _async_update_data, right
+        after ``status`` has its final value for this refresh (including the
+        battery-idle override just above that call site). This method itself
+        runs on *every* coordinator refresh (every COORDINATOR_UPDATE_INTERVAL,
+        or on-demand after any task/member/battery-override change - see
+        _async_collection_changed in __init__.py), so every branch below is
+        guarded by DeadlineNotificationStateStore to fire at most once per
+        (task, occurrence, stage[, member]) - without that, the same reminder
+        would go out again on every single refresh for as long as the
+        occurrence stays pending or overdue.
+
+        - An Aufgabenpool occurrence (``is_pool_task`` - no fixed/rotating
+          assignee, see is_pool_task in _async_update_data) broadcasts once to
+          every active, non-paused member the moment it becomes actionable
+          (TASK_STATUS_PENDING) - covers a brand-new pool task as well as a
+          recurring one's next occurrence appearing each period, superseding
+          the old creation-only notification that used to live in
+          __init__._async_notify_new_task_assignments (v0.39). Not re-raised
+          once merely TASK_STATUS_OVERDUE - "auftauchen" (a task appearing in
+          the pool) only happens once per occurrence.
+        - A task with a fixed/rotating assignee (``assigned_member_ids``)
+          notifies each currently assigned, active, non-paused member once
+          when the occurrence turns TASK_STATUS_PENDING ("fällig") and again,
+          independently, once it turns TASK_STATUS_OVERDUE ("überfällig").
+          A member who is inactive/paused at the moment this fires is skipped
+          *without* being marked notified, so they still get the (by-then-
+          late) reminder once they're active again within the same occurrence,
+          rather than missing it outright.
+
+        Neither branch ever applies to an auto-generated parent-confirmation
+        task with no assignee (``is_pool_task`` already excludes it, same as
+        the pool-eligibility logic elsewhere in this method's caller).
+        """
+        if is_pool_task:
+            if status != TASK_STATUS_PENDING:
+                return
+            if self.deadline_notification_state.has_pool_appeared(task_id, period_key):
+                return
+            await self.deadline_notification_state.async_mark_pool_appeared(task_id, period_key)
+            message = f"Neue Aufgabe im Aufgabenpool: {task_name}"
+            for member_id, member in self.members.data.items():
+                if not member.get("active", True) or self._member_paused(member_id):
+                    continue
+                await self._async_notify_deadline(
+                    member_id, member, task_id, task_name, message, EVENT_TASK_POOL_ADDED
+                )
+            return
+
+        if not assigned_member_ids or status not in (TASK_STATUS_PENDING, TASK_STATUS_OVERDUE):
+            return
+        stage = "due" if status == TASK_STATUS_PENDING else "overdue"
+        message = f"Fällig: {task_name}" if stage == "due" else f"Überfällig: {task_name}"
+        event_type = EVENT_TASK_DUE if stage == "due" else EVENT_TASK_OVERDUE
+        for member_id in assigned_member_ids:
+            if self.deadline_notification_state.has_notified(task_id, period_key, stage, member_id):
+                continue
+            member = self.members.data.get(member_id)
+            if not member or not member.get("active", True) or self._member_paused(member_id):
+                continue
+            await self.deadline_notification_state.async_mark_notified(
+                task_id, period_key, stage, member_id
+            )
+            await self._async_notify_deadline(
+                member_id, member, task_id, task_name, message, event_type
+            )
+
+    async def _async_notify_deadline(
+        self,
+        member_id: str,
+        member: dict,
+        task_id: str,
+        task_name: str,
+        message: str,
+        event_type: str,
+    ) -> None:
+        """Best-effort notify one member - due/overdue reminder or pool broadcast.
+
+        Mirrors __init__._async_notify_member's / _async_notify_rejection's
+        two-channel pattern (the member's own configured notify.* service,
+        else a persistent_notification fallback) - duplicated here rather
+        than imported, same reasoning as _async_notify_rejection (avoids a
+        circular import with __init__.py, which already imports from this
+        module). notification_id is keyed by event_type as well as task_id/
+        member_id so a "fällig" reminder and a later "überfällig" one for
+        the same task/member don't overwrite each other's still-unread
+        persistent_notification.
+        """
+        title = "Family Tasks"
+
+        notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
+        if notify_service:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    notify_service,
+                    {"title": title, "message": message},
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "Failed to call notify.%s for %s: %s", notify_service, member_id, err
+                )
+        else:
+            try:
+                persistent_notification.async_create(
+                    self.hass,
+                    message,
+                    title=title,
+                    notification_id=f"{DOMAIN}_{event_type}_{task_id}_{member_id}",
+                )
+            except Exception as err:  # noqa: BLE001 - best-effort, must never block the refresh
+                _LOGGER.warning(
+                    "Failed to raise persistent notification for %s: %s", member_id, err
+                )
+
+        self.hass.bus.async_fire(
+            event_type,
+            {
+                "member_id": member_id,
+                "member_name": member.get("name"),
+                "task_id": task_id,
+                "task_name": task_name,
+            },
+        )
+
+    async def _async_notify_rejection(
+        self, member_id: str, task_name: str, note: str | None
+    ) -> None:
+        """Best-effort notify a child that a parent rejected their completion.
+
+        Mirrors __init__._async_notify_member's two-channel pattern (the
+        member's own configured notify.* service, else a
+        persistent_notification fallback) in miniature - duplicated here
+        rather than imported, since __init__.py already imports from
+        coordinator.py and importing back the other way would be circular.
+        Also fires EVENT_TASK_REJECTED, same extension-point reasoning as
+        EVENT_TASK_ASSIGNED.
+        """
+        member = self.members.data.get(member_id)
+        if not member:
+            return
+        title = "Family Tasks"
+        message = f"Nicht freigegeben: {task_name}"
+        if note:
+            message += f" – {note}"
+
+        notify_service = member.get(CONF_MEMBER_NOTIFY_SERVICE)
+        if notify_service:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    notify_service,
+                    {"title": title, "message": message},
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "Failed to call notify.%s for %s: %s", notify_service, member_id, err
+                )
+        else:
+            try:
+                persistent_notification.async_create(
+                    self.hass,
+                    message,
+                    title=title,
+                    notification_id=f"{DOMAIN}_rejection_{member_id}_{dt_util.utcnow().timestamp()}",
+                )
+            except Exception as err:  # noqa: BLE001 - best-effort, must never block the rejection
+                _LOGGER.warning(
+                    "Failed to raise persistent notification for %s: %s", member_id, err
+                )
+
+        self.hass.bus.async_fire(
+            EVENT_TASK_REJECTED,
+            {
+                "member_id": member_id,
+                "member_name": member.get("name"),
+                "task_name": task_name,
+                "note": note,
+            },
+        )
+
+    def active_claim_task_id(self, member_id: str) -> str | None:
+        """Return the task a member currently has reserved ("Annehmen"), if any (v0.74).
+
+        Only a claim that is still live counts: its period must still be the
+        task's current one, the occurrence must not be completed yet and the
+        reservation must not have run out.
+        """
+        now = dt_util.utcnow()
+        for task_id, entry in self.claim_state.items():
+            if entry.get("member_id") != member_id:
+                continue
+            task = self.tasks.data.get(task_id)
+            if task is None:
+                continue
+            period_key = self._current_period_key(task_id, task)
+            if period_key is None or entry.get("period_key") != period_key:
+                continue
+            if self.completions.get_last_entry(task_id, period_key) is not None:
+                continue
+            claimed_at = dt_util.parse_datetime(entry["claimed_at"])
+            if claimed_at is None:
+                continue
+            if now < claimed_at + timedelta(minutes=CLAIM_RESERVATION_MINUTES):
+                return task_id
+        return None
+
+    async def async_claim_task(self, task_id: str, member_id: str | None) -> None:
+        """Reserve a task's current occurrence for CLAIM_RESERVATION_MINUTES.
+
+        Only lets ``member_id`` claim an occurrence they were actually
+        computed as eligible for on the last refresh (see eligible_member_ids
+        in _async_update_data), and only while nobody else already has it
+        claimed. A member may hold only one reservation at a time (v0.74).
+        See CLAIM_RESERVATION_MINUTES/CLAIM_PENALTY_POINTS in
+        const.py for what happens if the reservation then lapses unfinished.
+
+        Every failure case here is a silent no-op rather than a raised error
+        (mirroring the guard clauses in async_complete_task above) - an
+        unresolvable member_id, an already-open claim, an ineligible member,
+        or a task/period the card would never have offered "Annehmen" for to
+        begin with only happen via a race between two people or direct API
+        use, not anything a normal click can trigger.
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+        if member_id is None:
+            _LOGGER.debug("Cannot claim task %s: no resolvable member_id", task_id)
+            return
+
+        task = self.tasks.data[task_id]
+        if task.get("confirms") or task.get("subtasks"):
+            return
+
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            return
+        if self.completions.get_last_entry(task_id, period_key) is not None:
+            return
+        if self.claim_state.get(task_id, period_key) is not None:
+            _LOGGER.debug("Task %s is already claimed", task_id)
+            return
+
+        # v0.74: a member may only hold one reservation at a time.
+        if self.active_claim_task_id(member_id) is not None:
+            _LOGGER.debug("Member %s already has an active claim", member_id)
+            return
+
+        # Reuses the eligible_member_ids the last coordinator refresh already
+        # computed (see _async_update_data) rather than recomputing rotation/
+        # overdue-sibling eligibility here from scratch - self.data always
+        # reflects at most COORDINATOR_UPDATE_INTERVAL-old state, same
+        # staleness any other read of coordinator.data already has between
+        # refreshes.
+        status_data = self.data.tasks.get(task_id) if self.data else None
+        eligible_ids = status_data.eligible_member_ids if status_data else []
+        if len(eligible_ids) < 2 or member_id not in eligible_ids:
+            _LOGGER.debug(
+                "Member %s cannot claim task %s (not eligible, or nobody to reserve it against)",
+                member_id,
+                task_id,
+            )
+            return
+
+        await self.claim_state.async_claim(
+            task_id, period_key, member_id, claimed_at=dt_util.utcnow()
+        )
+        await self.async_request_refresh()
+
+    async def async_release_task(self, task_id: str, member_id: str | None) -> None:
+        """Give back an active "Annehmen" reservation before it expires, no penalty.
+
+        Normally only the claimant themself may release their own claim -
+        anyone else "releasing" it would defeat the point of reserving it in
+        the first place. See async_claim_task above.
+
+        v0.57: a parent (any member whose own role isn't "child" - same
+        "override" reasoning already used throughout this module, e.g.
+        completing a child's task) may release *any* member's active claim
+        this way too - "Eltern sollen die Möglichkeit erhalten, von Kindern
+        vorgenommene Reservierungen zu beenden", explicit user request. Same
+        no-penalty release as the claimant's own: no CLAIM_PENALTY_POINTS is
+        deducted (this only happens on a genuine timeout, see
+        _async_expire_claim below), and the occurrence simply reopens - for
+        an Aufgabenpool task, that means it shows up in the "Aufgabenpool"
+        section again exactly like it was never claimed, since claiming it
+        is the only thing that ever moved it out of there in the first
+        place (see is_pool_task/claimed_by_member_id in _async_update_data).
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            return
+
+        claim_entry = self.claim_state.get(task_id, period_key)
+        if claim_entry is None:
+            return
+        is_owner = member_id is not None and claim_entry["member_id"] == member_id
+        is_parent_override = (
+            member_id is not None and self._member_role(member_id) == MEMBER_ROLE_PARENT
+        )
+        if not is_owner and not is_parent_override:
+            _LOGGER.debug(
+                "Task %s's claim belongs to %s, not %s - ignoring release",
+                task_id,
+                claim_entry["member_id"],
+                member_id,
+            )
+            return
+
+        await self.claim_state.async_clear(task_id)
+        await self.async_request_refresh()
+
+    async def async_extend_task_deadline(self, task_id: str, minutes: int) -> datetime | None:
+        """Push back a task's currently open occurrence's deadline by ``minutes``.
+
+        v0.57 - "Eltern sollen die Möglichkeit haben, die für die
+        Erledigung von Aufgaben zur Verfuegung stehende Zeit zu verlängern",
+        explicit user request, with the explicit constraint that this must
+        never touch the task's own recurring definition - only the single
+        occurrence that's currently due gets more time; the next occurrence
+        starts fresh against the task's normal due_time/overdue_time/
+        overdue_after_minutes again. Implemented as a period-scoped
+        DeadlineExtensionStateStore entry (see storage.py), read back in
+        _async_update_data to override deadline_at for this same period -
+        exactly the same "runtime state, not a task-definition edit" pattern
+        ClaimStateStore already uses for "Annehmen".
+
+        Stacks with an extension already granted this period (each call
+        adds ``minutes`` on top of whatever deadline is currently in effect,
+        not the task's original one) rather than overwriting it - a parent
+        clicking "Verlängern" twice grants two extensions' worth of time,
+        not just the second one. Reads the *last completed refresh's*
+        deadline_at (self.data, same staleness every other action method
+        here already tolerates - see async_complete_task's early-completion
+        guard) as the base to extend from, since recomputing due_at/
+        deadline_at from scratch here would duplicate _async_update_data's
+        own per-recurrence-type logic for no benefit.
+
+        Returns the new deadline, or None if there is currently no open
+        occurrence for this task to extend (the card only ever offers
+        "Verlängern" while one exists - pending or overdue - so this is a
+        defensive guard, not an expected outcome in practice).
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            return None
+
+        current_status = self.data.tasks.get(task_id) if self.data else None
+        if (
+            current_status is None
+            or current_status.period_key != period_key
+            or current_status.deadline_at is None
+        ):
+            return None
+
+        base_deadline = current_status.deadline_at
+        existing_entry = self.deadline_extension_state.get(task_id, period_key)
+        if existing_entry is not None:
+            existing_until = dt_util.parse_datetime(existing_entry["until"])
+            if existing_until is not None and existing_until > base_deadline:
+                base_deadline = existing_until
+
+        new_deadline = base_deadline + timedelta(minutes=minutes)
+        await self.deadline_extension_state.async_extend(
+            task_id, period_key, until=new_deadline
+        )
+        await self.async_request_refresh()
+        return new_deadline
+
+    async def _async_expire_claim(self, task_id: str, task: dict, member_id: str) -> None:
+        """A claim's CLAIM_RESERVATION_MINUTES ran out before completion.
+
+        Deducts CLAIM_PENALTY_POINTS from the claimant - logged the same way
+        ws_award_points logs a manual adjustment, under MANUAL_POINTS_TASK_ID
+        (see const.py), so it counts toward points_total/points_week (and
+        thus coins_available, v0.36) exactly like any other award/deduction -
+        and drops the claim. The
+        caller (_async_update_data) doesn't restore claimed_by_member_id or
+        the narrowed eligible_member_ids after calling this, so the
+        occurrence is already back open to everyone in this same refresh.
+        """
+        await self.completions.async_add_entry(
+            task_id=MANUAL_POINTS_TASK_ID,
+            period_key=dt_util.utcnow().date().isoformat(),
+            member_id=member_id,
+            points_awarded=-CLAIM_PENALTY_POINTS,
+            task_name=f"Reservierung abgelaufen: {task.get('name', 'Aufgabe')}",
+        )
+        await self.claim_state.async_clear(task_id)
+        _LOGGER.debug(
+            "Task %s's claim by %s expired unfinished - %s point(s) deducted",
+            task_id,
+            member_id,
+            CLAIM_PENALTY_POINTS,
+        )
+
+    def _member_role(self, member_id: str) -> str:
+        member = self.members.data.get(member_id)
+        return member.get("role", MEMBER_ROLE_PARENT) if member else MEMBER_ROLE_PARENT
+
+    def _member_paused(self, member_id: str) -> bool:
+        """Whether a member is currently "paused" - see CONF_MEMBER_PAUSED in const.py."""
+        member = self.members.data.get(member_id)
+        return bool(member and member.get(CONF_MEMBER_PAUSED, False))
+
+    def _assigned_member_id(self, rotation: dict, member_ids: list[str]) -> str | None:
+        """Return who a task's next/current occurrence is assigned to.
+
+        For every strategy except "least_points" this is simply
+        ``member_ids[current_index]``. "least_points" instead recomputes the
+        assignee fresh every time from the completion log - see
+        ``_member_with_least_points`` - so it always reflects the current
+        point standings instead of a stored index.
+        """
+        if not member_ids:
+            return None
+        strategy = rotation.get("strategy", ROTATION_STRATEGY_ROUND_ROBIN)
+        if strategy == ROTATION_STRATEGY_LEAST_POINTS:
+            return self._member_with_least_points(
+                member_ids, rotation.get(ROTATION_ONLY_CHILDREN, False)
+            )
+        index = rotation.get("current_index", 0) % len(member_ids)
+        return member_ids[index]
+
+    def _assigned_member_ids(self, rotation: dict, member_ids: list[str]) -> list[str]:
+        """Return every member currently responsible for a task's occurrence.
+
+        Mirrors _assigned_member_id, but a "fixed" rotation with more than
+        one member returns all of them instead of just member_ids[0]: a
+        fixed multi-assignee task never actually rotates, so it's shared
+        between exactly those people rather than "belonging" to one of them
+        at a time (see the "Nur eigene Aufgaben" card filter, and the task
+        card's assignee display, both of which need this same list instead
+        of a single id).
+        """
+        if not member_ids:
+            return []
+        strategy = rotation.get("strategy", ROTATION_STRATEGY_ROUND_ROBIN)
+        if strategy == ROTATION_STRATEGY_FIXED and len(member_ids) > 1:
+            return list(member_ids)
+        single = self._assigned_member_id(rotation, member_ids)
+        return [single] if single else []
+
+    def _member_with_least_points(
+        self, member_ids: list[str], only_children: bool
+    ) -> str | None:
+        """Pick whoever in member_ids currently has the fewest (all-time) points.
+
+        If only_children is set, the comparison is narrowed to those
+        candidates with role "child" - falling back to the full pool if none
+        of them are children, so the strategy still assigns someone rather
+        than silently picking nobody.
+        """
+        if not member_ids:
+            return None
+        candidates = member_ids
+        if only_children:
+            children = [m for m in member_ids if self._member_role(m) == MEMBER_ROLE_CHILD]
+            if children:
+                candidates = children
+        since = datetime.min.replace(tzinfo=dt_util.UTC)
+        return min(candidates, key=lambda m: self.completions.points_since(m, since))
+
+    def _has_open_confirmation(self, task_id: str, period_key: str) -> bool:
+        """Whether an unresolved parent confirmation is already open for this occurrence."""
+        for confirmation_task_id, confirmation_task in self.tasks.data.items():
+            confirms = confirmation_task.get("confirms")
+            if (
+                confirms
+                and confirms["task_id"] == task_id
+                and confirms["period_key"] == period_key
+                and self.trigger_state.get(confirmation_task_id) is not None
+            ):
+                return True
+        return False
+
+    async def _async_request_confirmation(
+        self, task: dict, task_id: str, period_key: str, child_member_id: str
+    ) -> None:
+        """Raise an auto-generated task for the household's parents.
+
+        Completing it finalizes the child's claim (points + rotation);
+        skipping it rejects the claim. See RECURRENCE_CONFIRMATION in
+        const.py for why this reuses the trigger-task idle/open machinery.
+        """
+        # v0.32: the child has retried - any note left on a previous
+        # rejection of this task no longer applies, see "last_rejection_note"/
+        # "last_rejection_at" in storage.TASK_UPDATE_SCHEMA and
+        # async_skip_task's "confirms" branch below.
+        if task.get("last_rejection_note") or task.get("last_rejection_at"):
+            await self.tasks.async_update_item(
+                task_id, {"last_rejection_note": None, "last_rejection_at": None}
+            )
+
+        child = self.members.data.get(child_member_id)
+        child_name = child["name"] if child else child_member_id
+        parent_ids = [
+            mid
+            for mid, member in self.members.data.items()
+            if self._member_role(mid) == MEMBER_ROLE_PARENT and member.get("active", True)
+        ]
+
+        confirmation_payload: dict = {
+            "name": f"Bestätigen: {task['name']} ({child_name})",
+            "points": 0,
+            "enabled": True,
+            "recurrence": {"type": RECURRENCE_CONFIRMATION},
+            "rotation": {"member_ids": parent_ids, "strategy": ROTATION_STRATEGY_FIXED},
+            "confirms": {
+                "task_id": task_id,
+                "period_key": period_key,
+                "member_id": child_member_id,
+            },
+        }
+        if task.get("icon"):
+            confirmation_payload["icon"] = task["icon"]
+
+        confirmation_task = await self.tasks.async_create_item(confirmation_payload)
+        await self.trigger_state.async_activate(
+            confirmation_task["id"], triggered_at=dt_util.utcnow()
+        )
+        _LOGGER.debug(
+            "Raised parent confirmation task %s for %s's completion of %s",
+            confirmation_task["id"],
+            child_name,
+            task_id,
+        )
+
+    async def _async_finalize_confirmation(self, confirmation_task_id: str, confirms: dict) -> None:
+        """A parent confirmed: log the child's completion, then drop the confirmation task."""
+        original_task_id = confirms["task_id"]
+        period_key = confirms["period_key"]
+        child_member_id = confirms["member_id"]
+
+        original_task = self.tasks.data.get(original_task_id)
+        if original_task is not None and self.completions.get_last_entry(
+            original_task_id, period_key
+        ) is None:
+            await self.completions.async_add_entry(
+                task_id=original_task_id,
+                period_key=period_key,
+                member_id=child_member_id,
+                points_awarded=original_task.get("points", 0),
+                task_name=original_task.get("name"),
+            )
+            await self._async_credit_task_coins(original_task, child_member_id)
+            rotation = original_task["rotation"]
+            member_ids = rotation.get("member_ids") or []
+            index = (
+                rotation.get("current_index", 0) % len(member_ids) if member_ids else 0
+            )
+            await self._async_advance_rotation(
+                original_task_id, original_task, rotation, member_ids, index
+            )
+            if original_task["recurrence"]["type"] == RECURRENCE_TRIGGER:
+                await self.trigger_state.async_clear(original_task_id)
+            await self._async_press_completion_button(original_task)
+            if original_task["recurrence"]["type"] == RECURRENCE_ONCE:
+                # Same cleanup as the non-confirmation path in
+                # async_complete_task - see the comment there.
+                await self.checklist_state.async_clear(original_task_id)
+                await self.tasks.async_delete_item(original_task_id)
+
+        await self.trigger_state.async_clear(confirmation_task_id)
+        await self.tasks.async_delete_item(confirmation_task_id)
+
+    async def _async_raise_battery_alerts(self, low_batteries: list[LowBattery]) -> None:
+        """Auto-create a one-time task for every battery that just went low.
+
+        Mirrors the parent-confirmation auto-task pattern above
+        (_async_request_confirmation): rather than requiring an admin to set
+        up and assign a dedicated "battery"-recurrence task (still supported,
+        see RECURRENCE_BATTERY), every monitored battery currently at/below
+        its warning threshold - or, for a binary_sensor, currently reporting
+        low - raises its own RECURRENCE_ONCE task naming exactly that
+        battery, assigned to every family member linked to a Home Assistant
+        admin account.
+
+        Tagged with "battery_alert" (mirrors "confirms" on parent-
+        confirmation tasks) so a battery that stays low doesn't get a fresh
+        task every refresh: only once a battery's previous alert task has
+        been resolved (completed or skipped) does the next refresh raise a
+        new one for it.
+
+        v0.35: if CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY is on, an open
+        alert task whose battery is no longer in ``low_batteries`` (it
+        recovered - back above threshold, or a binary_sensor no longer
+        reporting low) is completed automatically here instead of being left
+        open for someone to complete/skip by hand. This runs before the
+        "raise a new alert" step below, and regardless of whether any
+        battery is currently low, so a household that goes from "one battery
+        low" to "none low" in a single refresh still gets that task closed
+        out.
+        """
+        open_alerts: dict[str, str] = {}  # entity_id -> task_id
+        for task_id, task in self.tasks.data.items():
+            alert = task.get("battery_alert")
+            if not alert:
+                continue
+            anchor_date = task.get("recurrence", {}).get("anchor_date")
+            if anchor_date and self.completions.get_last_entry(task_id, anchor_date) is None:
+                open_alerts[alert["entity_id"]] = task_id
+
+        low_entity_ids = {battery.entity_id for battery in low_batteries}
+
+        auto_complete_on_recovery = DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY
+        if self.config_entry:
+            auto_complete_on_recovery = self.config_entry.options.get(
+                CONF_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+                DEFAULT_BATTERY_ALERT_AUTO_COMPLETE_ON_RECOVERY,
+            )
+        if auto_complete_on_recovery:
+            for entity_id, task_id in open_alerts.items():
+                if entity_id in low_entity_ids:
+                    continue
+                _LOGGER.debug(
+                    "Battery %s recovered, auto-completing alert task %s",
+                    entity_id,
+                    task_id,
+                )
+                # Scheduled as a separate task rather than awaited inline,
+                # same as BatteryStateListener/TaskTriggerListener do for
+                # their own coordinator calls - not just style: this method
+                # runs *inside* _async_update_data, and async_complete_task
+                # ends with await self.async_request_refresh(). Awaiting that
+                # here directly would re-enter _async_update_data before this
+                # call has returned whenever this refresh was itself invoked
+                # via the coordinator's periodic interval timer (which calls
+                # _async_refresh() directly, bypassing the request-refresh
+                # debouncer's lock that would otherwise make such a
+                # reentrant call a no-op) - harmless in the end (the task is
+                # already gone from self.tasks.data by then, so the nested
+                # refresh just does redundant work), but avoided entirely by
+                # not awaiting it here. Same reasoning as
+                # async_handle_sensor_normalized for skip_confirmation: the
+                # battery's own state change is the proof no one still needs
+                # to buy/charge a replacement, so this skips the parent-
+                # confirmation step even for a child assignee - in practice
+                # a battery-alert task is only ever assigned to admin-linked
+                # members (see member_ids below) anyway, so that step would
+                # never have applied here regardless.
+                self.hass.async_create_task(
+                    self.async_complete_task(task_id, skip_confirmation=True)
+                )
+
+        if not low_batteries:
+            return
+
+        newly_low = [b for b in low_batteries if b.entity_id not in open_alerts]
+        if not newly_low:
+            return
+
+        member_ids = await self._async_admin_member_ids()
+        today = dt_util.now().date().isoformat()
+
+        for battery in newly_low:
+            if battery.level is not None:
+                name = f"Batterie wechseln: {battery.name} ({battery.level:g}%)"
+            else:
+                name = f"Batterie prüfen: {battery.name}"
+            payload: dict = {
+                "name": name,
+                "points": 0,
+                "icon": "mdi:battery-alert",
+                "enabled": True,
+                "recurrence": {"type": RECURRENCE_ONCE, "anchor_date": today},
+                "rotation": {"member_ids": member_ids, "strategy": ROTATION_STRATEGY_FIXED},
+                "battery_alert": {"entity_id": battery.entity_id},
+            }
+            await self.tasks.async_create_item(payload)
+            _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
+
+    def _spotify_threshold_points(self) -> int:
+        """Household-wide Spotify unlock threshold in points (v0.70); 0 = off."""
+        options = self.config_entry.options if self.config_entry else {}
+        value = options.get(CONF_SPOTIFY_THRESHOLD_POINTS, DEFAULT_SPOTIFY_THRESHOLD_POINTS)
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError):
+            return DEFAULT_SPOTIFY_THRESHOLD_POINTS
+
+    def _screen_time_tick_adjustment_minutes(
+        self,
+        last_week_points: int,
+        goal_points: int,
+        malus_thresholds: tuple[int, int, int, int] | None = None,
+    ) -> int:
+        """Per-tick minute adjustment for the household's Handyzeit blueprint.
+
+        v0.36: see MALUS_STAGE_ADJUSTMENT_MINUTES in const.py and
+        MemberSummaryData.screen_time_tick_adjustment_minutes.
+        v0.68: banded on *absolute points* instead of a percentage. The four
+        malus thresholds (CONF_MALUS_THRESHOLD_1..4_POINTS, resolved via
+        resolve_progress_thresholds when ``malus_thresholds`` is not given)
+        plus the weekly goal split the points into six stages: below
+        threshold 1 -> -6, from threshold 1 -> -5, from threshold 2 -> -3,
+        from threshold 3 -> -2, from threshold 4 -> -1, from the weekly goal
+        onward -> 0. Always 0 (no adjustment) when goal_points is 0 - without
+        a weekly goal the malus is effectively off.
+
+        v0.45.1: purely the banding math, given whatever week's point total
+        the caller decides to judge (the callers pass the already-final
+        previous week, or the running week for the next-week projection).
+        """
+        if goal_points <= 0:
+            return 0
+        if malus_thresholds is None:
+            options = self.config_entry.options if self.config_entry else {}
+            malus_thresholds, _ = resolve_progress_thresholds(options, goal_points)
+        adjustment = MALUS_STAGE_ADJUSTMENT_MINUTES[0]
+        boundaries = (*malus_thresholds, goal_points)
+        for stage, boundary in enumerate(boundaries, start=1):
+            if last_week_points >= boundary:
+                adjustment = MALUS_STAGE_ADJUSTMENT_MINUTES[stage]
+        return adjustment
+
+    async def _async_credit_task_coins(self, task: dict, member_id: str | None) -> None:
+        """Credit a completed task's own "Münzwert" (v0.44) to its acting member.
+
+        Called from both places a real task completion is actually logged -
+        async_complete_task's direct-completion path and
+        _async_finalize_confirmation's parent-confirms-a-child's-claim path
+        - right after the matching self.completions.async_add_entry call, so
+        a task's points and coins are always credited together, atomically
+        from the caller's point of view. Mirrors how points_awarded works
+        (task.get("points", 0)) but goes straight to CoinLedgerStore instead
+        of the completion log: unlike points, coins were never meant to feed
+        the weekly-progress bar or any percent-of-goal calculation, so there
+        is nothing here for them to double-count against (see
+        COIN_REASON_TASK_COMPLETION in const.py).
+
+        No-op when the task has no coin_value set (the default, 0 - most
+        tasks) or ``member_id`` couldn't be resolved (mirrors every other
+        award path in this file, which likewise only ever credits a known
+        member).
+        """
+        coin_value = task.get("coin_value", 0)
+        if coin_value <= 0 or member_id is None:
+            return
+        await self.coin_ledger.async_add_entry(
+            member_id=member_id,
+            amount=coin_value,
+            reason=COIN_REASON_TASK_COMPLETION,
+            note=task.get("name"),
+        )
+
+    async def _async_process_milestone_coin_bonus(
+        self, start_of_week: datetime, goal_points: int
+    ) -> None:
+        """Credit "Meilensteinbonus" coins live, the moment a member crosses a checkpoint.
+
+        v0.36: replaces the old configurable-threshold, points-based
+        Meilensteinbonus entirely - see CONF_MILESTONE_150_BONUS_COINS/
+        CONF_MILESTONE_200_BONUS_COINS in const.py. The two checkpoints are
+        now fixed at 150%/200% of the weekly goal (PROGRESS_THRESHOLD_PERCENTS
+        in const.py) rather than a household-chosen percent, and the reward
+        is coins credited straight to CoinLedgerStore rather than points
+        logged to the completion log - so, unlike the old bonus, this can
+        never feed back into points_week/the weekly-progress percent it's
+        itself judged against. A no-op if ``goal_points``
+        (CONF_WEEKLY_PROGRESS_GOAL_POINTS) is 0 - both checkpoints are a
+        percentage *of* the weekly goal, so without a goal there is nothing
+        for them to be a percentage of.
+
+        Every participating, active member who reaches 150% or 200% *during*
+        the current week is credited that tier's bonus immediately, the
+        first refresh after they cross it - so it shows up on their
+        "Wochenfortschritt" progress bar right away rather than waiting for
+        Monday. self.milestone_bonus_state (the same store the pre-v0.36
+        version used, reinterpreted - see MilestoneBonusStateStore in
+        storage.py) tracks, per member and per threshold slot (slot 1 =
+        150%, slot 2 = 200%), whether this week's crossing has already been
+        credited, so a refresh that runs again minutes later (nothing having
+        changed) never double-credits; that tracking resets itself
+        automatically once the calendar week rolls over.
+
+        Eligibility mirrors the leaderboard: only members who participate in
+        the reward system (CONF_MEMBER_REWARDS_OPT_IN) and are active.
+        """
+        if not self.config_entry or goal_points <= 0:
+            return
+        options = self.config_entry.options
+        milestone_150_bonus_coins = options.get(
+            CONF_MILESTONE_150_BONUS_COINS, DEFAULT_MILESTONE_150_BONUS_COINS
+        )
+        milestone_200_bonus_coins = options.get(
+            CONF_MILESTONE_200_BONUS_COINS, DEFAULT_MILESTONE_200_BONUS_COINS
+        )
+
+        period_key = start_of_week.date().isoformat()
+        # v0.68: absolute coin thresholds (points), see resolve_progress_thresholds.
+        _, coin_thresholds = resolve_progress_thresholds(options, goal_points)
+        tiers = (
+            (1, COIN_REASON_MILESTONE_150, coin_thresholds[0], milestone_150_bonus_coins),
+            (2, COIN_REASON_MILESTONE_200, coin_thresholds[1], milestone_200_bonus_coins),
+        )
+
+        for member_id, member in self.members.data.items():
+            if (
+                not member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                or not member.get("active", True)
+                # v0.37: paused (temporarily away) is excluded here too -
+                # see CONF_MEMBER_PAUSED.
+                or member.get(CONF_MEMBER_PAUSED, False)
+            ):
+                continue
+            points_week = self.completions.points_since(member_id, start_of_week)
+            for threshold_index, coin_reason, threshold_points, bonus_coins in tiers:
+                if bonus_coins <= 0:
+                    continue
+                if points_week < threshold_points:
+                    continue
+                if await self.milestone_bonus_state.async_has_awarded(
+                    period_key, threshold_index, member_id
+                ):
+                    continue
+                await self.coin_ledger.async_add_entry(
+                    member_id=member_id,
+                    amount=bonus_coins,
+                    reason=coin_reason,
+                    note=f"Meilensteinbonus: {threshold_points} Punkte in der Woche erreicht",
+                )
+                await self.milestone_bonus_state.async_mark_awarded(
+                    period_key, threshold_index, member_id
+                )
+                _LOGGER.debug(
+                    "Credited %s Meilensteinbonus coin(s) to %s for the %s-point checkpoint in week %s",
+                    bonus_coins,
+                    member_id,
+                    threshold_points,
+                    period_key,
+                )
+
+    async def _async_process_streak_coin_bonus(
+        self, start_of_week: datetime, goal_points: int
+    ) -> None:
+        """Credit "Streak-Bonus" coins for maintaining the 200% checkpoint across weeks.
+
+        See CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS
+        in const.py. v0.63: simplified to a single tier at the fixed 200%
+        weekly-progress checkpoint (PROGRESS_THRESHOLD_PERCENTS in
+        const.py) - the old independent 150% tier and the configurable
+        CONF_STREAK_BONUS_REQUIRED_WEEKS are both gone (see git history for
+        the v0.36-v0.54 evolution of this feature). Unlike the
+        Meilensteinbonus above (credited live, mid-week), a streak can only
+        be judged once a week has actually ended - so
+        _async_process_member_streak_tier catches a member up on every
+        fully-elapsed calendar week since StreakBonusStateStore's "200" tier
+        cursor last stopped, oldest first, judging each one against the
+        checkpoint and incrementing/resetting a streak counter.
+        streak_bonus_2_weeks_coins is paid the week the counter first
+        reaches 2, streak_bonus_3_weeks_coins from 3 onward, repeated every
+        further qualifying week for as long as the streak continues - never
+        climbing past the 3-weeks amount, same "keeps paying, never climbs
+        further" shape the old doubled-forever behaviour had. A streak that
+        drops below the checkpoint resets the counter to 0 and has to be
+        built back up from scratch before either payout resumes. A no-op if
+        goal_points is 0 - the checkpoint is a percentage of the weekly
+        goal.
+
+        A brand-new member (or the very first run) starts its cursor at
+        "last week" rather than the beginning of time, so turning a bonus on
+        doesn't retroactively grind through a household's entire history -
+        same reasoning as the Meilensteinbonus only ever reacting to the
+        current week.
+        """
+        if not self.config_entry or goal_points <= 0:
+            return
+        options = self.config_entry.options
+        streak_bonus_2_weeks_coins = options.get(
+            CONF_STREAK_BONUS_2_WEEKS_COINS, DEFAULT_STREAK_BONUS_2_WEEKS_COINS
+        )
+        streak_bonus_3_weeks_coins = options.get(
+            CONF_STREAK_BONUS_3_WEEKS_COINS, DEFAULT_STREAK_BONUS_3_WEEKS_COINS
+        )
+        if streak_bonus_2_weeks_coins <= 0 and streak_bonus_3_weeks_coins <= 0:
+            return
+        # v0.68: the second absolute coin threshold (formerly 200% of the goal).
+        target_points = resolve_progress_thresholds(options, goal_points)[1][1]
+
+        for member_id, member in self.members.data.items():
+            if (
+                not member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                or not member.get("active", True)
+                # v0.37: paused (temporarily away) is excluded here too -
+                # see CONF_MEMBER_PAUSED.
+                or member.get(CONF_MEMBER_PAUSED, False)
+            ):
+                continue
+            await self._async_process_member_streak_tier(
+                member_id,
+                start_of_week,
+                target_points,
+                streak_bonus_2_weeks_coins,
+                streak_bonus_3_weeks_coins,
+            )
+
+    async def _async_process_member_streak_tier(
+        self,
+        member_id: str,
+        start_of_week: datetime,
+        target_points: int,
+        bonus_2_weeks_coins: int,
+        bonus_3_weeks_coins: int,
+    ) -> None:
+        """Catch up one member's Streak-Bonus cursor through every elapsed week.
+
+        v0.63: pays bonus_2_weeks_coins the week the streak counter first
+        reaches 2, then bonus_3_weeks_coins for every further qualifying
+        week from 3 onward - see _async_process_streak_coin_bonus's
+        docstring for why. Still tracked under the "200" tier key in
+        StreakBonusStateStore (unchanged storage shape - see that class's
+        docstring), just no longer looped over multiple tiers - a
+        household's stored "150" tier state, if any, is simply never read
+        again.
+        """
+        state = self.streak_bonus_state.get(member_id, "200")
+        if state and state.get("processed_through"):
+            cursor = dt_util.parse_datetime(state["processed_through"]) or (
+                start_of_week - timedelta(days=7)
+            )
+        else:
+            cursor = start_of_week - timedelta(days=7)
+        streak_count = state.get("streak_count", 0) if state else 0
+
+        # Cap how many weeks a single refresh catches up on, in case a
+        # household was offline for a very long time - the streak still
+        # ends up correct, just spread across a few extra refreshes instead
+        # of one long blocking loop.
+        weeks_processed = 0
+        while cursor < start_of_week and weeks_processed < 52:
+            week_points = self.completions.points_between(
+                member_id, cursor, cursor + timedelta(days=7)
+            )
+            if week_points >= target_points:
+                streak_count += 1
+            else:
+                streak_count = 0
+            # v0.63: fixed milestones instead of a required_weeks-driven
+            # multiplier - exactly bonus_2_weeks_coins at streak_count == 2,
+            # then bonus_3_weeks_coins for every week from 3 onward, flat,
+            # for as long as the streak keeps going.
+            if streak_count == 2:
+                payout = bonus_2_weeks_coins
+            elif streak_count >= 3:
+                payout = bonus_3_weeks_coins
+            else:
+                payout = 0
+            if payout > 0:
+                await self.coin_ledger.async_add_entry(
+                    member_id=member_id,
+                    amount=payout,
+                    reason=COIN_REASON_STREAK_200,
+                    note=(
+                        f"Streak-Bonus: {streak_count}. Woche in Folge "
+                        "über der 200%-Marke"
+                    ),
+                )
+                _LOGGER.debug(
+                    "Credited %s Streak-Bonus coin(s) to %s, week of %s (streak %s)",
+                    payout,
+                    member_id,
+                    dt_util.as_local(cursor).date().isoformat(),
+                    streak_count,
+                )
+            cursor += timedelta(days=7)
+            weeks_processed += 1
+
+        if weeks_processed:
+            await self.streak_bonus_state.async_set(member_id, "200", cursor, streak_count)
+
+    async def _async_process_top_scorer_coin_bonus(
+        self, start_of_week: datetime, weekly_progress_goal_points: int
+    ) -> None:
+        """Credit the "Wochensieger-Bonus" for every fully-elapsed calendar week.
+
+        See CONF_TOP_SCORER_BONUS_COINS in const.py. Unlike the Meilenstein-/
+        Streak-Bonus above (each judged per member, against that member's
+        own share of the household-wide weekly goal), this compares
+        *absolute* points_week across every eligible member household-wide
+        for a week that has actually ended, and pays the single member with
+        strictly the most points. No bonus is paid for a week that ends in a
+        tie for first place (including a tie at 0, e.g. nobody completed
+        anything that week) - deliberately simple over splitting/duplicating
+        the bonus, so a bonus payout always has exactly one unambiguous
+        recipient. Also requires at least two eligible members that week;
+        with only one (or zero) there is no one to be "top" relative to, so
+        nothing is paid - same reasoning as why a solo household never sees
+        a competitive leaderboard on the card either (see _progressMembers
+        in family-tasks-card.js, which shows one bar per active "child"
+        member to every household user since v0.63).
+
+        v0.55: on explicit user request, the winner must additionally have
+        reached the household's configured weekly point goal
+        (CONF_WEEKLY_PROGRESS_GOAL_POINTS) that same week - reuses that
+        already-existing per-member weekly goal as this bonus's own
+        "Mindestpunktzahl der Woche" rather than introducing a separate,
+        independent threshold. If no weekly goal is configured
+        (weekly_progress_goal_points <= 0), the bonus keeps paying exactly
+        as before this change, without any minimum-points check - there is
+        no goal to measure "reached" against, same reasoning as every other
+        goal-relative feature in this file (see e.g.
+        _screen_time_tick_adjustment_minutes).
+
+        Uses the same "catch up on every elapsed week since a persisted
+        cursor, oldest first" shape as
+        _async_process_member_streak_tier/StreakBonusStateStore, just with a
+        single household-wide cursor (TopScorerBonusStateStore) instead of
+        one per member/tier, since there is only ever one winner to judge
+        per week, not one outcome per member. A brand-new household (no
+        cursor yet) starts at "last week" rather than the beginning of time,
+        same reasoning as the streak cursor's own first-run behaviour.
+        """
+        if not self.config_entry:
+            return
+        bonus_coins = self.config_entry.options.get(
+            CONF_TOP_SCORER_BONUS_COINS, DEFAULT_TOP_SCORER_BONUS_COINS
+        )
+        if bonus_coins <= 0:
+            return
+
+        cursor = self.top_scorer_bonus_state.processed_through or (
+            start_of_week - timedelta(days=7)
+        )
+
+        # Same 52-week catch-up cap as _async_process_member_streak_tier,
+        # same reasoning (a household offline for a long time still ends up
+        # correct, just spread across a few extra refreshes).
+        weeks_processed = 0
+        while cursor < start_of_week and weeks_processed < 52:
+            eligible_member_ids = [
+                member_id
+                for member_id, member in self.members.data.items()
+                if member.get(CONF_MEMBER_REWARDS_OPT_IN, True)
+                and member.get("active", True)
+                # v0.37: paused (temporarily away) is excluded here too -
+                # see CONF_MEMBER_PAUSED.
+                and not member.get(CONF_MEMBER_PAUSED, False)
+            ]
+            if len(eligible_member_ids) >= 2:
+                # v0.71: judged on what was actually earned that week (before
+                # the cap at the second coin threshold), so two members who
+                # both reached the cap can still be told apart.
+                week_points = {
+                    member_id: self.completions.earned_between(
+                        member_id, cursor, cursor + timedelta(days=7)
+                    )
+                    for member_id in eligible_member_ids
+                }
+                max_points = max(week_points.values())
+                leaders = [
+                    member_id
+                    for member_id, points in week_points.items()
+                    if points == max_points
+                ]
+                # v0.55: additionally require the (unique) leader to have
+                # reached the weekly goal itself - see this method's
+                # docstring. Skipped entirely when no goal is configured.
+                goal_reached = (
+                    weekly_progress_goal_points <= 0
+                    or max_points >= weekly_progress_goal_points
+                )
+                if max_points > 0 and len(leaders) == 1 and goal_reached:
+                    winner = leaders[0]
+                    await self.coin_ledger.async_add_entry(
+                        member_id=winner,
+                        amount=bonus_coins,
+                        reason=COIN_REASON_TOP_SCORER,
+                        note=(
+                            f"Wochensieger-Bonus: meiste Punkte der Woche "
+                            f"({max_points} Pkt.)"
+                        ),
+                    )
+                    _LOGGER.debug(
+                        "Credited %s Wochensieger-Bonus coin(s) to %s for the week of %s (%s Pkt.)",
+                        bonus_coins,
+                        winner,
+                        dt_util.as_local(cursor).date().isoformat(),
+                        max_points,
+                    )
+            cursor += timedelta(days=7)
+            weeks_processed += 1
+
+        if weeks_processed:
+            await self.top_scorer_bonus_state.async_set_processed_through(cursor)
+
+    async def async_reset_points(self, member_id: str | None = None) -> None:
+        """Reset stored *points* data - see SERVICE_RESET_POINTS in const.py.
+
+        Clears the completion log (points_total/points_week/.../history),
+        reward redemptions, the coin ledger (v0.36 - task-completion coins
+        (v0.44) plus milestone/streak coin bonuses and past redemption
+        debits alike, so coins_available is no longer reduced by past
+        purchases either), and the Meilenstein-/Streak-Bonus tracking state.
+        Task and member *definitions* and the reward catalog itself are left
+        completely untouched - this only ever resets *earned/spent points
+        and coins*, never the household's setup. ``member_id`` left unset
+        (None) resets every member at once; given, only that member's data
+        is cleared.
+        """
+        await self.completions.async_reset(member_id)
+        for redemption_id, redemption in list(self.reward_redemptions.data.items()):
+            if member_id is None or redemption.get("member_id") == member_id:
+                await self.reward_redemptions.async_delete_item(redemption_id)
+        await self.coin_ledger.async_reset(member_id)
+        await self.milestone_bonus_state.async_reset(member_id)
+        await self.streak_bonus_state.async_reset(member_id)
+        # v0.52: TopScorerBonusStateStore holds no per-member data (see its
+        # docstring) - only a whole-household reset (member_id is None)
+        # makes sense to apply to it; resetting a single member's points
+        # shouldn't retroactively change who already won already-judged
+        # weeks for the rest of the household.
+        if member_id is None:
+            await self.top_scorer_bonus_state.async_reset()
+        _LOGGER.info("Reset points data for %s", member_id or "every member")
+        await self.async_request_refresh()
+
+    async def async_set_vacation_mode(self, is_active: bool) -> None:
+        """Turn the household-wide Urlaubsmodus on/off - see switch.py."""
+        await self.vacation_mode_state.async_set(is_active)
+        await self.async_request_refresh()
+
+    async def _async_admin_member_ids(self) -> list[str]:
+        """Family members linked (via person_entity_id) to a HA admin account.
+
+        Mirrors storage._member_id_for_user's person-entity lookup, just
+        checked against every admin user instead of one specific caller -
+        there is no notion of "admin" at the family-member level otherwise,
+        only the underlying Home Assistant account.
+        """
+        try:
+            users = await self.hass.auth.async_get_users()
+        except AttributeError:
+            return []
+        admin_user_ids = {user.id for user in users if user.is_admin}
+        if not admin_user_ids:
+            return []
+        member_ids: list[str] = []
+        for member_id, member in self.members.data.items():
+            person_entity_id = member.get("person_entity_id")
+            if not person_entity_id:
+                continue
+            state = self.hass.states.get(person_entity_id)
+            if state is not None and state.attributes.get("user_id") in admin_user_ids:
+                member_ids.append(member_id)
+        return member_ids
+
+    async def _async_press_completion_button(self, task: dict) -> None:
+        """Press a task's optional completion button, if it has one.
+
+        See CONF_COMPLETION_BUTTON_ENTITY_ID in const.py - mainly meant for
+        "trigger" tasks that mirror a device's own state (e.g. pressing a
+        vacuum's "resume cleaning" button once its "needs emptying" task is
+        completed). Best-effort: a missing/unavailable button shouldn't
+        prevent the task itself from being marked done.
+        """
+        entity_id = task.get(CONF_COMPLETION_BUTTON_ENTITY_ID)
+        if not entity_id:
+            return
+        try:
+            await self.hass.services.async_call(
+                "button", "press", {ATTR_ENTITY_ID: entity_id}, blocking=False
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("Failed to press completion button %s: %s", entity_id, err)
+
+    async def async_toggle_subtask(
+        self, task_id: str, subtask_id: str, member_id: str | None = None
+    ) -> None:
+        """Check/uncheck one sub-item of a task's checklist.
+
+        Mirrors async_handle_sensor_trigger: the "is this task now done"
+        decision is made right here, immediately after the toggle, instead of
+        as a side effect of _async_update_data being polled - that keeps the
+        refresh loop a pure read of current state, with side effects (points,
+        rotation, parent confirmation, once-task cleanup) only ever
+        triggered by an explicit action, same as async_complete_task itself
+        (which this delegates to once every sub-item is checked - ``member_id``
+        is passed through unchanged so a checklist task shared between
+        several fixed assignees still attributes completion/confirmation to
+        whoever actually checked the last box, not just member_ids[0]; see
+        async_complete_task's docstring).
+        """
+        if task_id not in self.tasks.data:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+
+        task = self.tasks.data[task_id]
+        if not task.get("subtasks"):
+            raise HomeAssistantError(f"Task '{task_id}' has no checklist")
+
+        subtasks = task.get("subtasks", [])
+        if not any(s["id"] == subtask_id for s in subtasks):
+            raise HomeAssistantError(f"Unknown subtask_id '{subtask_id}' for task '{task_id}'")
+
+        period_key = self._current_period_key(task_id, task)
+        if period_key is None:
+            raise HomeAssistantError(f"Task '{task_id}' has no open occurrence right now")
+
+        if self.completions.get_last_entry(task_id, period_key) is not None:
+            # Already resolved for this period - nothing left to toggle.
+            return
+
+        checked = await self.checklist_state.async_toggle(task_id, period_key, subtask_id)
+
+        if subtasks and all(s["id"] in checked for s in subtasks):
+            await self.async_complete_task(task_id, member_id)
+        else:
+            await self.async_request_refresh()
+
+    async def async_handle_sensor_trigger(self, task_id: str) -> None:
+        """Open a new occurrence for a trigger-based task, unless one is open.
+
+        Called by :class:`~.trigger.TaskTriggerListener` when a bound
+        sensor's state satisfies the task's trigger condition. If an
+        occurrence is already open (triggered but not yet completed/skipped),
+        this is a no-op so a bouncing/still-matching sensor doesn't keep
+        creating new occurrences.
+        """
+        if task_id not in self.tasks.data:
+            return
+        if self.trigger_state.get(task_id) is not None:
+            _LOGGER.debug("Task %s already has an open trigger occurrence", task_id)
+            return
+        await self.trigger_state.async_activate(task_id, triggered_at=dt_util.utcnow())
+        await self.async_request_refresh()
+
+    async def async_handle_sensor_normalized(self, task_id: str) -> None:
+        """Auto-complete a trigger task's open occurrence once its sensor normalizes.
+
+        v0.34: called by :class:`~.trigger.TaskTriggerListener` when a task's
+        trigger definition has its optional ``auto_complete_on_normalize``
+        flag set (see ``TASK_TRIGGER_STATE_SCHEMA``/
+        ``TASK_TRIGGER_NUMERIC_STATE_SCHEMA`` in storage.py) and the bound
+        sensor transitions back out of the condition that opened the
+        occurrence - e.g. "Mülleimer leeren" completing itself the moment
+        the bin sensor reports empty again, instead of someone having to
+        press "Erledigt" by hand.
+
+        Delegates to :meth:`async_complete_task` with ``skip_confirmation``
+        set - the sensor's own state change *is* the proof of completion, so
+        even a task normally assigned to a "child" with
+        ``requires_confirmation`` on is logged as done immediately, with no
+        parent sign-off step raised for it. A no-op if there's no open
+        occurrence to complete (the flag was only just turned on after the
+        sensor had already normalized, or the occurrence was already
+        completed/skipped by hand in the meantime) - mirrors the "already
+        open" guard in async_handle_sensor_trigger above.
+        """
+        if task_id not in self.tasks.data:
+            return
+        if self.trigger_state.get(task_id) is None:
+            _LOGGER.debug(
+                "Task %s has no open trigger occurrence to auto-complete", task_id
+            )
+            return
+        await self.async_complete_task(task_id, skip_confirmation=True)
+
+    async def _async_advance_rotation(
+        self,
+        task_id: str,
+        task: dict,
+        rotation: dict,
+        member_ids: list[str],
+        current_index: int,
+    ) -> None:
+        """Persist the next rotation index, if the strategy calls for it."""
+        if not member_ids or len(member_ids) < 2:
+            return
+
+        strategy = rotation.get("strategy", ROTATION_STRATEGY_ROUND_ROBIN)
+        if strategy == ROTATION_STRATEGY_ROUND_ROBIN:
+            new_index = (current_index + 1) % len(member_ids)
+        elif strategy == ROTATION_STRATEGY_RANDOM:
+            new_index = random.randrange(len(member_ids))
+        elif strategy == ROTATION_STRATEGY_FIXED:
+            return
+        else:
+            return
+
+        await self.tasks.async_update_item(
+            task_id, {"rotation": {**rotation, "current_index": new_index}}
+        )

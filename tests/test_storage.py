@@ -1,0 +1,260 @@
+"""Tests for the task/member storage collections."""
+
+from __future__ import annotations
+
+import pytest
+import voluptuous as vol
+
+from custom_components.family_tasks.storage import (
+    async_create_battery_overrides_collection,
+    async_create_members_collection,
+    async_create_tasks_collection,
+)
+
+
+async def test_task_create_applies_defaults(hass) -> None:
+    """Creating a task fills in default points/enabled and generates an id."""
+    tasks = await async_create_tasks_collection(hass)
+
+    task = await tasks.async_create_item(
+        {
+            "name": "Müll rausbringen",
+            "recurrence": {"type": "daily"},
+            "rotation": {"member_ids": ["anna", "ben"]},
+        }
+    )
+
+    assert task["id"]
+    assert task["points"] == 0
+    assert task["enabled"] is True
+    assert task["rotation"]["strategy"] == "round_robin"
+    assert task["rotation"]["current_index"] == 0
+
+
+async def test_task_update_keeps_current_index_when_rotation_is_edited(hass) -> None:
+    """Editing the rotation (the form never sends current_index) must not reset it.
+
+    Since v0.37 a rotation update has to carry member_ids (ROTATION_SCHEMA),
+    but an omitted current_index is carried over from the stored task instead
+    of being re-defaulted to 0 by the schema.
+    """
+    tasks = await async_create_tasks_collection(hass)
+    task = await tasks.async_create_item(
+        {
+            "name": "Spülmaschine",
+            "points": 5,
+            "recurrence": {"type": "daily"},
+            "rotation": {
+                "member_ids": ["anna", "ben"],
+                "strategy": "round_robin",
+                "current_index": 1,
+            },
+        }
+    )
+
+    updated = await tasks.async_update_item(
+        task["id"],
+        {"rotation": {"member_ids": ["anna", "ben", "cara"], "strategy": "round_robin"}},
+    )
+
+    assert updated["rotation"]["member_ids"] == ["anna", "ben", "cara"]
+    assert updated["rotation"]["strategy"] == "round_robin"
+    assert updated["rotation"]["current_index"] == 1
+    # Unrelated top-level fields must survive the update untouched.
+    assert updated["points"] == 5
+
+
+async def test_interval_days_task_gets_anchor_date_defaulted(hass) -> None:
+    """An interval_days task without an explicit anchor_date gets one (today)."""
+    tasks = await async_create_tasks_collection(hass)
+
+    task = await tasks.async_create_item(
+        {
+            "name": "Rauchmelder prüfen",
+            "recurrence": {"type": "interval_days", "interval": 90},
+            "rotation": {"member_ids": ["anna"]},
+        }
+    )
+
+    assert task["recurrence"]["anchor_date"]
+
+
+async def test_trigger_recurrence_requires_trigger_definition(hass) -> None:
+    """A 'trigger' recurrence without a 'trigger' sub-dict must be rejected."""
+    tasks = await async_create_tasks_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await tasks.async_create_item(
+            {
+                "name": "Mülleimer leeren",
+                "recurrence": {"type": "trigger"},
+                "rotation": {"member_ids": ["anna"]},
+            }
+        )
+
+
+async def test_state_trigger_task_stores_entity_and_target_state(hass) -> None:
+    """A binary-sensor-backed trigger task persists entity_id and to_state."""
+    tasks = await async_create_tasks_collection(hass)
+
+    task = await tasks.async_create_item(
+        {
+            "name": "Mülleimer leeren",
+            "recurrence": {
+                "type": "trigger",
+                "trigger": {
+                    "kind": "state",
+                    "entity_id": "binary_sensor.bin_full",
+                    "to_state": "on",
+                },
+            },
+            "rotation": {"member_ids": ["anna"]},
+        }
+    )
+
+    assert task["recurrence"]["trigger"]["entity_id"] == "binary_sensor.bin_full"
+    assert task["recurrence"]["trigger"]["to_state"] == "on"
+
+
+async def test_numeric_state_trigger_requires_above_or_below(hass) -> None:
+    """A numeric_state trigger without 'above'/'below' must be rejected."""
+    tasks = await async_create_tasks_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await tasks.async_create_item(
+            {
+                "name": "Pflanzen gießen",
+                "recurrence": {
+                    "type": "trigger",
+                    "trigger": {
+                        "kind": "numeric_state",
+                        "entity_id": "sensor.soil_moisture",
+                    },
+                },
+                "rotation": {"member_ids": ["anna"]},
+            }
+        )
+
+
+async def test_numeric_state_trigger_task_stores_threshold(hass) -> None:
+    """A numeric-sensor-backed trigger task persists the above threshold."""
+    tasks = await async_create_tasks_collection(hass)
+
+    task = await tasks.async_create_item(
+        {
+            "name": "Mülleimer leeren",
+            "recurrence": {
+                "type": "trigger",
+                "trigger": {
+                    "kind": "numeric_state",
+                    "entity_id": "sensor.bin_level",
+                    "above": 80,
+                },
+            },
+            "rotation": {"member_ids": ["anna"]},
+        }
+    )
+
+    assert task["recurrence"]["trigger"]["above"] == 80.0
+
+
+async def test_numeric_state_trigger_rejects_a_range(hass) -> None:
+    """Setting both 'above' and 'below' must be rejected - a single crossing
+    direction is required, not a from-x-to-y range."""
+    tasks = await async_create_tasks_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await tasks.async_create_item(
+            {
+                "name": "Pflanzen gießen",
+                "recurrence": {
+                    "type": "trigger",
+                    "trigger": {
+                        "kind": "numeric_state",
+                        "entity_id": "sensor.soil_moisture",
+                        "above": 10,
+                        "below": 20,
+                    },
+                },
+                "rotation": {"member_ids": ["anna"]},
+            }
+        )
+
+
+async def test_member_create_applies_defaults(hass) -> None:
+    """Creating a member without person_entity_id/active still succeeds."""
+    members = await async_create_members_collection(hass)
+
+    member = await members.async_create_item({"name": "Anna"})
+
+    assert member["id"]
+    assert member["active"] is True
+    assert member["role"] == "parent"
+    assert "person_entity_id" not in member or member["person_entity_id"] is None
+
+
+async def test_member_create_with_child_role(hass) -> None:
+    """A member can be created with role 'child'."""
+    members = await async_create_members_collection(hass)
+
+    member = await members.async_create_item({"name": "Timmy", "role": "child"})
+
+    assert member["role"] == "child"
+
+
+async def test_member_create_rejects_unknown_role(hass) -> None:
+    """An invalid role value must be rejected."""
+    members = await async_create_members_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await members.async_create_item({"name": "Timmy", "role": "grandparent"})
+
+
+async def test_battery_task_recurrence_needs_no_anchor_date_or_trigger(hass) -> None:
+    """A 'battery' recurrence task is valid with no extra recurrence fields."""
+    tasks = await async_create_tasks_collection(hass)
+
+    task = await tasks.async_create_item(
+        {
+            "name": "Batterien wechseln",
+            "recurrence": {"type": "battery"},
+            "rotation": {"member_ids": []},
+        }
+    )
+
+    assert task["recurrence"] == {"type": "battery"}
+
+
+async def test_battery_override_create_applies_defaults(hass) -> None:
+    """Creating a battery override without extra fields defaults to 'included'."""
+    overrides = await async_create_battery_overrides_collection(hass)
+
+    item = await overrides.async_create_item({"entity_id": "sensor.kitchen_battery"})
+
+    assert item["id"]
+    assert item["entity_id"] == "sensor.kitchen_battery"
+    assert item["excluded"] is False
+    assert "threshold" not in item
+
+
+async def test_battery_override_rejects_out_of_range_threshold(hass) -> None:
+    """A threshold outside 0-100 must be rejected."""
+    overrides = await async_create_battery_overrides_collection(hass)
+
+    with pytest.raises(vol.Invalid):
+        await overrides.async_create_item(
+            {"entity_id": "sensor.kitchen_battery", "threshold": 150}
+        )
+
+
+async def test_battery_override_update_can_clear_threshold(hass) -> None:
+    """Updating 'threshold' to null clears a previously set override."""
+    overrides = await async_create_battery_overrides_collection(hass)
+    item = await overrides.async_create_item(
+        {"entity_id": "sensor.kitchen_battery", "threshold": 30}
+    )
+    assert item["threshold"] == 30
+
+    updated = await overrides.async_update_item(item["id"], {"threshold": None})
+
+    assert "threshold" not in updated
