@@ -2339,6 +2339,43 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
         await self.claim_state.async_clear(task_id)
         await self.async_request_refresh()
 
+    async def async_withdraw_task(self, task_id: str, member_id: str) -> None:
+        """Delete a task its creator made for themselves, without any deduction.
+
+        v1.1.0: a task created via family_tasks/favorite/claim is tagged with
+        ``created_by_member_id``. Until a parent confirms it, the creator may
+        take it back: the task and the parent confirmation task raised for it
+        (``confirms.task_id``) are both deleted. Unlike a parent rejecting the
+        confirmation (see async_skip_task - costs
+        CONFIRMATION_REJECTION_PENALTY_POINTS), nothing is logged against the
+        member, and since points are only credited once a parent confirms
+        (_async_finalize_confirmation, which also deletes the finished
+        RECURRENCE_ONCE task), a still-existing task has nothing to revert.
+
+        Raises HomeAssistantError if the task is unknown, was not created by
+        ``member_id``, or is itself an auto-generated confirmation task.
+        """
+        task = self.tasks.data.get(task_id)
+        if task is None:
+            raise HomeAssistantError(f"Unknown task_id '{task_id}'")
+        if task.get("confirms") or task.get(CONF_TASK_CREATED_BY_MEMBER_ID) != member_id:
+            raise HomeAssistantError(
+                "Nur selbst angelegte Aufgaben können vom Ersteller gelöscht werden."
+            )
+
+        for confirmation_id, confirmation_task in list(self.tasks.data.items()):
+            confirms = confirmation_task.get("confirms")
+            if confirms and confirms.get("task_id") == task_id:
+                await self.trigger_state.async_clear(confirmation_id)
+                await self.tasks.async_delete_item(confirmation_id)
+
+        await self.claim_state.async_clear(task_id)
+        await self.deadline_extension_state.async_clear(task_id)
+        await self.checklist_state.async_clear(task_id)
+        await self.trigger_state.async_clear(task_id)
+        await self.tasks.async_delete_item(task_id)
+        await self.async_request_refresh()
+
     async def async_extend_task_deadline(self, task_id: str, minutes: int) -> datetime | None:
         """Push back a task's currently open occurrence's deadline by ``minutes``.
 

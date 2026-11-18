@@ -858,6 +858,13 @@ WS_API_TASK_CREATE_OWN: Final = f"{WS_API_PREFIX_TASKS}/create_own"
 # time before it's overdue - see the "Task deadline extension" section above
 # and ws_extend_task_deadline in storage.py.
 WS_API_TASK_EXTEND_DEADLINE: Final = f"{WS_API_PREFIX_TASKS}/extend_deadline"
+# v1.1.0: non-admin command: lets the member who created a task for
+# themselves (via WS_API_FAVORITE_CLAIM) take it back again, without any
+# penalty, as long as it has not been finalized yet - the parent
+# confirmation task raised for it is deleted along with it. See
+# ws_withdraw_task in storage.py and
+# FamilyTasksCoordinator.async_withdraw_task in coordinator.py.
+WS_API_TASK_WITHDRAW: Final = f"{WS_API_PREFIX_TASKS}/withdraw"
 
 # v0.22: read-only command backing the Bestenliste's per-member "which tasks
 # did they complete this week" drill-down (clicking a leaderboard row opens a

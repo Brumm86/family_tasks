@@ -109,6 +109,7 @@ from .const import (
     WS_API_REWARD_REDEEM,
     WS_API_TASK_CREATE_OWN,
     WS_API_TASK_EXTEND_DEADLINE,
+    WS_API_TASK_WITHDRAW,
 )
 
 # --- Validation schemas ------------------------------------------------------
@@ -1106,6 +1107,14 @@ CREATE_OWN_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
 # has - see FamilyTasksCoordinator.async_extend_task_deadline. The range
 # bound is the same "sanity limit against fat-finger input" reasoning as
 # AWARD_POINTS_SCHEMA's own range above, not a meaningful business rule.
+# v1.1.0 - see WS_API_TASK_WITHDRAW in const.py.
+WITHDRAW_TASK_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
+    {
+        vol.Required("type"): WS_API_TASK_WITHDRAW,
+        vol.Required("task_id"): str,
+    }
+)
+
 EXTEND_TASK_DEADLINE_SCHEMA = websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
     {
         vol.Required("type"): WS_API_TASK_EXTEND_DEADLINE,
@@ -1652,6 +1661,48 @@ def async_setup_websocket_api(
     )
 
     @websocket_api.async_response
+    async def ws_withdraw_task(
+        hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+    ) -> None:
+        """Let a member delete a task they created for themselves, penalty-free.
+
+        WS_API_TASK_WITHDRAW - the counterpart to ws_claim_favorite. No admin
+        permission required; instead the caller must resolve (via their
+        linked person entity) to the family member recorded as the task's
+        ``created_by_member_id``. The actual work - deleting the task and the
+        parent confirmation task raised for it, without logging any
+        deduction - is FamilyTasksCoordinator.async_withdraw_task.
+        """
+        member_id = _member_id_for_user(hass, members, connection.user)
+        if member_id is None:
+            connection.send_error(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Kein mit diesem Konto verknüpftes Familienmitglied.",
+            )
+            return
+
+        runtime_data = getattr(entry, "runtime_data", None)
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is None:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_UNKNOWN_ERROR, "Koordinator nicht verfügbar."
+            )
+            return
+
+        try:
+            await coordinator.async_withdraw_task(msg["task_id"], member_id)
+        except HomeAssistantError as err:
+            connection.send_error(msg["id"], websocket_api.ERR_UNAUTHORIZED, str(err))
+            return
+
+        connection.send_result(msg["id"])
+
+    websocket_api.async_register_command(
+        hass, WS_API_TASK_WITHDRAW, ws_withdraw_task, WITHDRAW_TASK_SCHEMA
+    )
+
+    @websocket_api.async_response
     async def ws_extend_task_deadline(
         hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
     ) -> None:
@@ -1965,6 +2016,10 @@ def async_setup_websocket_api(
         # favorite's own "member_ids" (that field only matters for the
         # parent-triggered ws_instantiate_favorite flow above).
         task_data["rotation"] = {"member_ids": [member_id], "strategy": ROTATION_STRATEGY_FIXED}
+        # v1.1.0: remember who created this task for themselves, so only they
+        # (and, as for any task, parents/admins) can see it and so
+        # ws_withdraw_task can verify the caller when they take it back.
+        task_data[CONF_TASK_CREATED_BY_MEMBER_ID] = member_id
 
         try:
             item = await tasks.async_create_item(task_data)

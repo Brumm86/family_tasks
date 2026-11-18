@@ -2117,6 +2117,16 @@
       await this._callWS({ type: "family_tasks/task/delete", task_id: taskId });
     }
 
+    // v1.1.0: das Kind zieht eine selbst über die Favoriten angelegte Aufgabe
+    // zurück - siehe family_tasks/task/withdraw (ws_withdraw_task in
+    // storage.py). Kein Punktabzug; die Bestätigungsaufgabe der Eltern wird
+    // serverseitig mit gelöscht.
+    async _withdrawTask(taskId) {
+      const name = this._tasks[taskId]?.name ?? taskId;
+      if (!confirm(`Aufgabe "${name}" wirklich löschen? Es gibt keinen Punktabzug.`)) return;
+      await this._callWS({ type: "family_tasks/task/withdraw", task_id: taskId });
+    }
+
     async _saveMember() {
       const form = this._memberForm;
       if (!form.name.trim()) return;
@@ -3592,6 +3602,16 @@
           // under a different label - and stays available, since a parent
           // still needs a way to reject a child's completion claim.
           const showReject = isConfirmation;
+          // v1.1.0: the creator of a task made for themselves via Favoriten
+          // may delete it again (no deduction, the parent confirmation task
+          // goes with it) - instead of the generic admin delete, which
+          // would leave that confirmation task behind. Parents keep their
+          // normal edit/delete controls.
+          const canWithdraw =
+            !isConfirmation &&
+            !isParentUser &&
+            !!currentMemberId &&
+            task.created_by_member_id === currentMemberId;
           // v0.22: "Erledigt"/"Bestätigen" only renders for whoever the
           // occurrence is actually assigned to (or, for a parent-
           // confirmation task, one of the household's parents) - see the
@@ -3702,7 +3722,8 @@
                   ${isClaimedByOther && isParentUser ? iconActionButton("release-task", "mdi:cancel", "Reservierung beenden", { dataset: `data-task-id="${id}"` }) : ""}
                   ${canExtendDeadline ? iconActionButton("select-extend", "mdi:clock-plus-outline", "Frist verlängern", { dataset: `data-task-id="${id}"` }) : ""}
                   ${showReject && canAct ? iconActionButton("skip-task", "mdi:close", "Ablehnen", { dataset: `data-task-id="${id}"`, extraClass: "danger", disabled: resolved }) : ""}
-                  ${isConfirmation || !isAdmin ? "" : `
+                  ${canWithdraw ? iconActionButton("withdraw-task", "mdi:delete", "Löschen (ohne Abzug)", { dataset: `data-task-id="${id}"`, extraClass: "danger" }) : ""}
+                  ${isConfirmation || !isAdmin || canWithdraw ? "" : `
                   ${iconActionButton("edit-task", "mdi:pencil", "Bearbeiten", { dataset: `data-task-id="${id}"` })}
                   ${iconActionButton("delete-task", "mdi:delete", "Löschen", { dataset: `data-task-id="${id}"`, extraClass: "danger" })}`}
                 </div>
@@ -5686,6 +5707,7 @@
         if (action === "new-task") { if (this._isAdmin()) this._openTaskForm(null); }
         else if (action === "cancel-task-form") this._closeTaskForm();
         else if (action === "edit-task") { if (this._isAdmin()) this._openTaskForm(el.dataset.taskId); }
+        else if (action === "withdraw-task") this._withdrawTask(el.dataset.taskId)?.catch(() => {});
         else if (action === "delete-task") { if (this._isAdmin()) this._deleteTask(el.dataset.taskId)?.catch(() => {}); }
         else if (action === "complete-task")
           this._hass.callService("family_tasks", "complete_task", { task_id: el.dataset.taskId });
