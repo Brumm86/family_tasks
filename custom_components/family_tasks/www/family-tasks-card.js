@@ -4327,7 +4327,7 @@
                     : left <= 4
                       ? "left:0"
                       : `left:${left}%;transform:translateX(-50%)`;
-                  const title = `Laptopzeit: ab ${e.points} Pkt. pro Woche +${e.minutes} Min.${reached ? " - diese Woche schon erreicht" : ""}`;
+                  const title = `Laptopzeit: ab ${e.points} Pkt. pro Woche +${e.minutes} Min. pro Tag in der Folgewoche${reached ? " - diese Woche schon erreicht" : ""}`;
                   return `<span class="bar-laptop${reached ? " reached" : ""}" style="${horizontal};top:${row * 16}px" title="${esc(title)}"><ha-icon icon="mdi:laptop"></ha-icon>${esc(e.minutes)}</span>`;
                 })
                 .join("");

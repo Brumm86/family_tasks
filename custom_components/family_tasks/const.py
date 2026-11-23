@@ -232,6 +232,15 @@ def laptop_thresholds_ascending(thresholds: tuple[int, ...]) -> bool:
     return all(a < b for a, b in zip(active, active[1:]))
 
 
+def laptop_minutes_for_points(points: int, thresholds: tuple[int, ...]) -> int:
+    """Laptop minutes granted by `points`: sum of the minutes of all set thresholds reached."""
+    return sum(
+        minutes
+        for threshold, minutes in zip(thresholds, LAPTOP_THRESHOLD_MINUTES)
+        if threshold > 0 and points >= threshold
+    )
+
+
 _LEGACY_MALUS_PERCENTS: Final = (10, 25, 50, 75)
 _LEGACY_COIN_PERCENTS: Final = (150, 200)
 

@@ -31,7 +31,7 @@ Home-Assistant-Integration zur Verwaltung von Familien-Aufgaben: wiederkehrende 
 - **Wochensieger-Bonus**: Münzen für das Kind mit den meisten Wochenpunkten, sofern es auch sein Wochenziel erreicht hat (bei Gleichstand kein Bonus).
 - **Belohnungs-Shop**: Eltern pflegen einen Katalog (Preis in Münzen). Bei einer Einlösung feuert das Event `family_tasks_reward_redeemed`, auf das eigene Automatisierungen reagieren können. Eine Belohnung kann sofort als erledigt gelten (`auto_fulfill`). Die Belohnung „Handyzeit“ trägt Minuten und kann alternativ vom Kind mit frei gewählten Münzen „investiert“ werden.
 - **Spotify-Freigabe**: Option „Mindestpunktzahl der Vorwoche“ (0 = aus) und `binary_sensor.<name>_spotify_freigegeben` pro Kind.
-- **Laptopzeit-Schwellen**: vier Optionen (Wochenpunkte, 0 = aus); Schwelle 1/2 gewähren je 10 Minuten, Schwelle 3/4 je 20 Minuten. Die Karte zeigt sie unter dem Wochenfortschrittsbalken mit Laptop-Symbol und Minutenzahl.
+- **Laptopzeit-Schwellen**: vier Optionen (Wochenpunkte, 0 = aus); Schwelle 1/2 gewähren je 10 Minuten, Schwelle 3/4 je 20 Minuten. Die Karte zeigt sie unter dem Wochenfortschrittsbalken mit Laptop-Symbol und Minutenzahl. Die Punkte der Vorwoche bestimmen die Laptopzeit der laufenden Woche; `sensor.<name>_laptopzeit` liefert die Minuten pro Tag.
 
 ### Handyzeit
 

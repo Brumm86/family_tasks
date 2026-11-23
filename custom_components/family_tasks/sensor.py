@@ -15,6 +15,7 @@ from .const import (
     CLAIM_RESERVATION_MINUTES,
     DOMAIN,
     LAPTOP_THRESHOLD_MINUTES,
+    MEMBER_ROLE_CHILD,
     MANUFACTURER,
 )
 from .coordinator import FamilyTasksCoordinator
@@ -427,6 +428,65 @@ class FamilyTasksMemberOpenTasksSensor(
         return {"member_id": self._member_id}
 
 
+class FamilyTasksMemberLaptopTimeSensor(
+    CoordinatorEntity[FamilyTasksCoordinator], SensorEntity
+):
+    """Laptop minutes a child may use per day in the current week (v1.2).
+
+    The sum of the minutes of all Laptopzeit thresholds (see
+    LAPTOP_THRESHOLD_KEYS/LAPTOP_THRESHOLD_MINUTES in const.py) that the points
+    of the already-final previous calendar week reached, 0-60. Unavailable
+    while no threshold is set (feature off) - a consumer must then leave the
+    laptop alone instead of reading 0 as a reason to lock it. This integration
+    never switches anything in Family Link itself; the household's own
+    automation reads this sensor. Only exists for members with the child role.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:laptop"
+    _attr_native_unit_of_measurement = "min"
+
+    def __init__(
+        self, coordinator: FamilyTasksCoordinator, entry: FamilyTasksConfigEntry, member_id: str
+    ) -> None:
+        super().__init__(coordinator)
+        self._member_id = member_id
+        self._attr_unique_id = f"{entry.entry_id}_member_{member_id}_laptop_time"
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self._member_id in self.coordinator.data.members
+            and any(self.coordinator.data.laptop_threshold_points)
+        )
+
+    @property
+    def _member(self):
+        return self.coordinator.data.members[self._member_id]
+
+    @property
+    def name(self) -> str:
+        return f"{self._member.name} Laptopzeit"
+
+    @property
+    def native_value(self) -> int:
+        return self._member.laptop_minutes
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "member_id": self._member_id,
+            "threshold_points": list(self.coordinator.data.laptop_threshold_points),
+            "threshold_minutes": list(LAPTOP_THRESHOLD_MINUTES),
+            "last_week_points": self._member.last_week_points,
+            "points_week": self._member.points_week,
+            # What the Laptop time will be next week if this week ended right now.
+            "minutes_next_week": self._member.laptop_minutes_next_week,
+        }
+
+
 class FamilyTasksPoolTasksSensor(
     CoordinatorEntity[FamilyTasksCoordinator], SensorEntity
 ):
@@ -479,6 +539,7 @@ async def async_setup_entry(
 
     known_tasks: set[str] = set()
     known_members: set[str] = set()
+    known_laptop_members: set[str] = set()
 
     @callback
     def _async_add_new_entities() -> None:
@@ -521,6 +582,18 @@ async def async_setup_entry(
         known_tasks.update(new_tasks)
         known_members.update(new_members)
 
+        # v1.2: the Laptop time sensor only exists for children (a member
+        # whose role changes later gains/loses it on the next refresh).
+        child_ids = {
+            mid
+            for mid, member in coordinator.data.members.items()
+            if member.role == MEMBER_ROLE_CHILD
+        }
+        new_children = child_ids - known_laptop_members
+        known_laptop_members.update(new_children)
+        for member_id in new_children:
+            entities.append(FamilyTasksMemberLaptopTimeSensor(coordinator, entry, member_id))
+
         if entities:
             async_add_entities(entities)
 
@@ -541,8 +614,10 @@ async def async_setup_entry(
                 f"{entry.entry_id}_member_{mid}_open_tasks"
                 for mid in coordinator.data.members
             }
-            | {f"{entry.entry_id}_pool_tasks"},
+            | {f"{entry.entry_id}_pool_tasks"}
+            | {f"{entry.entry_id}_member_{mid}_laptop_time" for mid in child_ids},
         )
+        known_laptop_members.intersection_update(child_ids)
         known_tasks.intersection_update(coordinator.tasks.data)
         known_members.intersection_update(coordinator.data.members)
 

@@ -50,6 +50,7 @@ from .const import (
     CONF_SPOTIFY_THRESHOLD_POINTS,
     DEFAULT_LAPTOP_THRESHOLD_POINTS,
     LAPTOP_THRESHOLD_KEYS,
+    laptop_minutes_for_points,
     CONF_TOP_SCORER_BONUS_COINS,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
@@ -341,6 +342,12 @@ class MemberSummaryData:
     # FamilyTasksSpotifyUnlockedSensor in binary_sensor.py.
     last_week_points: int = 0
     spotify_unlocked: bool = False
+    # v1.2: Laptop minutes granted for the *current* week by the points of the
+    # already-final previous week (sum of the minutes of all reached Laptopzeit
+    # thresholds, 0-60), and the same projected for next week from this
+    # week's still-running points. See FamilyTasksMemberLaptopTimeSensor.
+    laptop_minutes: int = 0
+    laptop_minutes_next_week: int = 0
     # v0.45: this member's own estimated total Handyzeit for today, in
     # minutes - screen_time_ticks_per_day * max(screen_time_tick_minutes +
     # screen_time_tick_adjustment_minutes above, 0), the same per-tick malus
@@ -1560,6 +1567,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 member_id, last_week_start, start_of_week
             )
             spotify_threshold_points = self._spotify_threshold_points()
+            laptop_thresholds = self._laptop_threshold_points()
             if (
                 screen_time_malus_start_date is not None
                 and dt_util.as_local(last_week_start).date() >= screen_time_malus_start_date
@@ -1609,6 +1617,8 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
                 spotify_unlocked=(
                     spotify_threshold_points > 0 and last_week_points >= spotify_threshold_points
                 ),
+                laptop_minutes=laptop_minutes_for_points(last_week_points, laptop_thresholds),
+                laptop_minutes_next_week=laptop_minutes_for_points(points_week, laptop_thresholds),
                 screen_time_daily_minutes=screen_time_daily_minutes,
                 screen_time_tick_adjustment_minutes_next_week=screen_time_tick_adjustment_next_week,
                 screen_time_daily_minutes_next_week=screen_time_daily_minutes_next_week,

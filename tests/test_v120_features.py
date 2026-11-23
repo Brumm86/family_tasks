@@ -4,6 +4,7 @@ from custom_components.family_tasks.const import (
     DEFAULT_LAPTOP_THRESHOLD_POINTS,
     LAPTOP_THRESHOLD_KEYS,
     LAPTOP_THRESHOLD_MINUTES,
+    laptop_minutes_for_points,
     laptop_thresholds_ascending,
 )
 
@@ -29,3 +30,15 @@ def test_laptop_thresholds_not_ascending() -> None:
     assert not laptop_thresholds_ascending((20, 10, 30, 40))
     assert not laptop_thresholds_ascending((10, 10, 30, 40))
     assert not laptop_thresholds_ascending((10, 30, 0, 20))
+
+
+def test_laptop_minutes_for_points() -> None:
+    thresholds = (15, 20, 25, 30)
+    assert laptop_minutes_for_points(0, thresholds) == 0
+    assert laptop_minutes_for_points(14, thresholds) == 0
+    assert laptop_minutes_for_points(15, thresholds) == 10
+    assert laptop_minutes_for_points(20, thresholds) == 20
+    assert laptop_minutes_for_points(25, thresholds) == 40
+    assert laptop_minutes_for_points(30, thresholds) == 60
+    assert laptop_minutes_for_points(99, thresholds) == 60
+    assert laptop_minutes_for_points(99, (0, 0, 0, 0)) == 0
