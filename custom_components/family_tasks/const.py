@@ -202,6 +202,36 @@ COIN_THRESHOLD_KEYS: Final = (CONF_COIN_THRESHOLD_1_POINTS, CONF_COIN_THRESHOLD_
 # the actual switching, same division of labour as for the Handyzeit malus.
 CONF_SPOTIFY_THRESHOLD_POINTS: Final = "spotify_threshold_points"
 DEFAULT_SPOTIFY_THRESHOLD_POINTS: Final = 0
+
+# v1.2: Laptopzeit-Schwellen. Four household-wide absolute point thresholds
+# (weekly points); each one grants the fixed number of Laptop minutes in
+# LAPTOP_THRESHOLD_MINUTES, and the minutes of all reached thresholds add up
+# (10 + 10 + 20 + 20 = 60, the fixed daily maximum of the Family Link laptop
+# limit). 0 = threshold off (default). Like the Spotify threshold they are
+# independent of the malus/coin chain, but the ones that are set must be
+# strictly ascending among themselves (laptop_thresholds_ascending). This
+# integration only stores/exposes the thresholds and draws them under the
+# weekly progress bar; it never talks to Family Link.
+CONF_LAPTOP_THRESHOLD_1_POINTS: Final = "laptop_threshold_1_points"
+CONF_LAPTOP_THRESHOLD_2_POINTS: Final = "laptop_threshold_2_points"
+CONF_LAPTOP_THRESHOLD_3_POINTS: Final = "laptop_threshold_3_points"
+CONF_LAPTOP_THRESHOLD_4_POINTS: Final = "laptop_threshold_4_points"
+LAPTOP_THRESHOLD_KEYS: Final = (
+    CONF_LAPTOP_THRESHOLD_1_POINTS,
+    CONF_LAPTOP_THRESHOLD_2_POINTS,
+    CONF_LAPTOP_THRESHOLD_3_POINTS,
+    CONF_LAPTOP_THRESHOLD_4_POINTS,
+)
+LAPTOP_THRESHOLD_MINUTES: Final = (10, 10, 20, 20)
+DEFAULT_LAPTOP_THRESHOLD_POINTS: Final = 0
+
+
+def laptop_thresholds_ascending(thresholds: tuple[int, ...]) -> bool:
+    """True if the thresholds that are set (> 0) are strictly ascending."""
+    active = [value for value in thresholds if value > 0]
+    return all(a < b for a, b in zip(active, active[1:]))
+
+
 _LEGACY_MALUS_PERCENTS: Final = (10, 25, 50, 75)
 _LEGACY_COIN_PERCENTS: Final = (150, 200)
 

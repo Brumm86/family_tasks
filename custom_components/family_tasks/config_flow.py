@@ -43,6 +43,9 @@ from .const import (
     CONF_MILESTONE_200_BONUS_COINS,
     CONF_OVERDUE_AFTER_MINUTES,
     CONF_SPOTIFY_THRESHOLD_POINTS,
+    DEFAULT_LAPTOP_THRESHOLD_POINTS,
+    LAPTOP_THRESHOLD_KEYS,
+    laptop_thresholds_ascending,
     CONF_SCREEN_TIME_MALUS_START_DATE,
     CONF_SCREEN_TIME_MINUTES_PER_POINT,
     CONF_SCREEN_TIME_TICK_MINUTES,
@@ -136,6 +139,15 @@ class FamilyTasksOptionsFlow(OptionsFlow):
             data[CONF_SPOTIFY_THRESHOLD_POINTS] = int(
                 data.get(CONF_SPOTIFY_THRESHOLD_POINTS) or 0
             )
+            # v1.2: Laptopzeit thresholds 1-4 (points per week, 0 = off); the
+            # ones that are set must be strictly ascending among themselves.
+            for key in LAPTOP_THRESHOLD_KEYS:
+                data[key] = int(data.get(key) or 0)
+            if not laptop_thresholds_ascending(
+                tuple(data[key] for key in LAPTOP_THRESHOLD_KEYS)
+            ):
+                errors["base"] = "laptop_thresholds_not_ascending"
+                return self._show_form(user_input, errors)
             goal_points = int(data.get(CONF_WEEKLY_PROGRESS_GOAL_POINTS) or 0)
             if goal_points > 0:
                 malus, coin = resolve_progress_thresholds(data, goal_points)
@@ -384,6 +396,19 @@ class FamilyTasksOptionsFlow(OptionsFlow):
                         min=0, max=100000, mode=NumberSelectorMode.BOX, unit_of_measurement="Pkt."
                     )
                 ),
+                # v1.2: Laptopzeit-Schwellen 1-4 (Wochenpunkte, 0 = aus). Jede
+                # erreichte Schwelle gewährt die feste Minutenzahl aus
+                # LAPTOP_THRESHOLD_MINUTES (10/10/20/20), siehe const.py.
+                **{
+                    vol.Optional(
+                        key, default=current.get(key, DEFAULT_LAPTOP_THRESHOLD_POINTS)
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=100000, mode=NumberSelectorMode.BOX, unit_of_measurement="Pkt."
+                        )
+                    )
+                    for key in LAPTOP_THRESHOLD_KEYS
+                },
                 # v0.32: only seeds VacationModeStateStore's initial value the
                 # first time it loads with nothing on disk yet - the actual
                 # on/off control after that is switch.FamilyTasksVacationModeSwitch,

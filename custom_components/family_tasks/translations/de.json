@@ -38,13 +38,18 @@
           "streak_bonus_2_weeks_coins": "Streak-Bonus-Münzen bei 2 Wochen in Folge über Münz-Schwelle 2",
           "streak_bonus_3_weeks_coins": "Streak-Bonus-Münzen bei 3 Wochen in Folge über Münz-Schwelle 2 (danach weiterhin jede Woche)",
           "spotify_threshold_points": "Spotify-Freigabe: Mindestpunktzahl der Vorwoche, damit Spotify in dieser Woche freigegeben ist (0 = aus)",
+          "laptop_threshold_1_points": "Laptopzeit-Schwelle 1: Wochenpunkte, die 10 Min. Laptopzeit gewähren (0 = aus)",
+          "laptop_threshold_2_points": "Laptopzeit-Schwelle 2: Wochenpunkte, die weitere 10 Min. gewähren (0 = aus)",
+          "laptop_threshold_3_points": "Laptopzeit-Schwelle 3: Wochenpunkte, die weitere 20 Min. gewähren (0 = aus)",
+          "laptop_threshold_4_points": "Laptopzeit-Schwelle 4: Wochenpunkte, die weitere 20 Min. gewähren (0 = aus)",
           "top_scorer_bonus_coins": "Bonus-Münzen für das Kind mit den meisten Punkten der Woche, aber nur wenn dabei auch die wöchentliche Zielpunktzahl erreicht wurde (0 deaktiviert es; bei Gleichstand kein Bonus, ebenso wenn das Wochenziel verfehlt wird)",
           "vacation_mode_default": "Urlaubsmodus-Vorgabe (Anfangszustand des Schalters)"
         }
       }
     },
     "error": {
-      "thresholds_not_ascending": "Die Schwellen müssen aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2."
+      "thresholds_not_ascending": "Die Schwellen müssen aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2.",
+      "laptop_thresholds_not_ascending": "Die Laptopzeit-Schwellen müssen aufsteigend sein (gesetzte Schwellen, 1 < 2 < 3 < 4)."
     }
   },
   "selector": {
@@ -475,7 +480,7 @@
       "fields": {
         "settings": {
           "name": "Einstellungen",
-          "description": "Zu ändernde Optionen. Schlüssel: overdue_after_minutes, default_rotation_strategy, battery_warning_threshold, battery_alert_auto_complete_on_recovery, screen_time_minutes_per_point, screen_time_tick_minutes, screen_time_ticks_per_day, screen_time_malus_start_date (JJJJ-MM-TT), weekly_progress_goal_points, malus_threshold_1_points .. malus_threshold_4_points, coin_threshold_1_points, coin_threshold_2_points, milestone_150_bonus_coins, milestone_200_bonus_coins, streak_bonus_2_weeks_coins, streak_bonus_3_weeks_coins, top_scorer_bonus_coins, spotify_threshold_points, vacation_mode_default. Die Schwellen müssen streng aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2."
+          "description": "Zu ändernde Optionen. Schlüssel: overdue_after_minutes, default_rotation_strategy, battery_warning_threshold, battery_alert_auto_complete_on_recovery, screen_time_minutes_per_point, screen_time_tick_minutes, screen_time_ticks_per_day, screen_time_malus_start_date (JJJJ-MM-TT), weekly_progress_goal_points, malus_threshold_1_points .. malus_threshold_4_points, coin_threshold_1_points, coin_threshold_2_points, milestone_150_bonus_coins, milestone_200_bonus_coins, streak_bonus_2_weeks_coins, streak_bonus_3_weeks_coins, top_scorer_bonus_coins, spotify_threshold_points, laptop_threshold_1_points .. laptop_threshold_4_points, vacation_mode_default. Die Schwellen müssen streng aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2."
         }
       }
     }

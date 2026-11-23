@@ -10,7 +10,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import FamilyTasksConfigEntry
-from .const import CLAIM_PENALTY_POINTS, CLAIM_RESERVATION_MINUTES, DOMAIN, MANUFACTURER
+from .const import (
+    CLAIM_PENALTY_POINTS,
+    CLAIM_RESERVATION_MINUTES,
+    DOMAIN,
+    LAPTOP_THRESHOLD_MINUTES,
+    MANUFACTURER,
+)
 from .coordinator import FamilyTasksCoordinator
 from .entity_registry_helpers import async_prune_stale_entities
 
@@ -273,6 +279,11 @@ class FamilyTasksMemberPointsSensor(
             # v0.70: household-wide Spotify unlock threshold (points of the
             # previous week, 0 = off); drawn on the progress bar for children.
             "spotify_threshold_points": self.coordinator.data.spotify_threshold_points,
+            # v1.2: household-wide Laptopzeit thresholds 1-4 (weekly points,
+            # 0 = off) and the fixed minutes each one grants; drawn under
+            # the progress bar for children.
+            "laptop_threshold_points": list(self.coordinator.data.laptop_threshold_points),
+            "laptop_threshold_minutes": list(LAPTOP_THRESHOLD_MINUTES),
             # v0.36: household-wide Streak-Bonus coin amounts (see
             # CONF_STREAK_BONUS_2_WEEKS_COINS/CONF_STREAK_BONUS_3_WEEKS_COINS
             # in const.py) - same "rides along, identical on every member's

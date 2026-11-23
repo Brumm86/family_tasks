@@ -48,6 +48,8 @@ from .const import (
     CONF_STREAK_BONUS_3_WEEKS_COINS,
     CONF_TASK_CREATED_BY_MEMBER_ID,
     CONF_SPOTIFY_THRESHOLD_POINTS,
+    DEFAULT_LAPTOP_THRESHOLD_POINTS,
+    LAPTOP_THRESHOLD_KEYS,
     CONF_TOP_SCORER_BONUS_COINS,
     CONF_TASK_REQUIRES_CONFIRMATION,
     CONF_TASK_VACATION_BEHAVIOR,
@@ -451,6 +453,10 @@ class FamilyTasksData:
     # previous week; 0 = feature off), drawn on the weekly progress bar and
     # backing the per-child Spotify unlock binary sensor.
     spotify_threshold_points: int = DEFAULT_SPOTIFY_THRESHOLD_POINTS
+    # v1.2: household-wide Laptopzeit thresholds 1-4 (absolute weekly points,
+    # 0 = off); drawn under the weekly progress bar together with their fixed
+    # minutes (LAPTOP_THRESHOLD_MINUTES).
+    laptop_threshold_points: tuple[int, int, int, int] = (0, 0, 0, 0)
     # v0.23: household-wide default rotation strategy for new tasks (see
     # CONF_DEFAULT_ROTATION_STRATEGY in const.py) - rides along here for the
     # same reason the milestone-bonus settings above do (no dedicated entity
@@ -1680,6 +1686,7 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             milestone_200_threshold_points=milestone_200_threshold_points,
             malus_threshold_points=malus_thresholds if weekly_progress_goal_points > 0 else (0, 0, 0, 0),
             spotify_threshold_points=self._spotify_threshold_points(),
+            laptop_threshold_points=self._laptop_threshold_points(),
             default_rotation_strategy=default_rotation_strategy,
             weekly_progress_goal_points=weekly_progress_goal_points,
             streak_bonus_2_weeks_coins=streak_bonus_2_weeks_coins,
@@ -2739,6 +2746,17 @@ class FamilyTasksCoordinator(DataUpdateCoordinator[FamilyTasksData]):
             }
             await self.tasks.async_create_item(payload)
             _LOGGER.debug("Raised battery alert task for %s", battery.entity_id)
+
+    def _laptop_threshold_points(self) -> tuple[int, int, int, int]:
+        """Household-wide Laptopzeit thresholds 1-4 in points (v1.2); 0 = off."""
+        options = self.config_entry.options if self.config_entry else {}
+        values: list[int] = []
+        for key in LAPTOP_THRESHOLD_KEYS:
+            try:
+                values.append(max(int(options.get(key, DEFAULT_LAPTOP_THRESHOLD_POINTS) or 0), 0))
+            except (TypeError, ValueError):
+                values.append(DEFAULT_LAPTOP_THRESHOLD_POINTS)
+        return tuple(values)  # type: ignore[return-value]
 
     def _spotify_threshold_points(self) -> int:
         """Household-wide Spotify unlock threshold in points (v0.70); 0 = off."""

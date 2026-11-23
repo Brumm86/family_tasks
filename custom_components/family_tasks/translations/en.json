@@ -38,13 +38,18 @@
           "streak_bonus_2_weeks_coins": "Streak-Bonus coins for staying above coin threshold 2 for 2 weeks in a row",
           "streak_bonus_3_weeks_coins": "Streak-Bonus coins for staying above coin threshold 2 for 3 weeks in a row (paid every further qualifying week too)",
           "spotify_threshold_points": "Spotify unlock: minimum points last week for Spotify to be unlocked this week (0 = off)",
+          "laptop_threshold_1_points": "Laptop time threshold 1: points per week that grant +10 min laptop time (0 = off)",
+          "laptop_threshold_2_points": "Laptop time threshold 2: points per week that grant a further +10 min (0 = off)",
+          "laptop_threshold_3_points": "Laptop time threshold 3: points per week that grant a further +20 min (0 = off)",
+          "laptop_threshold_4_points": "Laptop time threshold 4: points per week that grant a further +20 min (0 = off)",
           "top_scorer_bonus_coins": "Bonus coins for the member with the most points in a week, but only if they also reached the weekly point goal (0 disables it; no bonus on a tie, and none if the weekly goal is unmet)",
           "vacation_mode_default": "Vacation mode default (initial switch state)"
         }
       }
     },
     "error": {
-      "thresholds_not_ascending": "Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin threshold 1 < 2."
+      "thresholds_not_ascending": "Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin threshold 1 < 2.",
+      "laptop_thresholds_not_ascending": "Laptop time thresholds must be strictly ascending (thresholds that are set, 1 < 2 < 3 < 4)."
     }
   },
   "selector": {
@@ -475,7 +480,7 @@
       "fields": {
         "settings": {
           "name": "Settings",
-          "description": "Options to change. Keys: overdue_after_minutes, default_rotation_strategy, battery_warning_threshold, battery_alert_auto_complete_on_recovery, screen_time_minutes_per_point, screen_time_tick_minutes, screen_time_ticks_per_day, screen_time_malus_start_date (YYYY-MM-DD), weekly_progress_goal_points, malus_threshold_1_points .. malus_threshold_4_points, coin_threshold_1_points, coin_threshold_2_points, milestone_150_bonus_coins, milestone_200_bonus_coins, streak_bonus_2_weeks_coins, streak_bonus_3_weeks_coins, top_scorer_bonus_coins, spotify_threshold_points, vacation_mode_default. Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin 1 < coin 2."
+          "description": "Options to change. Keys: overdue_after_minutes, default_rotation_strategy, battery_warning_threshold, battery_alert_auto_complete_on_recovery, screen_time_minutes_per_point, screen_time_tick_minutes, screen_time_ticks_per_day, screen_time_malus_start_date (YYYY-MM-DD), weekly_progress_goal_points, malus_threshold_1_points .. malus_threshold_4_points, coin_threshold_1_points, coin_threshold_2_points, milestone_150_bonus_coins, milestone_200_bonus_coins, streak_bonus_2_weeks_coins, streak_bonus_3_weeks_coins, top_scorer_bonus_coins, spotify_threshold_points, laptop_threshold_1_points .. laptop_threshold_4_points, vacation_mode_default. Thresholds must be strictly ascending: malus 1 < 2 < 3 < 4 < weekly goal < coin 1 < coin 2."
         }
       }
     }

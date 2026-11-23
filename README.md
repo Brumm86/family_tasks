@@ -31,6 +31,7 @@ Home-Assistant-Integration zur Verwaltung von Familien-Aufgaben: wiederkehrende 
 - **Wochensieger-Bonus**: Münzen für das Kind mit den meisten Wochenpunkten, sofern es auch sein Wochenziel erreicht hat (bei Gleichstand kein Bonus).
 - **Belohnungs-Shop**: Eltern pflegen einen Katalog (Preis in Münzen). Bei einer Einlösung feuert das Event `family_tasks_reward_redeemed`, auf das eigene Automatisierungen reagieren können. Eine Belohnung kann sofort als erledigt gelten (`auto_fulfill`). Die Belohnung „Handyzeit“ trägt Minuten und kann alternativ vom Kind mit frei gewählten Münzen „investiert“ werden.
 - **Spotify-Freigabe**: Option „Mindestpunktzahl der Vorwoche“ (0 = aus) und `binary_sensor.<name>_spotify_freigegeben` pro Kind.
+- **Laptopzeit-Schwellen**: vier Optionen (Wochenpunkte, 0 = aus); Schwelle 1/2 gewähren je 10 Minuten, Schwelle 3/4 je 20 Minuten. Die Karte zeigt sie unter dem Wochenfortschrittsbalken mit Laptop-Symbol und Minutenzahl.
 
 ### Handyzeit
 
@@ -94,6 +95,7 @@ Einstellungen → Geräte & Dienste → Family Tasks → Konfigurieren:
 | Münzen | Münz-Schwellen 1 und 2 (Punkte), Meilensteinbonus (Silber/Gold), Streak-Bonus (2 Wochen / ab 3 Wochen), Wochensieger-Bonus |
 | Handyzeit | Handyzeit-Minuten pro investiertem Punkt (bei frei investierter Handyzeit-Belohnung), Minuten pro Tick, Ticks pro Tag, Malus-Schwellen 1–4 (Punkte), Beginn des Malus (Datum) |
 | Spotify | Mindestpunktzahl der Vorwoche (0 = aus) |
+| Laptopzeit | Laptopzeit-Schwellen 1–4 (Wochenpunkte, 0 = aus); gewähren 10/10/20/20 Minuten |
 | Urlaubsmodus | Anfangszustand des Schalters |
 
 Die Schwellen müssen aufsteigend sein: Malus 1 < 2 < 3 < 4 < Wochenziel < Münz-Schwelle 1 < 2. Nicht gesetzte Schwellen werden aus dem Wochenziel abgeleitet.

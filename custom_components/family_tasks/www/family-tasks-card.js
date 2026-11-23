@@ -1649,7 +1649,7 @@
     // points-based version entirely - the two checkpoints are now fixed at
     // 150%/200% of the weekly goal.
     _milestoneBonus() {
-      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0, malusThresholds: [], spotifyThresholdPoints: 0 };
+      const empty = { bonus150: 0, bonus200: 0, threshold150Points: 0, threshold200Points: 0, malusThresholds: [], spotifyThresholdPoints: 0, laptopThresholds: [], laptopMinutes: [] };
       if (!this._hass) return empty;
       const sensor = Object.values(this._hass.states).find(
         (s) => s.entity_id.startsWith("sensor.") && s.attributes.points_week !== undefined
@@ -1673,6 +1673,11 @@
         // v0.70: Spotify-Freigabe - Mindestpunkte pro Woche, ab denen Spotify
         // in der Folgewoche freigegeben ist (0 = aus).
         spotifyThresholdPoints: Number(sensor.attributes.spotify_threshold_points ?? 0),
+        // v1.2: Laptopzeit-Schwellen 1-4 (Wochenpunkte, 0 = aus) und die
+        // jeweils gewährten Minuten (fest 10/10/20/20, siehe
+        // LAPTOP_THRESHOLD_MINUTES in const.py).
+        laptopThresholds: (sensor.attributes.laptop_threshold_points ?? []).map(Number),
+        laptopMinutes: (sensor.attributes.laptop_threshold_minutes ?? []).map(Number),
       };
     }
 
@@ -4108,6 +4113,7 @@
         milestone ? milestone.threshold200Points : 0,
         milestone ? milestone.threshold150Points : 0,
         milestone ? milestone.spotifyThresholdPoints : 0,
+        ...(milestone && milestone.laptopThresholds ? milestone.laptopThresholds : []),
         goal,
         1
       );
@@ -4290,6 +4296,44 @@
               const spotifyBadgeHtml = spotifyPoints > 0
                 ? `<div class="bar-spotify-badge${spotifyReached ? " reached" : ""}" style="${spotifyStyle}" title="${esc(spotifyTitle)}"><ha-icon icon="mdi:spotify"></ha-icon></div>`
                 : "";
+              // v1.2: Laptopzeit-Schwellen - unter dem Balken (und unter der
+              // Punkteskala) steht an der Position jeder gesetzten Schwelle
+              // ein Laptop-Symbol mit der gewährten Minutenzahl. Nur bei
+              // Kindern, nur Schwellen > 0. "reached" = Schwelle diese Woche
+              // schon erreicht. Liegen zwei Einträge dichter als 12% der
+              // Balkenbreite beieinander, springt der spätere in eine zweite
+              // Zeile.
+              const laptopItems = milestone && member.role === "child"
+                ? (milestone.laptopThresholds || [])
+                    .map((points, index) => ({
+                      points: Number(points) || 0,
+                      minutes: Number((milestone.laptopMinutes || [])[index]) || 0,
+                    }))
+                    .filter((e) => e.points > 0 && e.minutes > 0)
+                : [];
+              let laptopLastLeft = -100;
+              let laptopLastRow = 0;
+              let laptopMaxRow = 0;
+              const laptopItemsHtml = laptopItems
+                .map((e) => {
+                  const left = barPos(e.points);
+                  const row = left - laptopLastLeft < 12 && laptopLastRow === 0 ? 1 : 0;
+                  laptopLastLeft = left;
+                  laptopLastRow = row;
+                  laptopMaxRow = Math.max(laptopMaxRow, row);
+                  const reached = weekPoints >= e.points;
+                  const horizontal = left >= 99
+                    ? "right:0"
+                    : left <= 4
+                      ? "left:0"
+                      : `left:${left}%;transform:translateX(-50%)`;
+                  const title = `Laptopzeit: ab ${e.points} Pkt. pro Woche +${e.minutes} Min.${reached ? " - diese Woche schon erreicht" : ""}`;
+                  return `<span class="bar-laptop${reached ? " reached" : ""}" style="${horizontal};top:${row * 16}px" title="${esc(title)}"><ha-icon icon="mdi:laptop"></ha-icon>${esc(e.minutes)}</span>`;
+                })
+                .join("");
+              const laptopRowHtml = laptopItems.length
+                ? `<div class="bar-laptop-row" style="height:${(laptopMaxRow + 1) * 16}px">${laptopItemsHtml}</div>`
+                : "";
               // v0.68: die Schwellen als sichtbare Zahlen direkt unter dem
               // Balken (Malus-Schwellen, Wochenziel, beide Münz-Schwellen).
               // Liegen zwei Zahlen zu dicht beieinander (< 9% der
@@ -4443,6 +4487,7 @@
                       ${spotifyBadgeHtml}
                       ${carryBadgeHtml}
                     </div>
+                    ${laptopRowHtml}
                     ${balanceLine ? `<div class="balance">${balanceLine}</div>` : ""}
                     ${screenTimeBadge}
                   </div>
@@ -5581,6 +5626,15 @@
                               padding: 0 3px; cursor: default; }
         .bar-spotify-badge ha-icon { --mdc-icon-size: 12px; width: 12px; height: 12px; }
         .bar-spotify-badge.reached { color: #1db954; border-color: #1db954; }
+        /* v1.2: Laptopzeit-Schwellen - Zeile unter dem Balken, je Schwelle ein
+           Laptop-Symbol mit der gewährten Minutenzahl; hervorgehoben, sobald
+           die Schwelle diese Woche erreicht ist. */
+        .bar-laptop-row { position: relative; margin-top: -6px; margin-bottom: 4px; }
+        .bar-laptop { position: absolute; display: inline-flex; align-items: center; gap: 1px;
+                       font-size: 0.65em; line-height: 1; white-space: nowrap;
+                       color: var(--secondary-text-color); pointer-events: none; }
+        .bar-laptop ha-icon { --mdc-icon-size: 13px; width: 13px; height: 13px; }
+        .bar-laptop.reached { color: var(--primary-color); font-weight: 700; }
         .bar-milestone-badge.slot1 { border-color: #b0bec5; }
         .bar-milestone-badge.slot2 { border-color: #ffc107; }
         .bar-milestone-badge.slot1 .coin { filter: grayscale(1) brightness(1.15); }

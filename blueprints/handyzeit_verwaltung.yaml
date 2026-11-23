@@ -64,6 +64,15 @@ blueprint:
     Plus-Uhrzeit des Tages (v0.67.1) - vorher bleibt das Limit nach dem
     Reset um Mitternacht unangetastet.
 
+    Optional (neu, v1.2) wird der Ausgleich nur noch für den Fehlbetrag
+    gutgeschrieben, der über zwei aufeinanderfolgende 5-Minuten-Prüfungen
+    bestanden hat: gutgeschrieben wird das Minimum aus dem Bedarf der
+    vorherigen und der aktuellen Prüfung ("family_tasks: Ausgleich - letzter
+    Bedarf" unten). Die erste Prüfung eines Tages schreibt nie gut; ein
+    nur kurz auftretender Fehlbetrag (z. B. weil die beiden Datenquellen
+    zu unterschiedlichen Zeiten aktualisieren) wird so nicht gutgeschrieben.
+    Ohne diesen Helfer gilt unverändert die sofortige Gutschrift.
+
     Optional (neu, v0.70) schaltet das Blueprint außerdem Spotify frei oder
     sperrt es: jeden Montag um 00:20 Uhr liest es den family_tasks-Sensor
     "Spotify freigegeben" dieses Kindes (binary_sensor.<name>_spotify_freigegeben).
@@ -357,6 +366,21 @@ blueprint:
           mode: box
           step: 1
 
+    correction_pending_helper:
+      name: "family_tasks: Ausgleich - letzter Bedarf (optional, v1.2)"
+      description: >-
+        Ein input_number, in dem die Automatisierung den nach der letzten
+        Prüfung noch offenen Fehlbetrag merkt. Gutgeschrieben wird nur das
+        Minimum aus diesem Wert und dem aktuellen Fehlbetrag, d. h. nur
+        Fehlbetrag, der bei zwei Prüfungen in Folge bestanden hat. Wird um
+        Mitternacht und bei fehlenden/veralteten Sensordaten auf 0 gesetzt.
+        Empfohlen: Minimum 0, Maximum 1440, Schrittweite 1. Leer lassen für
+        die bisherige sofortige Gutschrift.
+      default: ""
+      selector:
+        entity:
+          domain: input_number
+
     spotify_unlock_sensor:
       name: "family_tasks: Spotify-freigegeben-Sensor (optional, v0.70)"
       description: >-
@@ -422,6 +446,7 @@ actions:
       always_allowed_apps_sensor: !input always_allowed_apps_sensor
       correction_credited_helper: !input correction_credited_helper
       correction_count_helper: !input correction_count_helper
+      correction_pending_helper: !input correction_pending_helper
       correction_min_gap_minutes: !input correction_min_gap_minutes
       plus_times: !input plus_times
       spotify_unlock_sensor: !input spotify_unlock_sensor
@@ -567,6 +592,17 @@ actions:
               - condition: template
                 value_template: "{{ not data_valid }}"
             then:
+              # v1.2: ohne frische Daten gilt der gemerkte Bedarf nicht mehr -
+              # zwei gültige Prüfungen in Folge sind nötig.
+              - if:
+                  - condition: template
+                    value_template: "{{ correction_pending_helper | default('') != '' }}"
+                then:
+                  - action: input_number.set_value
+                    target:
+                      entity_id: "{{ correction_pending_helper }}"
+                    data:
+                      value: 0
               - stop: "Ausgleich übersprungen: Sensordaten fehlen, sind nicht verfügbar oder stammen noch vom Vortag."
           - variables:
               allowed_pkgs: >-
@@ -581,8 +617,16 @@ actions:
               gap_now: "{{ [google_used_minutes - relevant_minutes, 0] | max }}"
               already_credited: "{{ states(correction_credited_helper) | float(0) | round(0) | int(0) }}"
               open_gap: "{{ gap_now - already_credited }}"
+              # v1.2: nur der Fehlbetrag, der schon bei der vorherigen Prüfung
+              # bestand, wird gutgeschrieben (Minimum aus gemerktem und
+              # aktuellem Bedarf). Ohne Helfer: wie bisher sofort.
+              correction_need_now: "{{ [open_gap, 0] | max }}"
+              correction_prev_need: >-
+                {{ (states(correction_pending_helper) | float(0) | round(0) | int(0))
+                   if correction_pending_helper | default('') != '' else correction_need_now }}
+              correction_confirmed: "{{ [correction_prev_need, correction_need_now] | min }}"
               correction_delta: >-
-                {{ open_gap if open_gap >= (correction_min_gap_minutes | int(1)) else 0 }}
+                {{ correction_confirmed if correction_confirmed >= (correction_min_gap_minutes | int(1)) else 0 }}
           - if:
               - condition: template
                 value_template: "{{ correction_delta > 0 }}"
@@ -596,7 +640,7 @@ actions:
                 target:
                   entity_id: "{{ correction_credited_helper }}"
                 data:
-                  value: "{{ gap_now }}"
+                  value: "{{ already_credited + correction_delta }}"
               - action: familylink.set_daily_limit
                 data:
                   entity_id: !input switch_entity
@@ -622,9 +666,20 @@ actions:
                     Fehlerhaft angerechnete Zeit ausgeglichen: +{{ correction_delta }}
                     Min. (Google used_minutes {{ google_used_minutes }}, zählende
                     Nutzung {{ relevant_minutes }} Min., heute insgesamt
-                    ausgeglichen {{ gap_now }} Min.; Limit-Sensor
+                    ausgeglichen {{ already_credited + correction_delta }} Min.; Limit-Sensor
                     {{ 'bestätigt' if (states(daily_limit_sensor) | int(0)) >= correction_new_limit else 'hat den neuen Wert noch nicht bestätigt' }}.)
                   entity_id: !input switch_entity
+          # v1.2: den nach dieser Prüfung noch offenen Bedarf für die nächste
+          # Prüfung merken (nach der Gutschrift).
+          - if:
+              - condition: template
+                value_template: "{{ correction_pending_helper | default('') != '' }}"
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: "{{ correction_pending_helper }}"
+                data:
+                  value: "{{ [correction_need_now - correction_delta, 1440] | min }}"
           - stop: >-
               Ende des Ausgleichs-Checks (Trigger "correction_check") -
               unabhängig von der normalen Tick-/Button-/Belohnungs-Logik unten.
@@ -666,6 +721,15 @@ actions:
               entity_id: "{{ correction_credited_helper }}"
             data:
               value: 0
+          - if:
+              - condition: template
+                value_template: "{{ correction_pending_helper | default('') != '' }}"
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: "{{ correction_pending_helper }}"
+                data:
+                  value: 0
 
   # Optional (testweise): denselben Wert zusätzlich in einen input_number
   # schreiben - siehe available_time_counter oben.

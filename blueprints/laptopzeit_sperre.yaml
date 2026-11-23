@@ -1,0 +1,105 @@
+blueprint:
+  name: Laptopzeit Sperre (Family Tasks)
+  description: >
+    Sperrt den Laptop eines Kindes (Family-Link-Schalter), sobald die heute
+    genutzte Laptopzeit die von Family Tasks erlaubte Laptopzeit erreicht hat
+    (Sensor "<Name> Laptopzeit"). Das echte Google-Limit (z. B. 60 Minuten)
+    bleibt unverändert als Obergrenze; diese Automation wirkt nur zusätzlich.
+
+    Um Mitternacht wird der Laptop wieder entsperrt. Ist der Sensor für die
+    erlaubte Zeit nicht verfügbar (z. B. keine Schwellen konfiguriert), tut die
+    Automation nichts.
+  domain: automation
+  input:
+    child_name:
+      name: Name des Kindes
+      description: Nur für die Logbucheinträge.
+      selector:
+        text:
+    laptop_switch:
+      name: Laptop-Schalter (Family Link)
+      selector:
+        entity:
+          domain: switch
+    laptop_screen_time_sensor:
+      name: Laptop Screen-Time-Sensor (Family Link)
+      description: Sensor mit dem Attribut used_minutes (z. B. sensor.chrome_os_screen_time_remaining).
+      selector:
+        entity:
+          domain: sensor
+    allowed_minutes_sensor:
+      name: Erlaubte Laptopzeit (Family Tasks)
+      description: Sensor "<Name> Laptopzeit" der Integration Family Tasks (Minuten pro Tag).
+      selector:
+        entity:
+          domain: sensor
+
+mode: queued
+max_exceeded: silent
+
+variables:
+  child_name: !input child_name
+  laptop_switch: !input laptop_switch
+  laptop_screen_time_sensor: !input laptop_screen_time_sensor
+  allowed_minutes_sensor: !input allowed_minutes_sensor
+
+trigger:
+  - platform: time
+    at: "00:00:00"
+    id: unlock
+  - platform: time_pattern
+    minutes: "/5"
+    id: check
+  - platform: state
+    entity_id: !input laptop_screen_time_sensor
+    id: check
+  - platform: state
+    entity_id: !input allowed_minutes_sensor
+    id: check
+
+action:
+  - variables:
+      allowed_raw: "{{ states(allowed_minutes_sensor) }}"
+      allowed_ok: "{{ allowed_raw not in ['unknown', 'unavailable', 'none', ''] and allowed_raw | float(-1) >= 0 }}"
+      allowed: "{{ allowed_raw | float(0) | round(0) | int }}"
+      used_attr: "{{ state_attr(laptop_screen_time_sensor, 'used_minutes') }}"
+      used_ok: >-
+        {{ used_attr is not none
+           and states(laptop_screen_time_sensor) not in ['unknown', 'unavailable']
+           and states[laptop_screen_time_sensor].last_updated | as_local >= today_at('00:00') }}
+      used: "{{ used_attr | float(0) | round(0) | int }}"
+  - choose:
+      # Mitternacht: wieder entsperren
+      - conditions:
+          - condition: trigger
+            id: unlock
+          - condition: template
+            value_template: "{{ allowed_ok }}"
+          - condition: template
+            value_template: "{{ is_state(laptop_switch, 'off') }}"
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input laptop_switch
+          - service: logbook.log
+            data:
+              name: "Laptopzeit {{ child_name }}"
+              message: "Laptop um Mitternacht wieder entsperrt."
+      # Prüfung: erlaubte Zeit verbraucht -> sperren
+      - conditions:
+          - condition: trigger
+            id: check
+          - condition: template
+            value_template: "{{ allowed_ok and used_ok }}"
+          - condition: template
+            value_template: "{{ is_state(laptop_switch, 'on') }}"
+          - condition: template
+            value_template: "{{ used >= allowed }}"
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input laptop_switch
+          - service: logbook.log
+            data:
+              name: "Laptopzeit {{ child_name }}"
+              message: "Laptop gesperrt: {{ used }} von {{ allowed }} erlaubten Minuten verbraucht."
